@@ -13,6 +13,7 @@ interface Shipment {
   _id: string;
   kind: 'import' | 'transfer';
   status: 'on_water' | 'delivered';
+  owNumber?: string;
   reference?: string;
   warehouseId: string;
   sourceWarehouseId?: string;
@@ -31,7 +32,10 @@ export default function Ship() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(10);
   const [rowCount, setRowCount] = useState(0);
-  const [q, setQ] = useState('');
+  const [qRef, setQRef] = useState('');
+  const [qPallet, setQPallet] = useState('');
+  const [eddFrom, setEddFrom] = useState('');
+  const [eddTo, setEddTo] = useState('');
   const [exporting, setExporting] = useState(false);
   const [exportingRowId, setExportingRowId] = useState<string>('');
   const nameOf = useMemo(()=>{
@@ -51,7 +55,10 @@ export default function Ship() {
     try {
       const params: any = { page, pageSize };
       if (filter) params.status = filter;
-      if (q.trim()) params.q = q.trim();
+      if (qRef.trim()) params.qRef = qRef.trim();
+      if (qPallet.trim()) params.qPallet = qPallet.trim();
+      if (eddFrom) params.eddFrom = eddFrom;
+      if (eddTo) params.eddTo = eddTo;
       const { data } = await api.get('/shipments', { params });
       setRows((data?.items || []) as Shipment[]);
       setRowCount(Number(data?.total || 0));
@@ -108,16 +115,13 @@ export default function Ship() {
   };
 
   const columns: GridColDef[] = [
-    { field: 'reference', headerName: 'Reference', width: 220, renderCell: (params: GridRenderCellParams) => {
+    { field: 'owNumber', headerName: 'Reference', width: 180, renderCell: (params: GridRenderCellParams) => {
       const r: any = params?.row || {};
-      const ref = r.reference || r._id || '-';
-      // For transfer created from Transfer page, display PO formatting
-      if (r.kind === 'transfer' && r.reference) {
-        return <span>{`PO - ${r.reference}`}</span>;
-      }
-      // For import created from On-Process, keep PO formatting
-      const text = r.kind === 'import' && r.reference ? `PO - ${r.reference}` : ref;
-      return <span>{text}</span>;
+      return <span>{String(r.owNumber || '-')}</span>;
+    } },
+    { field: 'reference', headerName: 'PO#', width: 220, renderCell: (params: GridRenderCellParams) => {
+      const r: any = params?.row || {};
+      return <span>{String(r.reference || '-')}</span>;
     } },
     { field: 'kind', headerName: 'Kind', width: 110, renderCell: (params: GridRenderCellParams) => {
       const r: any = params?.row || {};
@@ -157,7 +161,8 @@ export default function Ship() {
           const isFromOnProcess = row.kind === 'import' && typeof row.notes === 'string' && row.notes.toLowerCase().includes('on-process');
           const exportKind = isFromOnProcess ? 'on-process' : (row.kind || '');
           const metaRows = [
-            ['Reference', row.reference || row._id || ''],
+            ['Reference', row.owNumber || row._id || ''],
+            ['PO#', row.reference || ''],
             ['Kind', exportKind],
             ['Status', row.status || ''],
             ['To Warehouse', toName || ''],
@@ -216,7 +221,7 @@ export default function Ship() {
           const pad = (n:number)=> n.toString().padStart(2,'0');
           const d = new Date();
           const ts = `${d.getFullYear()}${pad(d.getMonth()+1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
-          const fname = `shipment-pallets-${row.reference || row._id}-(${row.status || ''})-(${toName})-(${ts}).xlsx`;
+          const fname = `shipment-pallets-${row.owNumber || row.reference || row._id}-(${row.status || ''})-(${toName})-(${ts}).xlsx`;
           XLSX.writeFile(wb, fname);
         } finally {
           setExportingRowId('');
@@ -289,14 +294,59 @@ export default function Ship() {
     <Container sx={{ mt: 4 }}>
       <Typography variant="h4" gutterBottom>Shipments</Typography>
       <Paper sx={{ p:2, mb:2 }}>
-        <Stack direction={{ xs:'column', sm:'row' }} spacing={2} alignItems="center">
-          <TextField select size="small" label="Status" value={filter} onChange={(e)=> setFilter(e.target.value as any)} sx={{ minWidth: 180 }}>
+        <Stack
+          direction="row"
+          spacing={2}
+          alignItems="center"
+          sx={{ flexWrap: 'wrap', rowGap: 2 }}
+        >
+          <TextField
+            select
+            size="small"
+            label="Status"
+            value={filter}
+            onChange={(e)=> setFilter(e.target.value as any)}
+            sx={{ minWidth: 180, flex: '0 0 auto' }}
+          >
             <MenuItem value="">All</MenuItem>
             <MenuItem value="on_water">On Water</MenuItem>
             <MenuItem value="delivered">Delivered</MenuItem>
           </TextField>
-          <TextField size="small" label="Search (Ref/Item Code)" value={q} onChange={(e)=> setQ(e.target.value)} onKeyDown={(e)=>{ if (e.key==='Enter') { setPage(0); load(); } }} sx={{ minWidth: 260 }} />
-          <Button variant="outlined" onClick={()=>{ setPage(0); load(); }}>Search</Button>
+          <TextField
+            size="small"
+            label="Search / Reference/PO#"
+            value={qRef}
+            onChange={(e)=> setQRef(e.target.value)}
+            onKeyDown={(e)=>{ if (e.key==='Enter') { setPage(0); load(); } }}
+            sx={{ minWidth: 240, flex: '1 1 260px' }}
+          />
+          <TextField
+            size="small"
+            label="Search / Pallet Description"
+            value={qPallet}
+            onChange={(e)=> setQPallet(e.target.value)}
+            onKeyDown={(e)=>{ if (e.key==='Enter') { setPage(0); load(); } }}
+            sx={{ minWidth: 240, flex: '1 1 260px' }}
+          />
+          <TextField
+            type="date"
+            size="small"
+            label="EDD From"
+            InputLabelProps={{ shrink: true }}
+            value={eddFrom}
+            onChange={(e)=> setEddFrom(e.target.value)}
+            sx={{ minWidth: 170, flex: '0 0 auto' }}
+          />
+          <TextField
+            type="date"
+            size="small"
+            label="EDD To"
+            InputLabelProps={{ shrink: true }}
+            value={eddTo}
+            onChange={(e)=> setEddTo(e.target.value)}
+            sx={{ minWidth: 170, flex: '0 0 auto' }}
+          />
+          <Button variant="outlined" onClick={()=>{ setPage(0); load(); }} sx={{ flex: '0 0 auto' }}>Search</Button>
         </Stack>
       </Paper>
       <Paper sx={{ p:1 }}>

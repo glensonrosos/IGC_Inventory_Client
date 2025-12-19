@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Container, Typography, Paper, Stack, TextField, Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions, LinearProgress, MenuItem, Box, Chip } from '@mui/material';
 import Autocomplete from '@mui/material/Autocomplete';
 import DeleteIcon from '@mui/icons-material/Delete';
-import { DataGrid, GridColDef } from '@mui/x-data-grid';
+import { DataGrid, GridColDef, GridToolbar } from '@mui/x-data-grid';
 import api from '../api';
 import { useToast } from '../components/ToastProvider';
 
@@ -46,6 +46,14 @@ export default function Orders() {
   const [detailsCreatedAtOrder, setDetailsCreatedAtOrder] = useState('');
   const [detailsEstFulfillment, setDetailsEstFulfillment] = useState('');
   const [detailsShippingAddress, setDetailsShippingAddress] = useState('');
+  const [detailsLines, setDetailsLines] = useState<Array<{ groupName: string; lineItem: string; qty: number }>>([]);
+  const [detailsLinesTouched, setDetailsLinesTouched] = useState(false);
+  const [detailsPickOpen, setDetailsPickOpen] = useState(false);
+  const [detailsPickLoading, setDetailsPickLoading] = useState(false);
+  const [detailsPickQ, setDetailsPickQ] = useState('');
+  const [detailsPickRows, setDetailsPickRows] = useState<any[]>([]);
+  const [detailsPickWarehouses, setDetailsPickWarehouses] = useState<Array<{ _id: string; name: string }>>([]);
+  const [detailsPickSelected, setDetailsPickSelected] = useState<any>({ type: 'include', ids: new Set() });
   const [csvOpen, setCsvOpen] = useState(false);
   const [csvWarehouseId, setCsvWarehouseId] = useState('');
   const [csvFile, setCsvFile] = useState<File | null>(null);
@@ -70,17 +78,154 @@ export default function Orders() {
   const [manualAvailable, setManualAvailable] = useState<Record<string, number>>({});
   const [manualValidationErrors, setManualValidationErrors] = useState<string[]>([]);
 
+  const [manualPickerLoading, setManualPickerLoading] = useState(false);
+  const [manualPickerQ, setManualPickerQ] = useState('');
+  const [manualPickerWarehouses, setManualPickerWarehouses] = useState<Array<{ _id: string; name: string }>>([]);
+  const [manualPickerRows, setManualPickerRows] = useState<any[]>([]);
+  const [manualOrderQtyByGroup, setManualOrderQtyByGroup] = useState<Record<string, string>>({});
+  const [manualShipdateTouched, setManualShipdateTouched] = useState(false);
+  const [manualPickOpen, setManualPickOpen] = useState(false);
+  const [manualPickSelected, setManualPickSelected] = useState<any>({ type: 'include', ids: new Set() });
+  const [manualOrderGroups, setManualOrderGroups] = useState<string[]>([]);
+
   const fixedWarehouseId = useMemo(() => {
     const wh = Array.isArray(warehouses) ? warehouses : [];
     const preferred = wh.find((w) => String(w?.name || '').trim().toLowerCase() === 'mpg planters');
     return String((preferred || wh[0] || ({} as any))._id || '');
   }, [warehouses]);
 
+  const manualWarehouseName = useMemo(() => {
+    const wh = Array.isArray(warehouses) ? warehouses : [];
+    const found = wh.find((w) => String(w?._id || '') === String(manualWarehouseId));
+    return String(found?.name || '').trim();
+  }, [warehouses, manualWarehouseId]);
+
+  const manualPickerRowsFiltered = useMemo(() => {
+    const q = String(manualPickerQ || '').trim().toLowerCase();
+    const rows = Array.isArray(manualPickerRows) ? manualPickerRows : [];
+    if (!q) return rows;
+    return rows.filter((r: any) => {
+      const gid = String(r?.lineItem || '').toLowerCase();
+      const gname = String(r?.groupName || '').toLowerCase();
+      return gid.includes(q) || gname.includes(q);
+    });
+  }, [manualPickerRows, manualPickerQ]);
+
+  const manualPickerRowByGroup = useMemo(() => {
+    return new Map((Array.isArray(manualPickerRows) ? manualPickerRows : []).map((r: any) => [String(r?.groupName || '').trim(), r]));
+  }, [manualPickerRows]);
+
+  const manualOrderRows = useMemo(() => {
+    return (manualOrderGroups || [])
+      .map((g) => {
+        const r: any = manualPickerRowByGroup.get(String(g)) || {};
+        return { id: String(g), ...r, groupName: String(g) };
+      })
+      .filter((r) => String(r.groupName || '').trim());
+  }, [manualOrderGroups, manualPickerRowByGroup]);
+
   const isValidEmail = (email: string) => {
     const s = String(email || '').trim();
     if (!s) return false;
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
   };
+
+  const suggestShipdateForSelection = useMemo(() => {
+    const today = todayYmd;
+    const rowsByGroup = new Map((manualPickerRows || []).map((r: any) => [String(r.groupName || ''), r]));
+    const toYmd = (s: any) => {
+      const v = String(s || '').slice(0, 10);
+      return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : '';
+    };
+    const addDays = (ymd: string, days: number) => {
+      const base = toYmd(ymd);
+      if (!base) return '';
+      const d = new Date(`${base}T00:00:00.000Z`);
+      if (Number.isNaN(d.getTime())) return '';
+      d.setUTCDate(d.getUTCDate() + days);
+      return d.toISOString().slice(0, 10);
+    };
+    const maxYmd = (a: string, b: string) => {
+      if (!a) return b;
+      if (!b) return a;
+      return a > b ? a : b;
+    };
+
+    return () => {
+      let overall = '';
+      const entries = Object.entries(manualOrderQtyByGroup || {});
+      for (const [groupName, qtyStr] of entries) {
+        const qty = Math.floor(Number(qtyStr || 0));
+        if (!Number.isFinite(qty) || qty <= 0) continue;
+        const r: any = rowsByGroup.get(String(groupName)) || {};
+        const availThis = Number(r?.selectedWarehouseAvailable || 0);
+        const queued = Number(r?.queuedPallets || 0);
+        const ow = toYmd(r?.onWaterEdd);
+        const op = toYmd(r?.onProcessEdd);
+        // 2.5 months approx = 75 days
+        const owPlus25 = ow ? addDays(ow, 75) : '';
+        const opPlus25 = op ? addDays(op, 75) : '';
+
+        // Effective demand includes existing queue
+        const effective = qty + Math.max(0, queued);
+
+        // Hierarchy:
+        // THIS warehouse -> on-water (EDD) -> transfer warehouse (auto set +2.5 months) -> on-process (EDD + 2.5 months)
+        let suggested = today;
+        if (effective <= availThis) {
+          suggested = today;
+        } else {
+          // If this order spills beyond local availability, choose tier based on what's available first.
+          // Note: we don't have an explicit "on-water qty" consumption model with multiple shipments,
+          // so we treat any spill beyond local as at least on-water, then further spill as transfer, then on-process.
+          const owQty = Math.max(0, Number(r?.onWaterPallets || 0));
+          const opQty = Math.max(0, Number(r?.onProcessPallets || 0));
+          const afterThis = Math.max(0, effective - availThis);
+          if (afterThis <= owQty) {
+            suggested = ow || today;
+          } else if (afterThis <= owQty + Math.max(0, Number(r?.perWarehouse ? Object.values(r.perWarehouse).reduce((a: any, b: any) => Number(a) + Number(b), 0) : 0) - availThis)) {
+            // transfer warehouse tier: we approximate transfer supply as "other warehouses available".
+            suggested = owPlus25 || (ow || today);
+          } else if (afterThis <= owQty + Math.max(0, Number(r?.perWarehouse ? Object.values(r.perWarehouse).reduce((a: any, b: any) => Number(a) + Number(b), 0) : 0) - availThis) + opQty) {
+            suggested = opPlus25 || (op || owPlus25 || ow || today);
+          } else {
+            suggested = opPlus25 || (op || owPlus25 || ow || today);
+          }
+        }
+        overall = maxYmd(overall, suggested);
+      }
+      return overall || today;
+    };
+  }, [manualOrderQtyByGroup, manualPickerRows, todayYmd]);
+
+  const getRowSupplySource = (row: any) => {
+    const availThis = Math.max(0, Number(row?.selectedWarehouseAvailable || 0));
+    const queued = Math.max(0, Number(row?.queuedPallets || 0));
+    const qty = Math.floor(Number((manualOrderQtyByGroup || {})[String(row?.groupName || '')] || 0));
+    const effective = qty + queued;
+    if (!Number.isFinite(qty) || qty <= 0) return '';
+
+    const owQty = Math.max(0, Number(row?.onWaterPallets || 0));
+    const opQty = Math.max(0, Number(row?.onProcessPallets || 0));
+    const per = row?.perWarehouse || {};
+    const totalAll = Object.values(per).reduce((a: any, b: any) => Number(a) + Number(b), 0);
+    const otherWh = Math.max(0, Number(totalAll) - availThis);
+    const afterThis = Math.max(0, effective - availThis);
+    if (effective <= availThis) return 'THIS';
+    if (afterThis <= owQty) return 'ON-WATER';
+    if (afterThis <= owQty + otherWh) return 'TRANSFER';
+    if (afterThis <= owQty + otherWh + opQty) return 'ON-PROCESS';
+    return 'ON-PROCESS';
+  };
+
+  useEffect(() => {
+    if (!manualOpen) return;
+    if (manualShipdateTouched) return;
+    const next = suggestShipdateForSelection();
+    if (next && next !== manualEstFulfillment) {
+      setManualEstFulfillment(next);
+    }
+  }, [manualOpen, manualShipdateTouched, manualOrderQtyByGroup, suggestShipdateForSelection, manualEstFulfillment]);
 
   const normalizeManualLine = (v: any) => String(v || '').trim();
   const getActiveManualOptions = () => (manualLineMode === 'pallet_group' ? manualPalletGroupOptions : manualLineItemOptions);
@@ -146,8 +291,32 @@ export default function Orders() {
     setDetailsShippingAddress(String(row.shippingAddress || ''));
     setDetailsEstFulfillment(row.estFulfillmentDate ? String(row.estFulfillmentDate).slice(0, 10) : '');
     setDetailsCreatedAtOrder(row.createdAtOrder ? String(row.createdAtOrder).slice(0, 10) : '');
+    setDetailsLines(
+      (row.lines || []).map((l: any) => ({
+        groupName: String(l?.groupName || ''),
+        lineItem: String(l?.lineItem || ''),
+        qty: Number(l?.qty || 0),
+      })).filter((l) => String(l.groupName || '').trim())
+    );
+    setDetailsLinesTouched(false);
+    setDetailsPickOpen(false);
+    setDetailsPickQ('');
+    setDetailsPickRows([]);
+    setDetailsPickWarehouses([]);
+    setDetailsPickSelected({ type: 'include', ids: new Set() });
     setDetailsOpen(true);
   };
+
+  const detailsPickRowsFiltered = useMemo(() => {
+    const q = String(detailsPickQ || '').trim().toLowerCase();
+    const rows = Array.isArray(detailsPickRows) ? detailsPickRows : [];
+    if (!q) return rows;
+    return rows.filter((r: any) => {
+      const gid = String(r?.lineItem || '').toLowerCase();
+      const gname = String(r?.groupName || '').toLowerCase();
+      return gid.includes(q) || gname.includes(q);
+    });
+  }, [detailsPickRows, detailsPickQ]);
 
   const saveDetailsStatus = async () => {
     if (!detailsRow) return;
@@ -170,6 +339,11 @@ export default function Orders() {
 
       const rawId = encodeURIComponent(detailsRow.rawId);
       if (detailsRow.id.startsWith('manual:')) {
+        const canEditLines = normalizeStatus(detailsRow.status || '') !== 'fulfilled';
+        const shouldSendLines = canEditLines && detailsLinesTouched;
+        const payloadLines = (detailsLines || [])
+          .map((l) => ({ search: String(l.groupName || l.lineItem || ''), qty: Math.floor(Number(l.qty || 0)) }))
+          .filter((l) => String(l.search || '').trim() && Number.isFinite(l.qty) && l.qty > 0);
         // If transitioning to fulfilled, update details first (otherwise the server locks details updates).
         if (next === 'fulfilled' && prev !== 'fulfilled') {
           await api.put(`/orders/unfulfilled/${rawId}`, {
@@ -178,6 +352,7 @@ export default function Orders() {
             customerPhone: detailsCustomerPhone,
             estFulfillmentDate: detailsEstFulfillment || null,
             shippingAddress: detailsShippingAddress,
+            ...(shouldSendLines ? { lines: payloadLines } : {}),
           });
           await api.put(`/orders/unfulfilled/${rawId}/status`, { status: next });
         } else {
@@ -188,6 +363,7 @@ export default function Orders() {
             customerPhone: detailsCustomerPhone,
             estFulfillmentDate: detailsEstFulfillment || null,
             shippingAddress: detailsShippingAddress,
+            ...(shouldSendLines ? { lines: payloadLines } : {}),
           });
         }
       } else {
@@ -418,17 +594,38 @@ export default function Orders() {
   const openManual = async () => {
     setManualOpen(true);
     setManualWarehouseId(fixedWarehouseId);
-    setManualStatus('create');
+    setManualStatus('backorder');
     setManualCustomerEmail('');
     setManualCustomerName('');
     setManualCustomerPhone('');
     setManualCreatedAt(new Date().toISOString().slice(0, 10));
     setManualEstFulfillment('');
+    setManualShipdateTouched(false);
     setManualShippingAddress('');
     setManualLineMode('pallet_group');
     setManualLines([{ lineItem: '', qty: '' }]);
     setManualAvailable({});
     setManualValidationErrors([]);
+    setManualPickerQ('');
+    setManualPickerRows([]);
+    setManualPickerWarehouses([]);
+    setManualOrderQtyByGroup({});
+    setManualPickOpen(false);
+    setManualPickSelected({ type: 'include', ids: new Set() });
+    setManualOrderGroups([]);
+    try {
+      if (fixedWarehouseId) {
+        setManualPickerLoading(true);
+        const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: fixedWarehouseId } });
+        setManualPickerRows(Array.isArray(data?.rows) ? data.rows : []);
+        setManualPickerWarehouses(Array.isArray(data?.warehouses) ? data.warehouses : []);
+      }
+    } catch {
+      setManualPickerRows([]);
+      setManualPickerWarehouses([]);
+    } finally {
+      setManualPickerLoading(false);
+    }
     try {
       const { data } = await api.get<any[]>('/item-groups');
       const palletGroups = (Array.isArray(data) ? data : [])
@@ -527,23 +724,21 @@ export default function Orders() {
       errs.push('Shipping Address is required');
     }
 
-    const parsed = manualLines
-      .map((l) => ({ lineItem: String(l.lineItem || '').trim(), qty: Number(l.qty) }))
-      .filter((l) => l.lineItem);
+    const allowed = new Set((manualOrderGroups || []).map((g) => String(g).trim().toLowerCase()).filter((v) => v));
+    const parsed = Object.entries(manualOrderQtyByGroup || {})
+      .map(([groupName, qtyStr]) => ({
+        groupName: String(groupName || '').trim(),
+        qty: Math.floor(Number(qtyStr || 0)),
+      }))
+      .filter((l) => l.groupName && allowed.has(l.groupName.toLowerCase()) && Number.isFinite(l.qty) && l.qty > 0);
     if (!parsed.length) {
       errs.push('At least 1 Pallet ID is required');
     }
-    for (const l of parsed) {
-      if (!Number.isFinite(l.qty) || l.qty <= 0) {
-        errs.push('Qty must be > 0');
-        break;
-      }
-    }
     const seen = new Set<string>();
     for (const l of parsed) {
-      const k = l.lineItem.toLowerCase();
+      const k = l.groupName.toLowerCase();
       if (seen.has(k)) {
-        errs.push(`Duplicate Pallet ID: ${l.lineItem}`);
+        errs.push(`Duplicate Pallet Description: ${l.groupName}`);
         break;
       }
       seen.add(k);
@@ -557,47 +752,17 @@ export default function Orders() {
 
     // Client-side availability check (server also enforces)
     // For backorder, allow negative stock, so skip this check.
-    if (manualStatus !== 'backorder') {
-      try {
-        const byLineItem = new Map<string, string>();
-        const { data } = await api.get<any[]>('/item-groups');
-        (Array.isArray(data) ? data : []).forEach((g: any) => {
-          const groupName = String(g?.name || '').trim();
-          const li = String(g?.lineItem || '').trim();
-          if (li && groupName) byLineItem.set(li.toLowerCase(), groupName);
-          if (groupName) byLineItem.set(groupName.toLowerCase(), groupName);
-        });
-        const needs = new Map<string, number>();
-        for (const l of parsed) {
-          const group = byLineItem.get(String(l.lineItem || '').toLowerCase()) || '';
-          if (!group) continue;
-          needs.set(group, (needs.get(group) || 0) + (Number(l.qty) || 0));
-        }
-        const insufficient: string[] = [];
-        for (const [groupName, qty] of needs.entries()) {
-          const avail = Number(manualAvailable[groupName] || 0);
-          if (avail < qty) insufficient.push(`${groupName} (need ${qty}, available ${avail})`);
-        }
-        if (insufficient.length) {
-          setManualValidationErrors(insufficient.map((s) => `Insufficient stock: ${s}`));
-          toast.error(`Insufficient stock in selected warehouse for: ${insufficient.join(', ')}`);
-          return;
-        }
-      } catch {
-        // If item-groups fetch fails, rely on server validation
-      }
-    }
     try {
       await api.post('/orders/unfulfilled', {
         warehouseId: manualWarehouseId,
-        status: manualStatus,
+        status: 'backorder',
         customerEmail: manualCustomerEmail.trim(),
         customerName: manualCustomerName.trim(),
         customerPhone: manualCustomerPhone.trim(),
         createdAtOrder: manualCreatedAt || undefined,
         estFulfillmentDate: manualEstFulfillment || undefined,
         shippingAddress: manualShippingAddress.trim(),
-        lines: parsed.map((l) => ({ search: l.lineItem, qty: l.qty })),
+        lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty })),
       });
       toast.success('Order created');
       setManualOpen(false);
@@ -764,24 +929,194 @@ export default function Orders() {
 
               <Box>
                 <Typography variant="subtitle2" sx={{ mb: 1 }}>Pallet IDs</Typography>
+                {detailsRow.id.startsWith('manual:') && normalizeStatus(detailsRow.status || '') !== 'fulfilled' ? (
+                  <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ xs: 'stretch', sm: 'center' }} sx={{ mb: 1 }}>
+                    <Button variant="outlined" onClick={async ()=>{
+                      try {
+                        setDetailsPickOpen(true);
+                        setDetailsPickQ('');
+                        setDetailsPickSelected({ type: 'include', ids: new Set() });
+                        setDetailsPickLoading(true);
+                        const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: detailsRow.warehouseId } });
+                        setDetailsPickRows(Array.isArray(data?.rows) ? data.rows : []);
+                        setDetailsPickWarehouses(Array.isArray(data?.warehouses) ? data.warehouses : []);
+                      } catch {
+                        setDetailsPickRows([]);
+                        setDetailsPickWarehouses([]);
+                      } finally {
+                        setDetailsPickLoading(false);
+                      }
+                    }}>Add to list</Button>
+                    <Box sx={{ flex: 1 }} />
+                  </Stack>
+                ) : null}
                 <div style={{ height: 260, width: '100%' }}>
                   <DataGrid
-                    rows={(detailsRow.lines || []).map((l: any, i: number) => ({
-                      id: i,
+                    rows={(detailsLines || []).map((l: any) => ({
+                      id: String(l.groupName || l.lineItem || ''),
                       groupName: String(l?.groupName || ''),
                       lineItem: String(l?.lineItem || ''),
                       qty: Number(l?.qty || 0),
                     }))}
-                    columns={([ 
-                      { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220 },
-                      { field: 'lineItem', headerName: 'Pallet ID', flex: 1, minWidth: 220 },
-                      { field: 'qty', headerName: 'Qty', width: 100, type: 'number' },
-                    ]) as GridColDef[]}
+                    columns={(() => {
+                      const base: any[] = [
+                        { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220 },
+                        { field: 'lineItem', headerName: 'Pallet ID', flex: 1, minWidth: 180 },
+                        {
+                          field: 'qty',
+                          headerName: 'Qty',
+                          width: 110,
+                          sortable: false,
+                          filterable: false,
+                          renderCell: (p: any) => {
+                            const disabled = !detailsRow.id.startsWith('manual:') || normalizeStatus(detailsRow.status || '') === 'fulfilled';
+                            const id = String(p?.row?.id || '');
+                            const val = String(p?.row?.qty ?? '');
+                            return (
+                              <TextField
+                                type="number"
+                                size="small"
+                                value={val}
+                                disabled={disabled}
+                                onChange={(e)=>{
+                                  const nextQty = Math.floor(Number(e.target.value || 0));
+                                  setDetailsLinesTouched(true);
+                                  setDetailsLines((prev)=> (prev || []).map((r)=> String(r.groupName || r.lineItem || '') === id ? { ...r, qty: nextQty } : r));
+                                }}
+                                inputProps={{ min: 0, step: 1 }}
+                                sx={{ width: 90 }}
+                              />
+                            );
+                          }
+                        },
+                      ];
+                      if (detailsRow.id.startsWith('manual:') && normalizeStatus(detailsRow.status || '') !== 'fulfilled') {
+                        base.push({
+                          field: 'remove',
+                          headerName: 'Remove',
+                          width: 110,
+                          sortable: false,
+                          filterable: false,
+                          renderCell: (p: any) => {
+                            const id = String(p?.row?.id || '');
+                            return (
+                              <Button size="small" color="error" onClick={()=>{
+                                setDetailsLinesTouched(true);
+                                setDetailsLines((prev)=> (prev || []).filter((r)=> String(r.groupName || r.lineItem || '') !== id));
+                              }}>Remove</Button>
+                            );
+                          },
+                        });
+                      }
+                      return base as GridColDef[];
+                    })()}
                     disableRowSelectionOnClick
                     density="compact"
-                    hideFooter
+                    slots={{ toolbar: GridToolbar }}
+                    slotProps={{ toolbar: { showQuickFilter: true, quickFilterProps: { debounceMs: 250 } } as any }}
+                    pagination
+                    pageSizeOptions={[5, 10, 20]}
+                    initialState={{ pagination: { paginationModel: { page: 0, pageSize: 5 } } }}
                   />
                 </div>
+
+                <Dialog open={detailsPickOpen} onClose={()=> setDetailsPickOpen(false)} fullWidth maxWidth="xl">
+                  <DialogTitle>Select Pallets</DialogTitle>
+                  <DialogContent>
+                    <Stack direction={{ xs:'column', sm:'row' }} spacing={2} alignItems={{ xs:'stretch', sm:'center' }} sx={{ mb: 1, mt: 1 }}>
+                      <TextField
+                        size="small"
+                        label="Search Pallet ID / Pallet Description"
+                        value={detailsPickQ}
+                        onChange={(e)=>setDetailsPickQ(e.target.value)}
+                        sx={{ flex: 1, minWidth: 260 }}
+                      />
+                      <Button variant="outlined" onClick={async ()=>{
+                        try {
+                          if (!detailsRow) return;
+                          setDetailsPickLoading(true);
+                          const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: detailsRow.warehouseId, q: detailsPickQ.trim() || undefined } });
+                          setDetailsPickRows(Array.isArray(data?.rows) ? data.rows : []);
+                          setDetailsPickWarehouses(Array.isArray(data?.warehouses) ? data.warehouses : []);
+                        } catch {
+                          setDetailsPickRows([]);
+                          setDetailsPickWarehouses([]);
+                        } finally {
+                          setDetailsPickLoading(false);
+                        }
+                      }} disabled={!detailsRow || detailsPickLoading}>Refresh</Button>
+                    </Stack>
+                    <div style={{ height: 520, width: '100%' }}>
+                      <DataGrid
+                        rows={(detailsPickRowsFiltered || []).map((r: any) => ({ id: String(r.groupName || r.lineItem || ''), ...r }))}
+                        columns={(() => {
+                          const cols: any[] = [
+                            { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
+                            { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
+                            { field: 'selectedWarehouseAvailable', headerName: `THIS`, width: 120, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
+                            { field: 'onWaterPallets', headerName: 'On-Water', width: 110, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.onWaterPallets ?? 0) },
+                            { field: 'onWaterEdd', headerName: 'On-Water EDD', width: 130, renderCell: (p: any) => String(p?.row?.onWaterEdd || '-') },
+                            { field: 'onProcessPallets', headerName: 'On-Process', width: 120, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.onProcessPallets ?? 0) },
+                            { field: 'onProcessEdd', headerName: 'On-Process EDD', width: 140, renderCell: (p: any) => String(p?.row?.onProcessEdd || '-') },
+                          ];
+                          for (const w of (detailsPickWarehouses || [])) {
+                            if (!detailsRow) continue;
+                            if (String(w?._id || '') === String(detailsRow.warehouseId)) continue;
+                            cols.push({
+                              field: `wh_${w._id}`,
+                              headerName: w.name,
+                              width: 120,
+                              type: 'number',
+                              align: 'right',
+                              headerAlign: 'right',
+                              valueGetter: (params: any) => {
+                                const per = (params?.row as any)?.perWarehouse || {};
+                                return Number(per?.[String(w._id)] ?? 0);
+                              },
+                            });
+                          }
+                          return cols;
+                        })()}
+                        loading={detailsPickLoading}
+                        checkboxSelection
+                        disableRowSelectionOnClick
+                        density="compact"
+                        slots={{ toolbar: GridToolbar }}
+                        slotProps={{ toolbar: { showQuickFilter: true, quickFilterProps: { debounceMs: 250 } } as any }}
+                        onRowSelectionModelChange={(m: any)=> setDetailsPickSelected(m)}
+                        rowSelectionModel={detailsPickSelected}
+                        pagination
+                        pageSizeOptions={[10, 20, 50, 100]}
+                        initialState={{ pagination: { paginationModel: { page: 0, pageSize: 20 } } }}
+                      />
+                    </div>
+                  </DialogContent>
+                  <DialogActions>
+                    <Button onClick={()=> setDetailsPickOpen(false)}>Cancel</Button>
+                    <Button variant="contained" onClick={()=>{
+                      const idsArr = detailsPickSelected?.ids ? Array.from(detailsPickSelected.ids) : [];
+                      const selected = new Set(idsArr.map((x)=> String(x)));
+                      const pickedRows = (detailsPickRows || [])
+                        .filter((r: any) => selected.has(String(r?.groupName || r?.lineItem || '')));
+                      if (pickedRows.length === 0) return;
+                      setDetailsLinesTouched(true);
+                      setDetailsLines((prev)=> {
+                        const base = Array.isArray(prev) ? prev : [];
+                        const byKey = new Map(base.map((b)=> [String(b.groupName || b.lineItem || ''), b]));
+                        for (const r of pickedRows) {
+                          const key = String(r?.groupName || r?.lineItem || '');
+                          if (!key) continue;
+                          if (!byKey.has(key)) {
+                            byKey.set(key, { groupName: String(r?.groupName || ''), lineItem: String(r?.lineItem || ''), qty: 1 });
+                          }
+                        }
+                        return Array.from(byKey.values());
+                      });
+                      setDetailsPickSelected({ type: 'include', ids: new Set() });
+                      setDetailsPickOpen(false);
+                    }} disabled={!(detailsPickSelected?.ids && detailsPickSelected.ids.size > 0)}>Add to Order</Button>
+                  </DialogActions>
+                </Dialog>
               </Box>
             </Stack>
           ) : null}
@@ -831,7 +1166,7 @@ export default function Orders() {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={manualOpen} onClose={()=>setManualOpen(false)} fullWidth maxWidth="md">
+      <Dialog open={manualOpen} onClose={()=>setManualOpen(false)} fullWidth maxWidth="xl">
         <DialogTitle>Add Order</DialogTitle>
         <DialogContent>
           <Stack direction={{ xs:'column', sm:'row' }} spacing={2} sx={{ mb: 2, mt: 1 }}>
@@ -840,18 +1175,7 @@ export default function Orders() {
                 <MenuItem key={w._id} value={w._id}>{w.name}</MenuItem>
               ))}
             </TextField>
-            <TextField
-              select
-              label="Status"
-              size="small"
-              sx={{ minWidth: 180 }}
-              value={manualStatus}
-              onChange={(e)=>setManualStatus(e.target.value as any)}
-              helperText={manualStatus === 'backorder' ? 'Backorder allows negative pallet stock' : 'Create requires sufficient stock'}
-            >
-              <MenuItem value="create">create</MenuItem>
-              <MenuItem value="backorder">backorder</MenuItem>
-            </TextField>
+            <TextField label="Status" size="small" sx={{ minWidth: 180 }} value={'backorder'} InputProps={{ readOnly: true }} helperText="Backorder allows negative pallet stock" />
             <TextField label="Customer Email" size="small" value={manualCustomerEmail} onChange={(e)=>setManualCustomerEmail(e.target.value)} sx={{ minWidth: 200 }} error={!isValidEmail(manualCustomerEmail)} helperText={!isValidEmail(manualCustomerEmail) ? 'Required (valid email)' : ''} />
             <TextField label="Customer Name" size="small" value={manualCustomerName} onChange={(e)=>setManualCustomerName(e.target.value)} sx={{ minWidth: 200 }} error={!String(manualCustomerName||'').trim()} helperText={!String(manualCustomerName||'').trim() ? 'Required' : ''} />
           </Stack>
@@ -860,7 +1184,7 @@ export default function Orders() {
           </Stack>
           <Stack direction={{ xs:'column', sm:'row' }} spacing={2} sx={{ mb: 2 }}>
             <TextField type="date" label="Created Order Date" InputLabelProps={{ shrink: true }} size="small" value={manualCreatedAt} onChange={(e)=>setManualCreatedAt(e.target.value)} sx={{ minWidth: 220 }} inputProps={{ max: todayYmd }} error={!manualCreatedAt || manualCreatedAt > todayYmd} helperText={!manualCreatedAt ? 'Required' : (manualCreatedAt > todayYmd ? 'Cannot be advance date' : '')} />
-            <TextField type="date" label="Estimated Shipdate for Customer" InputLabelProps={{ shrink: true }} size="small" value={manualEstFulfillment} onChange={(e)=>setManualEstFulfillment(e.target.value)} sx={{ minWidth: 220 }} inputProps={{ min: todayYmd }} error={!manualEstFulfillment || manualEstFulfillment < todayYmd} helperText={!manualEstFulfillment ? 'Required' : (manualEstFulfillment < todayYmd ? 'Must be today or later' : '')} />
+            <TextField type="date" label="Estimated Shipdate for Customer" InputLabelProps={{ shrink: true }} size="small" value={manualEstFulfillment} onChange={(e)=>{ setManualShipdateTouched(true); setManualEstFulfillment(e.target.value); }} sx={{ minWidth: 220 }} inputProps={{ min: todayYmd }} error={!manualEstFulfillment || manualEstFulfillment < todayYmd} helperText={!manualEstFulfillment ? 'Required' : (manualEstFulfillment < todayYmd ? 'Must be today or later' : '')} />
           </Stack>
           <TextField
             fullWidth
@@ -873,7 +1197,7 @@ export default function Orders() {
             helperText={!String(manualShippingAddress||'').trim() ? 'Required' : ''}
           />
 
-          <Typography variant="subtitle1" sx={{ mb: 1 }}>Pallet IDs</Typography>
+          <Typography variant="subtitle1" sx={{ mb: 1 }}>Pallets to Order</Typography>
 
           {manualValidationErrors.length > 0 && (
             <Box sx={{ p:1, mb: 2, bgcolor:'#fff4f4', border:'1px solid #f5c2c7', borderRadius:1 }}>
@@ -886,62 +1210,186 @@ export default function Orders() {
             </Box>
           )}
 
-          <TextField
-            select
-            size="small"
-            label="Add By"
-            value={manualLineMode}
-            onChange={(e)=> {
-              const next = e.target.value as any;
-              setManualLineMode(next);
-              setManualLines((prev)=> prev.map((p)=> ({ ...p, lineItem: '' })));
-            }}
-            sx={{ mb: 1, minWidth: 240 }}
-          >
-            <MenuItem value="pallet_group">Option 1 - Pallet Description</MenuItem>
-            <MenuItem value="line_item">Option 2 - Pallet IDs</MenuItem>
-          </TextField>
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ xs:'stretch', sm:'center' }} sx={{ mb: 1 }}>
+            <Button
+              variant="outlined"
+              onClick={()=> setManualPickOpen(true)}
+              disabled={!manualWarehouseId}
+            >
+              Add to list
+            </Button>
+            <Box sx={{ flex: 1 }} />
+          </Stack>
 
-          <Stack spacing={1}>
-            {manualLines.map((ln, idx) => (
-              <Stack
-                key={idx}
-                direction={{ xs:'column', sm:'row' }}
-                spacing={2}
-                alignItems={{ xs:'stretch', sm:'center' }}
-                sx={{ p: 0.5, borderRadius: 1, bgcolor: getManualRowError(idx) ? '#fff4f4' : 'transparent' }}
-              >
-                <Autocomplete
-                  freeSolo
-                  options={getManualRowOptions(idx)}
-                  value={ln.lineItem}
-                  disabled={!manualWarehouseId}
-                  onChange={(_, v)=> {
-                    setManualValidationErrors([]);
-                    setManualLines((prev)=> prev.map((p, i)=> i===idx ? { ...p, lineItem: String(v || '') } : p));
-                  }}
-                  onInputChange={(_, v)=> {
-                    setManualValidationErrors([]);
-                    setManualLines((prev)=> prev.map((p, i)=> i===idx ? { ...p, lineItem: String(v || '') } : p));
-                  }}
-                  renderInput={(params)=> (
-                    <TextField
-                      {...params}
-                      label={manualLineMode === 'pallet_group' ? 'Pallet Description' : 'Pallet ID'}
-                      size="small"
-                      placeholder={!manualWarehouseId ? 'Select Warehouse first' : undefined}
-                      error={Boolean(getManualRowError(idx))}
-                      helperText={getManualRowError(idx) || ''}
-                    />
-                  )}
+          {manualOrderGroups.length === 0 ? (
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              No pallets added yet. Click "Add to list" to select pallet(s).
+            </Typography>
+          ) : null}
+
+          <div style={{ height: 320, width: '100%' }}>
+            <DataGrid
+              rows={manualOrderRows}
+              columns={(() => {
+                const cols: any[] = [
+                  { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
+                  { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
+                  { field: 'queueSource', headerName: 'Queue / Source', width: 140, sortable: false, filterable: false, renderCell: (p: any) => {
+                    const src = getRowSupplySource(p?.row);
+                    return <span>{src || '-'}</span>;
+                  } },
+                  { field: 'selectedWarehouseAvailable', headerName: `THIS - ${manualWarehouseName || 'Warehouse'}`, width: 170, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
+                  { field: 'onWaterPallets', headerName: 'On-Water', width: 110, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.onWaterPallets ?? 0) },
+                  { field: 'onWaterEdd', headerName: 'On-Water EDD', width: 130, renderCell: (p: any) => String(p?.row?.onWaterEdd || '-') },
+                  { field: 'onProcessPallets', headerName: 'On-Process', width: 120, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.onProcessPallets ?? 0) },
+                  { field: 'onProcessEdd', headerName: 'On-Process EDD', width: 140, renderCell: (p: any) => String(p?.row?.onProcessEdd || '-') },
+                ];
+                cols.push({
+                  field: 'orderQty',
+                  headerName: 'Order Qty',
+                  width: 120,
+                  sortable: false,
+                  filterable: false,
+                  renderCell: (p: any) => {
+                    const groupName = String(p?.row?.groupName || '');
+                    const val = manualOrderQtyByGroup[groupName] ?? '';
+                    return (
+                      <TextField
+                        type="number"
+                        size="small"
+                        value={val}
+                        onChange={(e)=>{
+                          const raw = e.target.value;
+                          setManualValidationErrors([]);
+                          setManualOrderQtyByGroup((prev)=> ({ ...prev, [groupName]: raw }));
+                        }}
+                        inputProps={{ min: 0, step: 1 }}
+                        sx={{ width: 100 }}
+                      />
+                    );
+                  }
+                });
+                cols.push({
+                  field: 'remove',
+                  headerName: 'Remove',
+                  width: 110,
+                  sortable: false,
+                  filterable: false,
+                  renderCell: (p: any) => {
+                    const groupName = String(p?.row?.groupName || '');
+                    return (
+                      <Button size="small" color="error" onClick={()=>{
+                        setManualOrderGroups((prev)=> prev.filter((x)=> String(x) !== groupName));
+                        setManualOrderQtyByGroup((prev)=> {
+                          const next = { ...(prev || {}) };
+                          delete next[groupName];
+                          return next;
+                        });
+                      }}>Remove</Button>
+                    );
+                  }
+                });
+                return cols;
+              })()}
+              disableRowSelectionOnClick
+              density="compact"
+              slots={{ toolbar: GridToolbar }}
+              slotProps={{ toolbar: { showQuickFilter: true, quickFilterProps: { debounceMs: 250 } } as any }}
+              pagination
+              pageSizeOptions={[5, 10, 20, 50]}
+              initialState={{ pagination: { paginationModel: { page: 0, pageSize: 10 } } }}
+            />
+          </div>
+
+          <Dialog open={manualPickOpen} onClose={()=> setManualPickOpen(false)} fullWidth maxWidth="xl">
+            <DialogTitle>Select Pallets</DialogTitle>
+            <DialogContent>
+              <Stack direction={{ xs:'column', sm:'row' }} spacing={2} alignItems={{ xs:'stretch', sm:'center' }} sx={{ mb: 1, mt: 1 }}>
+                <TextField
+                  size="small"
+                  label="Search Pallet ID / Pallet Description"
+                  value={manualPickerQ}
+                  onChange={(e)=>setManualPickerQ(e.target.value)}
                   sx={{ flex: 1, minWidth: 260 }}
                 />
-                <TextField type="number" label="Qty" size="small" value={ln.qty} onChange={(e)=> { setManualValidationErrors([]); setManualLines((prev)=> prev.map((p, i)=> i===idx ? { ...p, qty: e.target.value } : p)); }} sx={{ minWidth: 120 }} />
-                <IconButton color="error" onClick={()=> setManualLines((prev)=> prev.filter((_, i)=> i!==idx))} disabled={manualLines.length===1}><DeleteIcon /></IconButton>
+                <Button variant="outlined" onClick={async ()=>{
+                  try {
+                    if (!manualWarehouseId) return;
+                    setManualPickerLoading(true);
+                    const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: manualWarehouseId, q: manualPickerQ.trim() || undefined } });
+                    setManualPickerRows(Array.isArray(data?.rows) ? data.rows : []);
+                    setManualPickerWarehouses(Array.isArray(data?.warehouses) ? data.warehouses : []);
+                  } catch {
+                    setManualPickerRows([]);
+                    setManualPickerWarehouses([]);
+                  } finally {
+                    setManualPickerLoading(false);
+                  }
+                }} disabled={!manualWarehouseId || manualPickerLoading}>Refresh</Button>
               </Stack>
-            ))}
-            <Button onClick={()=> setManualLines((prev)=> [...prev, { lineItem: '', qty: '' }])}>Add Line</Button>
-          </Stack>
+              <div style={{ height: 520, width: '100%' }}>
+                <DataGrid
+                  rows={(manualPickerRowsFiltered || []).map((r: any) => ({ id: String(r.groupName || r.lineItem || ''), ...r }))}
+                  columns={(() => {
+                    const cols: any[] = [
+                      { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
+                      { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
+                      { field: 'selectedWarehouseAvailable', headerName: `THIS - ${manualWarehouseName || 'Warehouse'}`, width: 170, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
+                      { field: 'onWaterPallets', headerName: 'On-Water', width: 110, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.onWaterPallets ?? 0) },
+                      { field: 'onWaterEdd', headerName: 'On-Water EDD', width: 130, renderCell: (p: any) => String(p?.row?.onWaterEdd || '-') },
+                      { field: 'onProcessPallets', headerName: 'On-Process', width: 120, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.onProcessPallets ?? 0) },
+                      { field: 'onProcessEdd', headerName: 'On-Process EDD', width: 140, renderCell: (p: any) => String(p?.row?.onProcessEdd || '-') },
+                    ];
+                    for (const w of (manualPickerWarehouses || [])) {
+                      if (String(w?._id || '') === String(manualWarehouseId)) continue;
+                      cols.push({
+                        field: `wh_${w._id}`,
+                        headerName: w.name,
+                        width: 120,
+                        type: 'number',
+                        align: 'right',
+                        headerAlign: 'right',
+                        valueGetter: (params: any) => {
+                          const per = (params?.row as any)?.perWarehouse || {};
+                          return Number(per?.[String(w._id)] ?? 0);
+                        },
+                      });
+                    }
+                    return cols;
+                  })()}
+                  loading={manualPickerLoading}
+                  checkboxSelection
+                  disableRowSelectionOnClick
+                  density="compact"
+                  slots={{ toolbar: GridToolbar }}
+                  slotProps={{ toolbar: { showQuickFilter: true, quickFilterProps: { debounceMs: 250 } } as any }}
+                  onRowSelectionModelChange={(m: any)=> setManualPickSelected(m)}
+                  rowSelectionModel={manualPickSelected}
+                  pagination
+                  pageSizeOptions={[10, 20, 50, 100]}
+                  initialState={{ pagination: { paginationModel: { page: 0, pageSize: 20 } } }}
+                />
+              </div>
+            </DialogContent>
+            <DialogActions>
+              <Button onClick={()=> setManualPickOpen(false)}>Cancel</Button>
+              <Button variant="contained" onClick={()=>{
+                const idsArr = manualPickSelected?.ids ? Array.from(manualPickSelected.ids) : [];
+                const selected = new Set(idsArr.map((x)=> String(x)));
+                const picked = (manualPickerRows || [])
+                  .map((r: any) => String(r?.groupName || r?.lineItem || ''))
+                  .filter((id: string) => selected.has(id));
+                setManualOrderGroups((prev)=> {
+                  const base = Array.isArray(prev) ? prev : [];
+                  const set = new Set(base.map((x)=> String(x)));
+                  for (const id of picked) set.add(String(id));
+                  return Array.from(set);
+                });
+                setManualPickSelected({ type: 'include', ids: new Set() });
+                setManualPickOpen(false);
+              }} disabled={!(manualPickSelected?.ids && manualPickSelected.ids.size > 0)}>Add to Order</Button>
+            </DialogActions>
+          </Dialog>
         </DialogContent>
         <DialogActions>
           <Button onClick={()=>setManualOpen(false)}>Cancel</Button>
@@ -958,7 +1406,8 @@ export default function Orders() {
               !manualEstFulfillment ||
               manualEstFulfillment < todayYmd ||
               !String(manualShippingAddress||'').trim() ||
-              (manualLines.filter((l)=> String(l.lineItem||'').trim()).length === 0)
+              (manualOrderGroups.length === 0) ||
+              (Object.entries(manualOrderQtyByGroup || {}).filter(([g, q]) => manualOrderGroups.includes(g) && Number(q) > 0).length === 0)
             }
           >
             Save

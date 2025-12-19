@@ -23,6 +23,7 @@ export default function Inventory() {
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [groups, setGroups] = useState<GroupOverview[]>([]);
   const [search, setSearch] = useState('');
+  const [groupLineItemByName, setGroupLineItemByName] = useState<Record<string, string>>({});
   const [importOpen, setImportOpen] = useState(false);
   const [lossOpen, setLossOpen] = useState(false);
   const [lossWarehouse, setLossWarehouse] = useState('');
@@ -84,11 +85,29 @@ export default function Inventory() {
     }
   };
 
+  const loadItemGroups = async () => {
+    try {
+      const { data } = await api.get<any[]>('/item-groups');
+      const map: Record<string, string> = {};
+      for (const g of (Array.isArray(data) ? data : [])) {
+        const name = String(g?.name || '').trim();
+        if (!name) continue;
+        const lineItem = String(g?.lineItem || '').trim();
+        map[name.toLowerCase()] = lineItem;
+      }
+      setGroupLineItemByName(map);
+    } catch {
+      setGroupLineItemByName({});
+    }
+  };
+
   useEffect(() => { loadWarehouses(); }, []);
+  useEffect(() => { loadItemGroups(); }, []);
   useEffect(() => { loadGroups(); }, [search]);
 
   const columns: GridColDef[] = useMemo(() => {
     const cols: GridColDef[] = [
+      { field: 'lineItem', headerName: 'Pallet ID', flex: 1, minWidth: 180 },
       { field: 'groupName', headerName: 'Pallet Description', flex: 2, minWidth: 240 },
       { field: 'totalPallets', headerName: 'Total Pallets', type: 'number', align: 'right', headerAlign: 'right', width: 140 },
     ];
@@ -113,14 +132,19 @@ export default function Inventory() {
 
   const rows = useMemo(() => {
     return groups.map((g) => {
-      const row: any = { id: g.groupName, groupName: g.groupName, totalPallets: g.totalPallets || 0 };
+      const row: any = {
+        id: g.groupName,
+        lineItem: groupLineItemByName[String(g.groupName || '').toLowerCase()] || '',
+        groupName: g.groupName,
+        totalPallets: g.totalPallets || 0
+      };
       for (const w of warehouses) {
         const found = g.perWarehouse.find(p => String(p.warehouseId) === String(w._id));
         row[`wh_${w._id}`] = found ? found.pallets : 0;
       }
       return row;
     });
-  }, [groups, warehouses]);
+  }, [groups, warehouses, groupLineItemByName]);
 
   const onView = async (groupName: string) => {
     setSelectedGroup(groupName);
