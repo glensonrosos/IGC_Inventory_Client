@@ -1,12 +1,18 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Container, Typography, Paper, Stack, TextField, Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions, LinearProgress, MenuItem, Box, Chip } from '@mui/material';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Container, Typography, Paper, Stack, TextField, Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions, LinearProgress, MenuItem, Box, Chip, Accordion, AccordionSummary, AccordionDetails } from '@mui/material';
 import Autocomplete from '@mui/material/Autocomplete';
 import DeleteIcon from '@mui/icons-material/Delete';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import { DataGrid, GridColDef, GridToolbar } from '@mui/x-data-grid';
+import * as XLSX from 'xlsx';
 import api from '../api';
 import { useToast } from '../components/ToastProvider';
 
 type Warehouse = { _id: string; name: string };
+
+type Allocation = { groupName?: string; qty?: number; source?: string; warehouseId?: string };
+
+type OrderStatus = 'processing' | 'shipped' | 'completed' | 'canceled';
 type OrdersRow = {
   id: string;
   rawId: string;
@@ -22,6 +28,7 @@ type OrdersRow = {
   totalQty: number;
   email: string;
   lines: Array<{ groupName?: string; lineItem?: string; qty?: number }>;
+  allocations?: Allocation[];
   customerName?: string;
   customerPhone?: string;
   shippingAddress?: string;
@@ -32,28 +39,12 @@ type OrdersRow = {
 
 export default function Orders() {
   const todayYmd = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const lastAutoSavedShipdateRef = useRef<{ orderId: string; ymd: string; at: number }>({ orderId: '', ymd: '', at: 0 });
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersRows, setOrdersRows] = useState<OrdersRow[]>([]);
   const [ordersQ, setOrdersQ] = useState('');
-  const [ordersStatusFilter, setOrdersStatusFilter] = useState<'all' | 'create' | 'backorder' | 'fulfilled' | 'cancel'>('all');
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const [detailsRow, setDetailsRow] = useState<OrdersRow | null>(null);
-  const [detailsStatus, setDetailsStatus] = useState('');
-  const [detailsCustomerName, setDetailsCustomerName] = useState('');
-  const [detailsCustomerEmail, setDetailsCustomerEmail] = useState('');
-  const [detailsCustomerPhone, setDetailsCustomerPhone] = useState('');
-  const [detailsCreatedAtOrder, setDetailsCreatedAtOrder] = useState('');
-  const [detailsEstFulfillment, setDetailsEstFulfillment] = useState('');
-  const [detailsShippingAddress, setDetailsShippingAddress] = useState('');
-  const [detailsLines, setDetailsLines] = useState<Array<{ groupName: string; lineItem: string; qty: number }>>([]);
-  const [detailsLinesTouched, setDetailsLinesTouched] = useState(false);
-  const [detailsPickOpen, setDetailsPickOpen] = useState(false);
-  const [detailsPickLoading, setDetailsPickLoading] = useState(false);
-  const [detailsPickQ, setDetailsPickQ] = useState('');
-  const [detailsPickRows, setDetailsPickRows] = useState<any[]>([]);
-  const [detailsPickWarehouses, setDetailsPickWarehouses] = useState<Array<{ _id: string; name: string }>>([]);
-  const [detailsPickSelected, setDetailsPickSelected] = useState<any>({ type: 'include', ids: new Set() });
+  const [ordersStatusFilter, setOrdersStatusFilter] = useState<'all' | OrderStatus>('all');
   const [csvOpen, setCsvOpen] = useState(false);
   const [csvWarehouseId, setCsvWarehouseId] = useState('');
   const [csvFile, setCsvFile] = useState<File | null>(null);
@@ -63,8 +54,12 @@ export default function Orders() {
   const [csvCommitting, setCsvCommitting] = useState(false);
 
   const [manualOpen, setManualOpen] = useState(false);
+  const [manualMode, setManualMode] = useState<'create' | 'edit'>('create');
+  const [manualEditRow, setManualEditRow] = useState<OrdersRow | null>(null);
+  const [manualAllocations, setManualAllocations] = useState<Allocation[]>([]);
+  const [manualReservedBreakdown, setManualReservedBreakdown] = useState<any[]>([]);
   const [manualWarehouseId, setManualWarehouseId] = useState('');
-  const [manualStatus, setManualStatus] = useState<'create' | 'backorder'>('create');
+  const [manualStatus, setManualStatus] = useState<OrderStatus>('processing');
   const [manualCustomerEmail, setManualCustomerEmail] = useState('');
   const [manualCustomerName, setManualCustomerName] = useState('');
   const [manualCustomerPhone, setManualCustomerPhone] = useState('');
@@ -88,17 +83,257 @@ export default function Orders() {
   const [manualPickSelected, setManualPickSelected] = useState<any>({ type: 'include', ids: new Set() });
   const [manualOrderGroups, setManualOrderGroups] = useState<string[]>([]);
 
+  const [onWaterOpen, setOnWaterOpen] = useState(false);
+  const [onWaterLoading, setOnWaterLoading] = useState(false);
+  const [onWaterGroupName, setOnWaterGroupName] = useState('');
+  const [onWaterRows, setOnWaterRows] = useState<any[]>([]);
+
+  const [onProcessOpen, setOnProcessOpen] = useState(false);
+  const [onProcessLoading, setOnProcessLoading] = useState(false);
+  const [onProcessGroupName, setOnProcessGroupName] = useState('');
+  const [onProcessRows, setOnProcessRows] = useState<any[]>([]);
+
+  const [viewOrderableOpen, setViewOrderableOpen] = useState(false);
+  const [viewOrderableWarehouseId, setViewOrderableWarehouseId] = useState('');
+  const [viewOrderableQ, setViewOrderableQ] = useState('');
+  const [viewOrderableRows, setViewOrderableRows] = useState<any[]>([]);
+  const [viewOrderableWarehouses, setViewOrderableWarehouses] = useState<any[]>([]);
+  const [viewOrderableLoading, setViewOrderableLoading] = useState(false);
+  const [viewOrderableExporting, setViewOrderableExporting] = useState(false);
+
+  const viewOrderableFilteredRows = useMemo(() => {
+    const q = String(viewOrderableQ || '').trim().toLowerCase();
+    const rows = Array.isArray(viewOrderableRows) ? viewOrderableRows : [];
+    if (!q) return rows;
+    return rows.filter((r: any) => {
+      const hay = `${String(r?.lineItem || '')} ${String(r?.groupName || '')}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [viewOrderableQ, viewOrderableRows]);
+
+  const openOnWaterDetails = async ({ warehouseId, groupName }: { warehouseId: string; groupName: string }) => {
+    const wid = String(warehouseId || '').trim();
+    const g = String(groupName || '').trim();
+    if (!wid || !g) return;
+    setOnWaterOpen(true);
+    setOnWaterGroupName(g);
+    setOnWaterRows([]);
+    setOnWaterLoading(true);
+    try {
+      const { data } = await api.get('/orders/pallet-picker/on-water', { params: { warehouseId: wid, groupName: g } });
+      setOnWaterRows(Array.isArray(data?.rows) ? data.rows : []);
+    } catch {
+      setOnWaterRows([]);
+    } finally {
+      setOnWaterLoading(false);
+    }
+  };
+
+  const exportAllOrderablePalletsXlsx = async () => {
+    const wid = String(viewOrderableWarehouseId || fixedWarehouseId || '').trim();
+    if (!wid) return;
+    setViewOrderableExporting(true);
+    try {
+      const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: wid } });
+      const rows = Array.isArray(data?.rows) ? data.rows : [];
+      const whs = Array.isArray(data?.warehouses) ? data.warehouses : [];
+      const second = whs.find((w: any) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
+      const secondId = second ? String(second._id) : '';
+      const secondName = second ? String(second.name || '').trim() : '';
+      const thisWhName =
+        String((Array.isArray(warehouses) ? warehouses : []).find((w: any) => String(w?._id || '') === wid)?.name || '').trim();
+
+      const exportRows = rows.map((r: any) => {
+        const primary = Number(r?.selectedWarehouseAvailable ?? 0);
+        const onWater = Number(r?.onWaterPallets ?? 0);
+        const onProcess = Number(r?.onProcessPallets ?? 0);
+        let secondQty = 0;
+        if (secondId) {
+          const per = r?.perWarehouse || {};
+          secondQty = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
+        }
+        const maxOrder =
+          (Number.isFinite(primary) ? primary : 0) +
+          (Number.isFinite(onWater) ? onWater : 0) +
+          (Number.isFinite(onProcess) ? onProcess : 0) +
+          (Number.isFinite(secondQty) ? secondQty : 0);
+
+        const out: any = {
+          'Pallet ID': String(r?.lineItem || ''),
+          'Pallet Description': String(r?.groupName || ''),
+          [`THIS - ${thisWhName || 'Warehouse'}`]: Math.max(0, Math.floor(Number.isFinite(primary) ? primary : 0)),
+          'On-Water': Math.max(0, Math.floor(Number.isFinite(onWater) ? onWater : 0)),
+          'On-Process': Math.max(0, Math.floor(Number.isFinite(onProcess) ? onProcess : 0)),
+        };
+        if (secondId) out[secondName || '2nd Warehouse'] = Math.max(0, Math.floor(Number.isFinite(secondQty) ? secondQty : 0));
+        out['Max Order'] = Math.max(0, Math.floor(Number.isFinite(maxOrder) ? maxOrder : 0));
+        return out;
+      });
+
+      const ws = XLSX.utils.json_to_sheet(exportRows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Orderable Pallets');
+      const dt = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const stamp = `${dt.getFullYear()}${pad(dt.getMonth() + 1)}${pad(dt.getDate())}_${pad(dt.getHours())}${pad(dt.getMinutes())}${pad(dt.getSeconds())}`;
+      const filename = `orderable_pallets_${stamp}.xlsx`;
+      XLSX.writeFile(wb, filename);
+    } catch {
+      toast.error('Failed to export XLSX');
+    } finally {
+      setViewOrderableExporting(false);
+    }
+  };
+
+  const openManualEdit = async (row: OrdersRow) => {
+    const toYmd = (v: any) => {
+      const s = String(v || '');
+      const slice = s.slice(0, 10);
+      return /^\d{4}-\d{2}-\d{2}$/.test(slice) ? slice : '';
+    };
+
+    setManualMode('edit');
+    setManualEditRow(row);
+    setManualOpen(true);
+    setManualWarehouseId(String(row?.warehouseId || fixedWarehouseId));
+    setManualStatus((normalizeStatus(row?.status || '') as any) || 'processing');
+    setManualCustomerEmail(String(row?.email || '').trim());
+    setManualCustomerName(String(row?.customerName || '').trim());
+    setManualCustomerPhone(String(row?.customerPhone || '').trim());
+    setManualCreatedAt(toYmd(row?.createdAtOrder || row?.dateCreated || row?.createdAt));
+    setManualEstFulfillment(toYmd(row?.estFulfillmentDate));
+    setManualShipdateTouched(false);
+    setManualShippingAddress(String(row?.shippingAddress || '').trim());
+    setManualLineMode('pallet_group');
+    setManualLines([{ lineItem: '', qty: '' }]);
+    setManualAvailable({});
+    setManualValidationErrors([]);
+    setManualPickerQ('');
+    setManualPickerRows([]);
+    setManualPickerWarehouses([]);
+    setManualPickOpen(false);
+    setManualPickSelected({ type: 'include', ids: new Set() });
+    setManualAllocations(Array.isArray((row as any)?.allocations) ? ((row as any).allocations as any) : []);
+
+    const baseLines = Array.isArray(row?.lines) ? row.lines : [];
+    const groups: string[] = [];
+    const qtyBy: Record<string, string> = {};
+    for (const l of baseLines) {
+      const g = String(l?.groupName || l?.lineItem || '').trim();
+      if (!g) continue;
+      groups.push(g);
+      const q = Math.floor(Number(l?.qty || 0));
+      qtyBy[g] = q > 0 ? String(q) : '';
+    }
+    setManualOrderGroups(Array.from(new Set(groups)));
+    setManualOrderQtyByGroup(qtyBy);
+
+    try {
+      const wid = String(row?.warehouseId || fixedWarehouseId || '').trim();
+      if (wid) {
+        setManualPickerLoading(true);
+        const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: wid } });
+        setManualPickerRows(Array.isArray(data?.rows) ? data.rows : []);
+        setManualPickerWarehouses(Array.isArray(data?.warehouses) ? data.warehouses : []);
+      }
+    } catch {
+      setManualPickerRows([]);
+      setManualPickerWarehouses([]);
+    } finally {
+      setManualPickerLoading(false);
+    }
+
+    try {
+      const rawId = String(row?.rawId || '').trim();
+      if (rawId) {
+        const { data } = await api.get(`/orders/unfulfilled/${rawId}`);
+        setManualAllocations(Array.isArray((data as any)?.allocations) ? (data as any).allocations : []);
+      }
+    } catch {
+      setManualAllocations(Array.isArray((row as any)?.allocations) ? ((row as any).allocations as any) : []);
+    }
+
+    try {
+      const { data } = await api.get<any[]>('/item-groups');
+      const palletGroups = (Array.isArray(data) ? data : [])
+        .map((g: any) => String(g?.name || '').trim())
+        .filter((v: string) => v);
+      const lineItems = (Array.isArray(data) ? data : [])
+        .map((g: any) => String(g?.lineItem || '').trim())
+        .filter((v: string) => v);
+
+      setManualPalletGroupOptions(Array.from(new Set(palletGroups)).sort((a, b) => a.localeCompare(b)));
+      setManualLineItemOptions(Array.from(new Set(lineItems)).sort((a, b) => a.localeCompare(b)));
+    } catch {
+      setManualPalletGroupOptions([]);
+      setManualLineItemOptions([]);
+    }
+  };
+
+  const openOnProcessDetails = async ({ groupName }: { groupName: string }) => {
+    const g = String(groupName || '').trim();
+    if (!g) return;
+    setOnProcessOpen(true);
+    setOnProcessGroupName(g);
+    setOnProcessRows([]);
+    setOnProcessLoading(true);
+    try {
+      const { data } = await api.get('/orders/pallet-picker/on-process', { params: { groupName: g } });
+      setOnProcessRows(Array.isArray(data?.rows) ? data.rows : []);
+    } catch {
+      setOnProcessRows([]);
+    } finally {
+      setOnProcessLoading(false);
+    }
+  };
+
   const fixedWarehouseId = useMemo(() => {
     const wh = Array.isArray(warehouses) ? warehouses : [];
-    const preferred = wh.find((w) => String(w?.name || '').trim().toLowerCase() === 'mpg planters');
-    return String((preferred || wh[0] || ({} as any))._id || '');
+    return String(wh[0]?._id || '');
   }, [warehouses]);
+
+  const openViewOrderableItems = async () => {
+    const wid = String(viewOrderableWarehouseId || fixedWarehouseId || '').trim();
+    if (!wid) return;
+    setViewOrderableOpen(true);
+    setViewOrderableLoading(true);
+    try {
+      const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: wid, q: String(viewOrderableQ || '').trim() || undefined } });
+      setViewOrderableRows(Array.isArray(data?.rows) ? data.rows : []);
+      setViewOrderableWarehouses(Array.isArray(data?.warehouses) ? data.warehouses : []);
+    } catch {
+      setViewOrderableRows([]);
+      setViewOrderableWarehouses([]);
+    } finally {
+      setViewOrderableLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!viewOrderableWarehouseId && fixedWarehouseId) setViewOrderableWarehouseId(String(fixedWarehouseId));
+  }, [fixedWarehouseId, viewOrderableWarehouseId]);
+
+  const manualPrevStatus = useMemo(() => {
+    if (!manualEditRow) return '';
+    return (normalizeStatus(manualEditRow?.status || '') as any) || '';
+  }, [manualEditRow]);
+
+  const manualIsCanceled = manualMode === 'edit' && manualPrevStatus === 'canceled';
+  const manualIsCompleted = manualMode === 'edit' && manualPrevStatus === 'completed';
+  const manualIsLocked = manualIsCanceled || manualIsCompleted;
 
   const manualWarehouseName = useMemo(() => {
     const wh = Array.isArray(warehouses) ? warehouses : [];
     const found = wh.find((w) => String(w?._id || '') === String(manualWarehouseId));
     return String(found?.name || '').trim();
   }, [warehouses, manualWarehouseId]);
+
+  const secondWarehouse = useMemo(() => {
+    const list = Array.isArray(manualPickerWarehouses) ? manualPickerWarehouses : [];
+    const wid = String(manualWarehouseId || '').trim();
+    const found = list.find((w) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
+    return found ? { _id: String(found._id), name: String(found.name || '').trim() } : null;
+  }, [manualPickerWarehouses, manualWarehouseId]);
 
   const manualPickerRowsFiltered = useMemo(() => {
     const q = String(manualPickerQ || '').trim().toLowerCase();
@@ -112,7 +347,14 @@ export default function Orders() {
   }, [manualPickerRows, manualPickerQ]);
 
   const manualPickerRowByGroup = useMemo(() => {
-    return new Map((Array.isArray(manualPickerRows) ? manualPickerRows : []).map((r: any) => [String(r?.groupName || '').trim(), r]));
+    const m = new Map<string, any>();
+    for (const r of (Array.isArray(manualPickerRows) ? manualPickerRows : [])) {
+      const groupKey = String(r?.groupName || '').trim();
+      const lineKey = String(r?.lineItem || '').trim();
+      if (groupKey && !m.has(groupKey)) m.set(groupKey, r);
+      if (lineKey && !m.has(lineKey)) m.set(lineKey, r);
+    }
+    return m;
   }, [manualPickerRows]);
 
   const manualOrderRows = useMemo(() => {
@@ -124,138 +366,407 @@ export default function Orders() {
       .filter((r) => String(r.groupName || '').trim());
   }, [manualOrderGroups, manualPickerRowByGroup]);
 
+  const manualAllocationRows = useMemo(() => {
+    const allocs = Array.isArray(manualAllocations) ? manualAllocations : [];
+    const byGroup = new Map<string, { groupName: string; primary: number; onWater: number; onProcess: number; second: number }>();
+    for (const a of allocs) {
+      const g = String(a?.groupName || '').trim();
+      const src = String(a?.source || '').trim().toLowerCase();
+      const qty = Math.floor(Number(a?.qty || 0));
+      if (!g || !Number.isFinite(qty) || qty <= 0) continue;
+      if (!byGroup.has(g)) byGroup.set(g, { groupName: g, primary: 0, onWater: 0, onProcess: 0, second: 0 });
+      const rec = byGroup.get(g)!;
+      if (src === 'primary') rec.primary += qty;
+      else if (src === 'on_water') rec.onWater += qty;
+      else if (src === 'on_process') rec.onProcess += qty;
+      else if (src === 'second') rec.second += qty;
+    }
+    return Array.from(byGroup.values())
+      .map((r) => ({ id: r.groupName, ...r }))
+      .sort((a, b) => String(a.groupName).localeCompare(String(b.groupName)));
+  }, [manualAllocations]);
+
+  const manualReservedRows = useMemo(() => {
+    const rows = Array.isArray(manualReservedBreakdown) ? manualReservedBreakdown : [];
+    if (rows.length) {
+      return rows
+        .map((r: any) => ({
+          id: String(r?.id || r?.groupName || ''),
+          groupName: String(r?.groupName || ''),
+          primary: Math.floor(Number(r?.primary || 0)),
+          onWater: Math.floor(Number(r?.onWater || 0)),
+          second: Math.floor(Number(r?.second || 0)),
+          onProcess: Math.floor(Number(r?.onProcess || 0)),
+        }))
+        .filter((r: any) => String(r.groupName || '').trim())
+        .sort((a: any, b: any) => String(a.groupName).localeCompare(String(b.groupName)));
+    }
+    return manualAllocationRows;
+  }, [manualReservedBreakdown, manualAllocationRows]);
+
+  const manualAllocationWarehouseLabels = useMemo(() => {
+    const all = [...(Array.isArray(warehouses) ? warehouses : []), ...(Array.isArray(manualPickerWarehouses) ? manualPickerWarehouses : [])] as any[];
+    const nameById = new Map<string, string>();
+    for (const w of all) {
+      const id = String(w?._id || '').trim();
+      const nm = String(w?.name || '').trim();
+      if (id && nm && !nameById.has(id)) nameById.set(id, nm);
+    }
+
+    const primaryWarehouseId = String(manualWarehouseId || '').trim();
+    const primaryName =
+      nameById.get(primaryWarehouseId) ||
+      String((manualEditRow as any)?.warehouseName || '').trim() ||
+      '';
+    const allocs = Array.isArray(manualAllocations) ? manualAllocations : [];
+    const reserved = Array.isArray(manualReservedBreakdown) ? manualReservedBreakdown : [];
+
+    const secondAlloc = allocs.find((a) => String(a?.source || '').toLowerCase() === 'second') as any;
+    const secondWarehouseId = String(secondAlloc?.warehouseId?._id || secondAlloc?.warehouseId || '').trim();
+    const secondNameFromAlloc = String(secondAlloc?.warehouseId?.name || '').trim();
+
+    const fallbackSecondName =
+      all
+        .map((w) => ({ id: String(w?._id || '').trim(), name: String(w?.name || '').trim() }))
+        .find((w) => w.id && w.id !== primaryWarehouseId && w.name)?.name ||
+      '';
+
+    const secondName =
+      secondNameFromAlloc ||
+      (secondWarehouseId ? (nameById.get(secondWarehouseId) || '') : '') ||
+      fallbackSecondName;
+
+    return {
+      primaryLabel: primaryName || 'Primary',
+      secondLabel: secondName || '2nd',
+    };
+  }, [manualAllocations, manualEditRow, manualPickerWarehouses, manualReservedBreakdown, manualWarehouseId, warehouses]);
+
   const isValidEmail = (email: string) => {
     const s = String(email || '').trim();
     if (!s) return false;
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
   };
 
-  const suggestShipdateForSelection = useMemo(() => {
+  const sanitizeIntText = (v: any) => {
+    const s = String(v ?? '');
+    // allow empty while typing
+    if (!s) return '';
+    // strip everything except digits
+    const only = s.replace(/[^0-9]/g, '');
+    return only;
+  };
+
+  const normalizeIntText = (v: any) => {
+    const s = sanitizeIntText(v);
+    if (!s) return '';
+    const n = Math.floor(Number(s));
+    if (!Number.isFinite(n) || n <= 0) return '';
+    return String(n);
+  };
+
+  const normalizeManualLine = (v: any) => String(v || '').trim();
+
+  const getActiveManualOptions = () => (manualLineMode === 'pallet_group' ? manualPalletGroupOptions : manualLineItemOptions);
+
+  const suggestShipdateForSelection = useCallback(() => {
     const today = todayYmd;
     const rowsByGroup = new Map((manualPickerRows || []).map((r: any) => [String(r.groupName || ''), r]));
     const toYmd = (s: any) => {
-      const v = String(s || '').slice(0, 10);
-      return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : '';
-    };
-    const addDays = (ymd: string, days: number) => {
-      const base = toYmd(ymd);
-      if (!base) return '';
-      const d = new Date(`${base}T00:00:00.000Z`);
-      if (Number.isNaN(d.getTime())) return '';
-      d.setUTCDate(d.getUTCDate() + days);
-      return d.toISOString().slice(0, 10);
-    };
-    const maxYmd = (a: string, b: string) => {
-      if (!a) return b;
-      if (!b) return a;
-      return a > b ? a : b;
+      const v = String(s || '');
+      const slice = v.slice(0, 10);
+      return /^\d{4}-\d{2}-\d{2}$/.test(slice) ? slice : '';
     };
 
-    return () => {
-      let overall = '';
-      const entries = Object.entries(manualOrderQtyByGroup || {});
-      for (const [groupName, qtyStr] of entries) {
-        const qty = Math.floor(Number(qtyStr || 0));
-        if (!Number.isFinite(qty) || qty <= 0) continue;
-        const r: any = rowsByGroup.get(String(groupName)) || {};
-        const availThis = Number(r?.selectedWarehouseAvailable || 0);
-        const queued = Number(r?.queuedPallets || 0);
-        const ow = toYmd(r?.onWaterEdd);
-        const op = toYmd(r?.onProcessEdd);
-        // 2.5 months approx = 75 days
-        const owPlus25 = ow ? addDays(ow, 75) : '';
-        const opPlus25 = op ? addDays(op, 75) : '';
+    const addMonthsYmd = (ymd: string, months: number) => {
+      const s = String(ymd || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return '';
+      const dt = new Date(`${s}T00:00:00`);
+      if (Number.isNaN(dt.getTime())) return '';
+      const next = new Date(dt);
+      next.setMonth(next.getMonth() + Math.floor(Number(months || 0)));
+      const pad = (n: number) => String(n).padStart(2, '0');
+      return `${next.getFullYear()}-${pad(next.getMonth() + 1)}-${pad(next.getDate())}`;
+    };
 
-        // Effective demand includes existing queue
-        const effective = qty + Math.max(0, queued);
+    const pickedGroups = Object.entries(manualOrderQtyByGroup || {})
+      .filter(([, qty]) => Number(qty || 0) > 0)
+      .map(([g]) => String(g || '').trim())
+      .filter((v) => v);
 
-        // Hierarchy:
-        // THIS warehouse -> on-water (EDD) -> transfer warehouse (auto set +2.5 months) -> on-process (EDD + 2.5 months)
-        let suggested = today;
-        if (effective <= availThis) {
-          suggested = today;
-        } else {
-          // If this order spills beyond local availability, choose tier based on what's available first.
-          // Note: we don't have an explicit "on-water qty" consumption model with multiple shipments,
-          // so we treat any spill beyond local as at least on-water, then further spill as transfer, then on-process.
-          const owQty = Math.max(0, Number(r?.onWaterPallets || 0));
-          const opQty = Math.max(0, Number(r?.onProcessPallets || 0));
-          const afterThis = Math.max(0, effective - availThis);
-          if (afterThis <= owQty) {
-            suggested = ow || today;
-          } else if (afterThis <= owQty + Math.max(0, Number(r?.perWarehouse ? Object.values(r.perWarehouse).reduce((a: any, b: any) => Number(a) + Number(b), 0) : 0) - availThis)) {
-            // transfer warehouse tier: we approximate transfer supply as "other warehouses available".
-            suggested = owPlus25 || (ow || today);
-          } else if (afterThis <= owQty + Math.max(0, Number(r?.perWarehouse ? Object.values(r.perWarehouse).reduce((a: any, b: any) => Number(a) + Number(b), 0) : 0) - availThis) + opQty) {
-            suggested = opPlus25 || (op || owPlus25 || ow || today);
-          } else {
-            suggested = opPlus25 || (op || owPlus25 || ow || today);
-          }
-        }
-        overall = maxYmd(overall, suggested);
+    let best = '';
+    for (const g of pickedGroups) {
+      const r: any = rowsByGroup.get(g) || {};
+
+      const need = Math.floor(Number((manualOrderQtyByGroup || {})?.[g] || 0));
+      if (!Number.isFinite(need) || need <= 0) continue;
+
+      let remaining = need;
+      const useDates: string[] = [];
+
+      const primaryAvail = Math.max(0, Math.floor(Number(r?.selectedWarehouseAvailable ?? 0)));
+      const takePrimary = Math.min(primaryAvail, remaining);
+      if (takePrimary > 0) {
+        useDates.push(today);
+        remaining -= takePrimary;
       }
-      return overall || today;
+
+      const onWaterAvail = Math.max(0, Math.floor(Number(r?.onWaterPallets ?? 0)));
+      const takeOnWater = Math.min(onWaterAvail, remaining);
+      if (takeOnWater > 0) {
+        const onWaterReady = toYmd(r?.onWaterEdd);
+        if (onWaterReady) useDates.push(onWaterReady);
+        remaining -= takeOnWater;
+      }
+
+      if (remaining > 0 && secondWarehouse?._id) {
+        const per = r?.perWarehouse || {};
+        const wid = String(secondWarehouse._id);
+        const secondAvail = Math.max(0, Math.floor(Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0)));
+        const takeSecond = Math.min(secondAvail, remaining);
+        if (takeSecond > 0) {
+          const cutoff = addMonthsYmd(today, 3);
+          if (cutoff) useDates.push(cutoff);
+          remaining -= takeSecond;
+        }
+      }
+
+      if (remaining > 0) {
+        const onProcessAvail = Math.max(0, Math.floor(Number(r?.onProcessPallets ?? 0)));
+        const takeOnProcess = Math.min(onProcessAvail, remaining);
+        if (takeOnProcess > 0) {
+          const base = toYmd(r?.onProcessEdd);
+          const onProcessReady = base ? addMonthsYmd(base, 3) : '';
+          if (onProcessReady) useDates.push(onProcessReady);
+          remaining -= takeOnProcess;
+        }
+      }
+
+      for (const d of useDates) {
+        if (!d) continue;
+        if (!best || d > best) best = d;
+      }
+    }
+    return best || today;
+  }, [manualPickerRows, manualOrderQtyByGroup, secondWarehouse, todayYmd]);
+
+  const suggestShipdateForProcessingAllocations = useCallback((opts?: { rows?: any[]; allocations?: any[] }) => {
+    const today = todayYmd;
+    const pickerRows = Array.isArray(opts?.rows) ? opts!.rows : (manualPickerRows || []);
+    const allocs = Array.isArray(opts?.allocations) ? opts!.allocations : (Array.isArray(manualAllocations) ? manualAllocations : []);
+
+    const rowsByGroup = new Map((pickerRows || []).map((r: any) => [String(r.groupName || ''), r]));
+    const toYmd = (s: any) => {
+      const v = String(s || '');
+      const slice = v.slice(0, 10);
+      return /^\d{4}-\d{2}-\d{2}$/.test(slice) ? slice : '';
     };
-  }, [manualOrderQtyByGroup, manualPickerRows, todayYmd]);
+    const addMonthsYmd = (ymd: string, months: number) => {
+      const s = String(ymd || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return '';
+      const dt = new Date(`${s}T00:00:00`);
+      if (Number.isNaN(dt.getTime())) return '';
+      const next = new Date(dt);
+      next.setMonth(next.getMonth() + Math.floor(Number(months || 0)));
+      const pad = (n: number) => String(n).padStart(2, '0');
+      return `${next.getFullYear()}-${pad(next.getMonth() + 1)}-${pad(next.getDate())}`;
+    };
+
+    let best = '';
+    let hasSecond = false;
+
+    for (const a of allocs) {
+      const g = String(a?.groupName || '').trim();
+      const src = String(a?.source || '').trim().toLowerCase();
+      const qty = Math.floor(Number(a?.qty || 0));
+      if (!g || !Number.isFinite(qty) || qty <= 0) continue;
+
+      if (src === 'second') {
+        hasSecond = true;
+        continue;
+      }
+
+      const r: any = rowsByGroup.get(g) || {};
+      if (src === 'on_water') {
+        const edd = toYmd(r?.onWaterEdd);
+        if (edd && (!best || edd > best)) best = edd;
+        continue;
+      }
+      if (src === 'on_process') {
+        const edd = toYmd(r?.onProcessEdd);
+        const ready = edd ? addMonthsYmd(edd, 3) : '';
+        if (ready && (!best || ready > best)) best = ready;
+        continue;
+      }
+    }
+
+    let out = best || today;
+    if (hasSecond) {
+      const cutoff = addMonthsYmd(today, 3);
+      if (cutoff) out = cutoff;
+    }
+    return out || today;
+  }, [manualAllocations, manualPickerRows, todayYmd]);
+
+  const refreshManualAvailable = useCallback(async (warehouseId: string) => {
+    const wid = String(warehouseId || '').trim();
+    if (!wid) {
+      setManualAvailable({});
+      return;
+    }
+    try {
+      const { data } = await api.get('/pallet-inventory/groups');
+      const map: Record<string, number> = {};
+      (Array.isArray(data) ? data : []).forEach((g: any) => {
+        const groupName = String(g.groupName || '').trim();
+        if (!groupName) return;
+        const per = Array.isArray(g.perWarehouse) ? g.perWarehouse : [];
+        const rec = per.find((p: any) => String(p.warehouseId) === String(wid));
+        map[groupName] = Number(rec?.pallets || 0);
+      });
+      setManualAvailable(map);
+    } catch {
+      setManualAvailable({});
+    }
+  }, []);
+
+  const refreshManualPicker = useCallback(
+    async (warehouseId: string) => {
+      const wid = String(warehouseId || '').trim();
+      if (!wid) {
+        setManualPickerRows([]);
+        setManualPickerWarehouses([]);
+        return { rows: [] as any[], warehouses: [] as any[] };
+      }
+      try {
+        const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: wid } });
+        const rows = Array.isArray(data?.rows) ? data.rows : [];
+        const warehouses = Array.isArray(data?.warehouses) ? data.warehouses : [];
+        setManualPickerRows(rows);
+        setManualPickerWarehouses(warehouses);
+        return { rows, warehouses };
+      } catch {
+        setManualPickerRows([]);
+        setManualPickerWarehouses([]);
+        return { rows: [] as any[], warehouses: [] as any[] };
+      }
+    },
+    []
+  );
+
+  const refreshManualAllocations = useCallback(async (rawId: string) => {
+    const id = String(rawId || '').trim();
+    if (!id) {
+      setManualAllocations([]);
+      setManualReservedBreakdown([]);
+      return [] as any[];
+    }
+    try {
+      const { data } = await api.get(`/orders/unfulfilled/${id}`, { params: { _ts: Date.now() } });
+      const nextAllocs = Array.isArray((data as any)?.allocations) ? (data as any).allocations : [];
+      const nextReserved = Array.isArray((data as any)?.reservedBreakdown) ? (data as any).reservedBreakdown : [];
+      setManualAllocations(nextAllocs);
+      setManualReservedBreakdown(nextReserved);
+      setManualEditRow((prev) => {
+        if (!prev) return prev;
+        return { ...(prev as any), allocations: nextAllocs } as any;
+      });
+      return nextAllocs;
+    } catch {
+      // keep existing allocations if fetch fails
+      return Array.isArray(manualAllocations) ? manualAllocations : [];
+    }
+  }, [manualAllocations]);
 
   const getRowSupplySource = (row: any) => {
-    const availThis = Math.max(0, Number(row?.selectedWarehouseAvailable || 0));
-    const queued = Math.max(0, Number(row?.queuedPallets || 0));
-    const qty = Math.floor(Number((manualOrderQtyByGroup || {})[String(row?.groupName || '')] || 0));
-    const effective = qty + queued;
-    if (!Number.isFinite(qty) || qty <= 0) return '';
-
-    const owQty = Math.max(0, Number(row?.onWaterPallets || 0));
-    const opQty = Math.max(0, Number(row?.onProcessPallets || 0));
-    const per = row?.perWarehouse || {};
-    const totalAll = Object.values(per).reduce((a: any, b: any) => Number(a) + Number(b), 0);
-    const otherWh = Math.max(0, Number(totalAll) - availThis);
-    const afterThis = Math.max(0, effective - availThis);
-    if (effective <= availThis) return 'THIS';
-    if (afterThis <= owQty) return 'ON-WATER';
-    if (afterThis <= owQty + otherWh) return 'TRANSFER';
-    if (afterThis <= owQty + otherWh + opQty) return 'ON-PROCESS';
-    return 'ON-PROCESS';
+    const r = row || {};
+    return String(r?.queueSource || r?.source || r?.queue || '').trim();
   };
 
   useEffect(() => {
     if (!manualOpen) return;
+    if (manualMode === 'edit') return;
     if (manualShipdateTouched) return;
     const next = suggestShipdateForSelection();
     if (next && next !== manualEstFulfillment) {
       setManualEstFulfillment(next);
     }
-  }, [manualOpen, manualShipdateTouched, manualOrderQtyByGroup, suggestShipdateForSelection, manualEstFulfillment]);
-
-  const normalizeManualLine = (v: any) => String(v || '').trim();
-  const getActiveManualOptions = () => (manualLineMode === 'pallet_group' ? manualPalletGroupOptions : manualLineItemOptions);
-  const getManualRowError = (idx: number) => {
-    const current = normalizeManualLine(manualLines[idx]?.lineItem);
-    if (!current) return '';
-    const matches = manualLines.filter((ln, i) => i !== idx && normalizeManualLine(ln?.lineItem).toLowerCase() === current.toLowerCase());
-    return matches.length ? 'Duplicate pallet description / pallet id' : '';
-  };
+  }, [manualOpen, manualMode, manualShipdateTouched, manualOrderQtyByGroup, suggestShipdateForSelection, manualEstFulfillment]);
 
   useEffect(() => {
     const loadAvail = async () => {
       if (!manualWarehouseId) { setManualAvailable({}); return; }
-      try {
-        const { data } = await api.get('/pallet-inventory/groups');
-        const map: Record<string, number> = {};
-        (Array.isArray(data) ? data : []).forEach((g: any) => {
-          const groupName = String(g.groupName || '').trim();
-          if (!groupName) return;
-          const per = Array.isArray(g.perWarehouse) ? g.perWarehouse : [];
-          const rec = per.find((p: any) => String(p.warehouseId) === String(manualWarehouseId));
-          map[groupName] = Number(rec?.pallets || 0);
-        });
-        setManualAvailable(map);
-      } catch {
-        setManualAvailable({});
-      }
+      await refreshManualAvailable(manualWarehouseId);
     };
     loadAvail();
-  }, [manualWarehouseId]);
+  }, [manualWarehouseId, refreshManualAvailable]);
+
+  useEffect(() => {
+    const isProcessing = manualOpen && manualMode === 'edit' && manualPrevStatus === 'processing' && !manualIsLocked;
+    if (!isProcessing) return;
+    const wid = String(manualWarehouseId || '').trim();
+    const rawId = String((manualEditRow as any)?.rawId || '').trim();
+    if (!wid || !rawId) return;
+
+    let stopped = false;
+    const tick = async () => {
+      if (stopped) return;
+      const picker = await refreshManualPicker(wid);
+      await refreshManualAvailable(wid);
+      const allocs = await refreshManualAllocations(rawId);
+      if (!manualShipdateTouched) {
+        const next = suggestShipdateForProcessingAllocations({ rows: picker?.rows, allocations: allocs });
+        if (next && next !== manualEstFulfillment) {
+          setManualEstFulfillment(next);
+          setManualEditRow((prev) => {
+            if (!prev) return prev;
+            const prevRawId = String((prev as any)?.rawId || '').trim();
+            if (prevRawId && prevRawId !== rawId) return prev;
+            return { ...(prev as any), estFulfillmentDate: next } as any;
+          });
+          setOrdersRows((prev) => {
+            const rows = Array.isArray(prev) ? prev : [];
+            return rows.map((r) => {
+              const rRawId = String((r as any)?.rawId || '').trim();
+              if (rRawId && rRawId === rawId) return { ...(r as any), estFulfillmentDate: next } as any;
+              return r;
+            });
+          });
+
+          // Auto-persist the suggested shipdate so the user doesn't need to click Save.
+          // Only for PROCESSING orders and only if the user has not manually touched the shipdate.
+          try {
+            const last = lastAutoSavedShipdateRef.current || { orderId: '', ymd: '', at: 0 };
+            const now = Date.now();
+            const tooSoon = now - Number(last.at || 0) < 5000;
+            const sameOrder = String(last.orderId || '') === String(rawId || '');
+            const sameYmd = String(last.ymd || '') === String(next || '');
+            if (!(sameOrder && sameYmd) && !tooSoon) {
+              lastAutoSavedShipdateRef.current = { orderId: String(rawId || ''), ymd: String(next || ''), at: now };
+              await api.put(`/orders/unfulfilled/${rawId}`, { estFulfillmentDate: next });
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }
+    };
+
+    tick();
+    const id = window.setInterval(tick, 15000);
+    const onFocus = () => { tick(); };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') tick();
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      stopped = true;
+      window.clearInterval(id);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [manualOpen, manualMode, manualPrevStatus, manualIsLocked, manualWarehouseId, manualEditRow, manualShipdateTouched, manualEstFulfillment, refreshManualPicker, refreshManualAvailable, refreshManualAllocations, suggestShipdateForProcessingAllocations]);
   const getManualRowOptions = (idx: number) => {
     const current = normalizeManualLine(manualLines[idx]?.lineItem);
     const selected = new Set(
@@ -274,120 +785,25 @@ export default function Orders() {
 
   const toast = useToast();
 
-  const normalizeStatus = (v: any) => {
+  function normalizeStatus(v: any) {
     const s = String(v || '').trim().toLowerCase();
     if (!s) return '';
-    if (s === 'created') return 'create';
-    if (s === 'cancelled') return 'cancel';
+    if (s === 'created') return 'processing';
+    if (s === 'create') return 'processing';
+    if (s === 'backorder') return 'processing';
+    if (s === 'fulfilled') return 'completed';
+    if (s === 'cancelled') return 'canceled';
+    if (s === 'cancel') return 'canceled';
     return s;
-  };
+  }
 
-  const openDetails = (row: OrdersRow) => {
-    setDetailsRow(row);
-    setDetailsStatus(normalizeStatus(row.status || ''));
-    setDetailsCustomerName(String(row.customerName || ''));
-    setDetailsCustomerEmail(String(row.email || ''));
-    setDetailsCustomerPhone(String(row.customerPhone || ''));
-    setDetailsShippingAddress(String(row.shippingAddress || ''));
-    setDetailsEstFulfillment(row.estFulfillmentDate ? String(row.estFulfillmentDate).slice(0, 10) : '');
-    setDetailsCreatedAtOrder(row.createdAtOrder ? String(row.createdAtOrder).slice(0, 10) : '');
-    setDetailsLines(
-      (row.lines || []).map((l: any) => ({
-        groupName: String(l?.groupName || ''),
-        lineItem: String(l?.lineItem || ''),
-        qty: Number(l?.qty || 0),
-      })).filter((l) => String(l.groupName || '').trim())
-    );
-    setDetailsLinesTouched(false);
-    setDetailsPickOpen(false);
-    setDetailsPickQ('');
-    setDetailsPickRows([]);
-    setDetailsPickWarehouses([]);
-    setDetailsPickSelected({ type: 'include', ids: new Set() });
-    setDetailsOpen(true);
-  };
-
-  const detailsPickRowsFiltered = useMemo(() => {
-    const q = String(detailsPickQ || '').trim().toLowerCase();
-    const rows = Array.isArray(detailsPickRows) ? detailsPickRows : [];
-    if (!q) return rows;
-    return rows.filter((r: any) => {
-      const gid = String(r?.lineItem || '').toLowerCase();
-      const gname = String(r?.groupName || '').toLowerCase();
-      return gid.includes(q) || gname.includes(q);
-    });
-  }, [detailsPickRows, detailsPickQ]);
-
-  const saveDetailsStatus = async () => {
-    if (!detailsRow) return;
-    try {
-      const next = normalizeStatus(detailsStatus);
-      const prev = normalizeStatus(detailsRow.status || '');
-
-      if ((next === 'create' || next === 'backorder') && prev === 'cancel') {
-        const msg = next === 'backorder'
-          ? 'Changing status to backorder will deduct inventory immediately and can result in negative pallet stock. Proceed?'
-          : 'Changing status to create will deduct inventory immediately. Proceed?';
-        const ok = window.confirm(msg);
-        if (!ok) return;
-      }
-
-      if (next === 'cancel' && prev !== 'cancel') {
-        const ok = window.confirm('Changing status to cancel will restore inventory previously deducted for this order. Proceed?');
-        if (!ok) return;
-      }
-
-      const rawId = encodeURIComponent(detailsRow.rawId);
-      if (detailsRow.id.startsWith('manual:')) {
-        const canEditLines = normalizeStatus(detailsRow.status || '') !== 'fulfilled';
-        const shouldSendLines = canEditLines && detailsLinesTouched;
-        const payloadLines = (detailsLines || [])
-          .map((l) => ({ search: String(l.groupName || l.lineItem || ''), qty: Math.floor(Number(l.qty || 0)) }))
-          .filter((l) => String(l.search || '').trim() && Number.isFinite(l.qty) && l.qty > 0);
-        // If transitioning to fulfilled, update details first (otherwise the server locks details updates).
-        if (next === 'fulfilled' && prev !== 'fulfilled') {
-          await api.put(`/orders/unfulfilled/${rawId}`, {
-            customerName: detailsCustomerName,
-            customerEmail: detailsCustomerEmail,
-            customerPhone: detailsCustomerPhone,
-            estFulfillmentDate: detailsEstFulfillment || null,
-            shippingAddress: detailsShippingAddress,
-            ...(shouldSendLines ? { lines: payloadLines } : {}),
-          });
-          await api.put(`/orders/unfulfilled/${rawId}/status`, { status: next });
-        } else {
-          await api.put(`/orders/unfulfilled/${rawId}/status`, { status: next });
-          await api.put(`/orders/unfulfilled/${rawId}`, {
-            customerName: detailsCustomerName,
-            customerEmail: detailsCustomerEmail,
-            customerPhone: detailsCustomerPhone,
-            estFulfillmentDate: detailsEstFulfillment || null,
-            shippingAddress: detailsShippingAddress,
-            ...(shouldSendLines ? { lines: payloadLines } : {}),
-          });
-        }
-      } else {
-        // If transitioning to fulfilled, update details first (otherwise the server locks details updates).
-        if (next === 'fulfilled' && prev !== 'fulfilled') {
-          await api.put(`/orders/fulfilled/imports/${rawId}`, {
-            fulfilledAt: detailsEstFulfillment || null,
-          });
-          await api.put(`/orders/fulfilled/imports/${rawId}/status`, { status: next });
-        } else {
-          await api.put(`/orders/fulfilled/imports/${rawId}/status`, { status: next });
-          await api.put(`/orders/fulfilled/imports/${rawId}`, {
-            fulfilledAt: detailsEstFulfillment || null,
-          });
-        }
-      }
-
-      toast.success('Saved');
-      setDetailsOpen(false);
-      await loadOrders();
-    } catch (e: any) {
-      const msg = e?.response?.data?.message || 'Failed to save';
-      toast.error(msg);
+  const openDetailedEdit = async (row: OrdersRow) => {
+    if (!row) return;
+    if (!String(row.id || '').startsWith('manual:')) {
+      toast.error('Admin disabled editing for imported orders. Please contact the admin.');
+      return;
     }
+    await openManualEdit(row);
   };
 
   useEffect(() => {
@@ -396,7 +812,7 @@ export default function Orders() {
     if (manualOpen) setManualWarehouseId(fixedWarehouseId);
   }, [fixedWarehouseId, csvOpen, manualOpen]);
 
-  const loadOrders = async (warehousesSnapshot?: Warehouse[]) => {
+  async function loadOrders(warehousesSnapshot?: Warehouse[]) {
     setOrdersLoading(true);
     try {
       const [uRes, fRes] = await Promise.all([
@@ -414,7 +830,7 @@ export default function Orders() {
         rawId: String(o?._id || ''),
         orderNumber: String(o?.orderNumber || ''),
         type: 'manual',
-        status: normalizeStatus(o?.status || 'create') || 'create',
+        status: normalizeStatus(o?.status || 'processing') || 'processing',
         warehouseId: normalizeId(o?.warehouseId),
         warehouseName: whNameById.get(normalizeId(o?.warehouseId)) || '',
         createdAt: normalizeDateValue(o?.createdAt),
@@ -424,6 +840,7 @@ export default function Orders() {
         totalQty: Array.isArray(o?.lines) ? o.lines.reduce((s: number, l: any) => s + (Number(l?.qty) || 0), 0) : 0,
         email: String(o?.customerEmail || ''),
         lines: Array.isArray(o?.lines) ? o.lines : [],
+        allocations: Array.isArray(o?.allocations) ? o.allocations : [],
         customerName: String(o?.customerName || ''),
         customerPhone: String(o?.customerPhone || ''),
         shippingAddress: String(o?.shippingAddress || ''),
@@ -437,7 +854,7 @@ export default function Orders() {
         rawId: String(o?._id || ''),
         orderNumber: String(o?.orderNumber || ''),
         type: String(o?.source || '') === 'csv' ? 'import' : 'manual',
-        status: normalizeStatus(o?.status || 'create') || 'create',
+        status: normalizeStatus(o?.status || 'completed') || 'completed',
         warehouseId: normalizeId(o?.warehouseId),
         warehouseName: whNameById.get(normalizeId(o?.warehouseId)) || '',
         createdAt: normalizeDateValue(o?.createdAt),
@@ -466,7 +883,59 @@ export default function Orders() {
     } finally {
       setOrdersLoading(false);
     }
-  };
+  }
+
+  useEffect(() => {
+    const handler = async () => {
+      try {
+        await loadOrders();
+      } catch {
+        // ignore
+      }
+
+      const isProcessing = manualOpen && manualMode === 'edit' && manualPrevStatus === 'processing' && !manualIsLocked;
+      const rawId = String((manualEditRow as any)?.rawId || '').trim();
+      if (isProcessing && rawId) {
+        try {
+          await refreshManualAllocations(rawId);
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    window.addEventListener('shipments-changed', handler as any);
+    return () => {
+      window.removeEventListener('shipments-changed', handler as any);
+    };
+  }, [manualOpen, manualMode, manualPrevStatus, manualIsLocked, manualEditRow, refreshManualAllocations]);
+
+  useEffect(() => {
+    let stopped = false;
+    const tick = async () => {
+      if (stopped) return;
+      if (ordersLoading) return;
+      try {
+        await loadOrders();
+      } catch {
+        // ignore
+      }
+    };
+
+    const id = window.setInterval(tick, 20000);
+    const onFocus = () => { tick(); };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') tick();
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      stopped = true;
+      window.clearInterval(id);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [ordersLoading]);
 
   useEffect(() => {
     const load = async () => {
@@ -519,16 +988,15 @@ export default function Orders() {
 
   const ordersColumns: GridColDef[] = useMemo(() => [
     { field: 'orderNumber', headerName: 'Order #', flex: 1, minWidth: 170 },
-    { field: 'type', headerName: 'Type', width: 120 },
     {
       field: 'status',
       headerName: 'Status',
       width: 140,
       renderCell: (p: any) => {
         const s = normalizeStatus((p?.row as any)?.status || '');
-        const label = s || '-';
-        const color: any = s === 'fulfilled' ? 'success' : s === 'cancel' ? 'error' : s === 'backorder' ? 'warning' : 'default';
-        const variant: any = s === 'create' ? 'outlined' : 'filled';
+        const label = s ? String(s).toUpperCase() : '-';
+        const color: any = s === 'completed' ? 'success' : s === 'canceled' ? 'error' : s === 'processing' ? 'warning' : 'default';
+        const variant: any = s === 'processing' ? 'outlined' : 'filled';
         return <Chip size="small" label={label} color={color} variant={variant} />;
       },
     },
@@ -553,16 +1021,17 @@ export default function Orders() {
       renderCell: (p: any) => String((p?.row as any)?.warehouseName || '-')
     },
     { field: 'email', headerName: 'Email', flex: 1, minWidth: 190 },
+    { field: 'customerName', headerName: 'Customer Name', flex: 1, minWidth: 190, renderCell: (p: any) => String((p?.row as any)?.customerName || '-') },
     { field: 'lineCount', headerName: 'Lines', width: 90, type: 'number' },
     { field: 'totalQty', headerName: 'Qty', width: 90, type: 'number' },
     {
       field: 'actions',
       headerName: 'Actions',
-      width: 110,
+      width: 120,
       sortable: false,
       filterable: false,
       renderCell: (params: any) => (
-        <Button size="small" variant="outlined" onClick={() => openDetails(params.row as OrdersRow)}>View</Button>
+        <Button size="small" variant="outlined" onClick={() => openDetailedEdit(params.row as OrdersRow)}>View</Button>
       )
     },
   ], [warehouses]);
@@ -574,9 +1043,9 @@ export default function Orders() {
       if (!t) return true;
       const hay = [
         r.orderNumber,
-        r.type,
         r.status,
         r.email,
+        (r as any).customerName || '',
         r.warehouseName || '',
       ].join(' ').toLowerCase();
       return hay.includes(t);
@@ -592,9 +1061,11 @@ export default function Orders() {
   };
 
   const openManual = async () => {
+    setManualMode('create');
+    setManualEditRow(null);
     setManualOpen(true);
     setManualWarehouseId(fixedWarehouseId);
-    setManualStatus('backorder');
+    setManualStatus('processing');
     setManualCustomerEmail('');
     setManualCustomerName('');
     setManualCustomerPhone('');
@@ -744,6 +1215,14 @@ export default function Orders() {
       seen.add(k);
     }
 
+    if (manualIsCanceled) {
+      errs.push('Canceled orders cannot be edited');
+    }
+
+    if (manualIsCompleted) {
+      errs.push('Completed orders cannot be edited');
+    }
+
     if (errs.length) {
       setManualValidationErrors(errs);
       toast.error(errs[0]);
@@ -753,9 +1232,53 @@ export default function Orders() {
     // Client-side availability check (server also enforces)
     // For backorder, allow negative stock, so skip this check.
     try {
+      if (manualMode === 'edit' && manualEditRow) {
+        if (manualPrevStatus !== 'processing' && manualStatus === 'processing') {
+          throw new Error('Changing status back to PROCESSING is not allowed because inventory has already been deducted.');
+        }
+
+        if (manualPrevStatus === 'processing' && manualStatus === 'shipped') {
+          const ok = window.confirm(
+            'Changing the status to SHIPPED cannot be changed back to PROCESSING since the inventory will be deducted. Continue?'
+          );
+          if (!ok) return;
+        }
+
+        if (manualPrevStatus === 'shipped' && manualStatus === 'completed') {
+          const ok = window.confirm(
+            'Changing the status to COMPLETED will lock this order and cannot be undone. Are you sure you want to proceed?'
+          );
+          if (!ok) return;
+        }
+
+        if (manualStatus === 'canceled' && manualPrevStatus !== 'canceled') {
+          const ok = window.confirm('Are you sure you want to cancel this order? Canceling order cannot be undone.');
+          if (!ok) return;
+        }
+
+        // Status changes are handled by a separate endpoint.
+        await api.put(`/orders/unfulfilled/${manualEditRow.rawId}/status`, {
+          status: manualStatus,
+        });
+        if (manualStatus === 'processing') {
+          await api.put(`/orders/unfulfilled/${manualEditRow.rawId}`, {
+            customerEmail: manualCustomerEmail.trim(),
+            customerName: manualCustomerName.trim(),
+            customerPhone: manualCustomerPhone.trim(),
+            estFulfillmentDate: manualEstFulfillment || undefined,
+            shippingAddress: manualShippingAddress.trim(),
+            lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty })),
+          });
+        }
+        toast.success('Order updated');
+        setManualOpen(false);
+        await loadOrders();
+        return;
+      }
+
       await api.post('/orders/unfulfilled', {
         warehouseId: manualWarehouseId,
-        status: 'backorder',
+        status: 'processing',
         customerEmail: manualCustomerEmail.trim(),
         customerName: manualCustomerName.trim(),
         customerPhone: manualCustomerPhone.trim(),
@@ -780,8 +1303,17 @@ export default function Orders() {
 
       <Paper sx={{ p:2, mb:2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ xs: 'stretch', sm: 'center' }}>
-          <Button variant="contained" onClick={openCsv}>Import Order CSV from MPGWholeSale</Button>
           <Button variant="outlined" onClick={openManual}>Add Order</Button>
+          <Button
+            variant="outlined"
+            onClick={async () => {
+              setViewOrderableQ('');
+              await openViewOrderableItems();
+            }}
+            disabled={!fixedWarehouseId}
+          >
+            VIEW ORDERABLE PALLETS
+          </Button>
           <Button variant="text" onClick={() => loadOrders()} disabled={ordersLoading}>Refresh List</Button>
           <Box sx={{ flex: 1 }} />
           <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ xs: 'stretch', sm: 'center' }}>
@@ -801,10 +1333,10 @@ export default function Orders() {
               sx={{ minWidth: 180 }}
             >
               <MenuItem value="all">All</MenuItem>
-              <MenuItem value="create">create</MenuItem>
-              <MenuItem value="backorder">backorder</MenuItem>
-              <MenuItem value="fulfilled">fulfilled</MenuItem>
-              <MenuItem value="cancel">cancel</MenuItem>
+              <MenuItem value="processing">PROCESSING</MenuItem>
+              <MenuItem value="shipped">SHIPPED</MenuItem>
+              <MenuItem value="completed">COMPLETED</MenuItem>
+              <MenuItem value="canceled">CANCELED</MenuItem>
             </TextField>
           </Stack>
         </Stack>
@@ -819,313 +1351,9 @@ export default function Orders() {
           density="compact"
           initialState={{ pagination: { paginationModel: { pageSize: 20, page: 0 } } }}
           pageSizeOptions={[10,20,50,100]}
-          onRowDoubleClick={(p:any)=> openDetails(p.row as OrdersRow)}
+          onRowDoubleClick={(p:any)=> openDetailedEdit(p.row as OrdersRow)}
         />
       </Paper>
-
-      <Dialog open={detailsOpen} onClose={()=>setDetailsOpen(false)} fullWidth maxWidth="lg">
-        <DialogTitle>Order Details</DialogTitle>
-        <DialogContent sx={{ pt: 2 }}>
-          {detailsRow ? (
-            <Stack spacing={2} sx={{ mt: 1 }}>
-              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-                <TextField label="Order #" size="small" value={detailsRow.orderNumber} InputProps={{ readOnly: true }} fullWidth />
-                <TextField label="Type" size="small" value={detailsRow.type} InputProps={{ readOnly: true }} fullWidth />
-              </Stack>
-
-              <TextField
-                select
-                label="Status"
-                size="small"
-                value={detailsStatus}
-                onChange={(e)=>setDetailsStatus(e.target.value)}
-                disabled={normalizeStatus(detailsRow.status || '') === 'fulfilled'}
-                helperText={normalizeStatus(detailsRow.status || '') === 'fulfilled' ? 'Fulfilled orders are locked' : ''}
-              >
-                <MenuItem value="create">create</MenuItem>
-                <MenuItem value="backorder">backorder</MenuItem>
-                <MenuItem value="fulfilled">fulfilled</MenuItem>
-                <MenuItem value="cancel">cancel</MenuItem>
-              </TextField>
-
-              <TextField
-                label="Warehouse"
-                size="small"
-                value={warehouses.find(w => String(w._id) === String(detailsRow.warehouseId))?.name || '-'}
-                InputProps={{ readOnly: true }}
-              />
-
-              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-                <TextField
-                  label="Customer Name"
-                  size="small"
-                  fullWidth
-                  value={detailsCustomerName}
-                  onChange={(e)=>setDetailsCustomerName(e.target.value)}
-                  disabled={normalizeStatus(detailsRow.status || '') === 'fulfilled' || detailsRow.type === 'import'}
-                />
-                <TextField
-                  label="Customer Email"
-                  size="small"
-                  fullWidth
-                  value={detailsCustomerEmail}
-                  onChange={(e)=>setDetailsCustomerEmail(e.target.value)}
-                  disabled={normalizeStatus(detailsRow.status || '') === 'fulfilled' || detailsRow.type === 'import'}
-                />
-              </Stack>
-
-              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-                <TextField
-                  label="Phone Number"
-                  size="small"
-                  fullWidth
-                  value={detailsCustomerPhone}
-                  onChange={(e)=>setDetailsCustomerPhone(e.target.value)}
-                  disabled={normalizeStatus(detailsRow.status || '') === 'fulfilled' || detailsRow.type === 'import'}
-                />
-                <TextField
-                  type="date"
-                  label="Order Created"
-                  InputLabelProps={{ shrink: true }}
-                  size="small"
-                  fullWidth
-                  value={detailsCreatedAtOrder}
-                  onChange={(e)=>setDetailsCreatedAtOrder(e.target.value)}
-                  disabled={true}
-                  helperText={detailsRow.id.startsWith('manual:') ? 'Manual orders use Created Order Date from creation' : 'Imported orders keep Order Created from CSV'}
-                />
-              </Stack>
-
-              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
-                <TextField
-                  type="date"
-                  label="Estimated Shipdate for Customer"
-                  InputLabelProps={{ shrink: true }}
-                  size="small"
-                  fullWidth
-                  value={detailsEstFulfillment}
-                  onChange={(e)=>setDetailsEstFulfillment(e.target.value)}
-                  disabled={normalizeStatus(detailsRow.status || '') === 'fulfilled'}
-                />
-                <TextField
-                  label="Total Qty"
-                  size="small"
-                  fullWidth
-                  value={String(detailsRow.totalQty)}
-                  InputProps={{ readOnly: true }}
-                />
-              </Stack>
-
-              <TextField
-                label="Shipping Address"
-                size="small"
-                fullWidth
-                multiline
-                minRows={2}
-                value={detailsShippingAddress}
-                onChange={(e)=>setDetailsShippingAddress(e.target.value)}
-                disabled={normalizeStatus(detailsRow.status || '') === 'fulfilled' || detailsRow.type === 'import'}
-              />
-
-              <Box>
-                <Typography variant="subtitle2" sx={{ mb: 1 }}>Pallet IDs</Typography>
-                {detailsRow.id.startsWith('manual:') && normalizeStatus(detailsRow.status || '') !== 'fulfilled' ? (
-                  <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ xs: 'stretch', sm: 'center' }} sx={{ mb: 1 }}>
-                    <Button variant="outlined" onClick={async ()=>{
-                      try {
-                        setDetailsPickOpen(true);
-                        setDetailsPickQ('');
-                        setDetailsPickSelected({ type: 'include', ids: new Set() });
-                        setDetailsPickLoading(true);
-                        const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: detailsRow.warehouseId } });
-                        setDetailsPickRows(Array.isArray(data?.rows) ? data.rows : []);
-                        setDetailsPickWarehouses(Array.isArray(data?.warehouses) ? data.warehouses : []);
-                      } catch {
-                        setDetailsPickRows([]);
-                        setDetailsPickWarehouses([]);
-                      } finally {
-                        setDetailsPickLoading(false);
-                      }
-                    }}>Add to list</Button>
-                    <Box sx={{ flex: 1 }} />
-                  </Stack>
-                ) : null}
-                <div style={{ height: 260, width: '100%' }}>
-                  <DataGrid
-                    rows={(detailsLines || []).map((l: any) => ({
-                      id: String(l.groupName || l.lineItem || ''),
-                      groupName: String(l?.groupName || ''),
-                      lineItem: String(l?.lineItem || ''),
-                      qty: Number(l?.qty || 0),
-                    }))}
-                    columns={(() => {
-                      const base: any[] = [
-                        { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220 },
-                        { field: 'lineItem', headerName: 'Pallet ID', flex: 1, minWidth: 180 },
-                        {
-                          field: 'qty',
-                          headerName: 'Qty',
-                          width: 110,
-                          sortable: false,
-                          filterable: false,
-                          renderCell: (p: any) => {
-                            const disabled = !detailsRow.id.startsWith('manual:') || normalizeStatus(detailsRow.status || '') === 'fulfilled';
-                            const id = String(p?.row?.id || '');
-                            const val = String(p?.row?.qty ?? '');
-                            return (
-                              <TextField
-                                type="number"
-                                size="small"
-                                value={val}
-                                disabled={disabled}
-                                onChange={(e)=>{
-                                  const nextQty = Math.floor(Number(e.target.value || 0));
-                                  setDetailsLinesTouched(true);
-                                  setDetailsLines((prev)=> (prev || []).map((r)=> String(r.groupName || r.lineItem || '') === id ? { ...r, qty: nextQty } : r));
-                                }}
-                                inputProps={{ min: 0, step: 1 }}
-                                sx={{ width: 90 }}
-                              />
-                            );
-                          }
-                        },
-                      ];
-                      if (detailsRow.id.startsWith('manual:') && normalizeStatus(detailsRow.status || '') !== 'fulfilled') {
-                        base.push({
-                          field: 'remove',
-                          headerName: 'Remove',
-                          width: 110,
-                          sortable: false,
-                          filterable: false,
-                          renderCell: (p: any) => {
-                            const id = String(p?.row?.id || '');
-                            return (
-                              <Button size="small" color="error" onClick={()=>{
-                                setDetailsLinesTouched(true);
-                                setDetailsLines((prev)=> (prev || []).filter((r)=> String(r.groupName || r.lineItem || '') !== id));
-                              }}>Remove</Button>
-                            );
-                          },
-                        });
-                      }
-                      return base as GridColDef[];
-                    })()}
-                    disableRowSelectionOnClick
-                    density="compact"
-                    slots={{ toolbar: GridToolbar }}
-                    slotProps={{ toolbar: { showQuickFilter: true, quickFilterProps: { debounceMs: 250 } } as any }}
-                    pagination
-                    pageSizeOptions={[5, 10, 20]}
-                    initialState={{ pagination: { paginationModel: { page: 0, pageSize: 5 } } }}
-                  />
-                </div>
-
-                <Dialog open={detailsPickOpen} onClose={()=> setDetailsPickOpen(false)} fullWidth maxWidth="xl">
-                  <DialogTitle>Select Pallets</DialogTitle>
-                  <DialogContent>
-                    <Stack direction={{ xs:'column', sm:'row' }} spacing={2} alignItems={{ xs:'stretch', sm:'center' }} sx={{ mb: 1, mt: 1 }}>
-                      <TextField
-                        size="small"
-                        label="Search Pallet ID / Pallet Description"
-                        value={detailsPickQ}
-                        onChange={(e)=>setDetailsPickQ(e.target.value)}
-                        sx={{ flex: 1, minWidth: 260 }}
-                      />
-                      <Button variant="outlined" onClick={async ()=>{
-                        try {
-                          if (!detailsRow) return;
-                          setDetailsPickLoading(true);
-                          const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: detailsRow.warehouseId, q: detailsPickQ.trim() || undefined } });
-                          setDetailsPickRows(Array.isArray(data?.rows) ? data.rows : []);
-                          setDetailsPickWarehouses(Array.isArray(data?.warehouses) ? data.warehouses : []);
-                        } catch {
-                          setDetailsPickRows([]);
-                          setDetailsPickWarehouses([]);
-                        } finally {
-                          setDetailsPickLoading(false);
-                        }
-                      }} disabled={!detailsRow || detailsPickLoading}>Refresh</Button>
-                    </Stack>
-                    <div style={{ height: 520, width: '100%' }}>
-                      <DataGrid
-                        rows={(detailsPickRowsFiltered || []).map((r: any) => ({ id: String(r.groupName || r.lineItem || ''), ...r }))}
-                        columns={(() => {
-                          const cols: any[] = [
-                            { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
-                            { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
-                            { field: 'selectedWarehouseAvailable', headerName: `THIS`, width: 120, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
-                            { field: 'onWaterPallets', headerName: 'On-Water', width: 110, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.onWaterPallets ?? 0) },
-                            { field: 'onWaterEdd', headerName: 'On-Water EDD', width: 130, renderCell: (p: any) => String(p?.row?.onWaterEdd || '-') },
-                            { field: 'onProcessPallets', headerName: 'On-Process', width: 120, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.onProcessPallets ?? 0) },
-                            { field: 'onProcessEdd', headerName: 'On-Process EDD', width: 140, renderCell: (p: any) => String(p?.row?.onProcessEdd || '-') },
-                          ];
-                          for (const w of (detailsPickWarehouses || [])) {
-                            if (!detailsRow) continue;
-                            if (String(w?._id || '') === String(detailsRow.warehouseId)) continue;
-                            cols.push({
-                              field: `wh_${w._id}`,
-                              headerName: w.name,
-                              width: 120,
-                              type: 'number',
-                              align: 'right',
-                              headerAlign: 'right',
-                              valueGetter: (params: any) => {
-                                const per = (params?.row as any)?.perWarehouse || {};
-                                return Number(per?.[String(w._id)] ?? 0);
-                              },
-                            });
-                          }
-                          return cols;
-                        })()}
-                        loading={detailsPickLoading}
-                        checkboxSelection
-                        disableRowSelectionOnClick
-                        density="compact"
-                        slots={{ toolbar: GridToolbar }}
-                        slotProps={{ toolbar: { showQuickFilter: true, quickFilterProps: { debounceMs: 250 } } as any }}
-                        onRowSelectionModelChange={(m: any)=> setDetailsPickSelected(m)}
-                        rowSelectionModel={detailsPickSelected}
-                        pagination
-                        pageSizeOptions={[10, 20, 50, 100]}
-                        initialState={{ pagination: { paginationModel: { page: 0, pageSize: 20 } } }}
-                      />
-                    </div>
-                  </DialogContent>
-                  <DialogActions>
-                    <Button onClick={()=> setDetailsPickOpen(false)}>Cancel</Button>
-                    <Button variant="contained" onClick={()=>{
-                      const idsArr = detailsPickSelected?.ids ? Array.from(detailsPickSelected.ids) : [];
-                      const selected = new Set(idsArr.map((x)=> String(x)));
-                      const pickedRows = (detailsPickRows || [])
-                        .filter((r: any) => selected.has(String(r?.groupName || r?.lineItem || '')));
-                      if (pickedRows.length === 0) return;
-                      setDetailsLinesTouched(true);
-                      setDetailsLines((prev)=> {
-                        const base = Array.isArray(prev) ? prev : [];
-                        const byKey = new Map(base.map((b)=> [String(b.groupName || b.lineItem || ''), b]));
-                        for (const r of pickedRows) {
-                          const key = String(r?.groupName || r?.lineItem || '');
-                          if (!key) continue;
-                          if (!byKey.has(key)) {
-                            byKey.set(key, { groupName: String(r?.groupName || ''), lineItem: String(r?.lineItem || ''), qty: 1 });
-                          }
-                        }
-                        return Array.from(byKey.values());
-                      });
-                      setDetailsPickSelected({ type: 'include', ids: new Set() });
-                      setDetailsPickOpen(false);
-                    }} disabled={!(detailsPickSelected?.ids && detailsPickSelected.ids.size > 0)}>Add to Order</Button>
-                  </DialogActions>
-                </Dialog>
-              </Box>
-            </Stack>
-          ) : null}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={()=>setDetailsOpen(false)}>Close</Button>
-          <Button variant="contained" onClick={saveDetailsStatus} disabled={!detailsRow || !detailsStatus || normalizeStatus(detailsRow.status || '') === 'fulfilled'}>Save</Button>
-        </DialogActions>
-      </Dialog>
 
       <Dialog open={csvOpen} onClose={()=>setCsvOpen(false)} fullWidth maxWidth="md">
         <DialogTitle>Import Orders (MPGWholeSale site) (.csv)</DialogTitle>
@@ -1167,7 +1395,7 @@ export default function Orders() {
       </Dialog>
 
       <Dialog open={manualOpen} onClose={()=>setManualOpen(false)} fullWidth maxWidth="xl">
-        <DialogTitle>Add Order</DialogTitle>
+        <DialogTitle>{manualMode === 'edit' ? `Edit Order${manualEditRow?.orderNumber ? ` - ${manualEditRow.orderNumber}` : ''}` : 'Add Order'}</DialogTitle>
         <DialogContent>
           <Stack direction={{ xs:'column', sm:'row' }} spacing={2} sx={{ mb: 2, mt: 1 }}>
             <TextField select disabled label="Warehouse" size="small" sx={{ minWidth: 220 }} value={manualWarehouseId} onChange={(e)=>setManualWarehouseId(e.target.value)} error={!manualWarehouseId} helperText={!manualWarehouseId ? 'Required' : ''}>
@@ -1175,16 +1403,44 @@ export default function Orders() {
                 <MenuItem key={w._id} value={w._id}>{w.name}</MenuItem>
               ))}
             </TextField>
-            <TextField label="Status" size="small" sx={{ minWidth: 180 }} value={'backorder'} InputProps={{ readOnly: true }} helperText="Backorder allows negative pallet stock" />
-            <TextField label="Customer Email" size="small" value={manualCustomerEmail} onChange={(e)=>setManualCustomerEmail(e.target.value)} sx={{ minWidth: 200 }} error={!isValidEmail(manualCustomerEmail)} helperText={!isValidEmail(manualCustomerEmail) ? 'Required (valid email)' : ''} />
-            <TextField label="Customer Name" size="small" value={manualCustomerName} onChange={(e)=>setManualCustomerName(e.target.value)} sx={{ minWidth: 200 }} error={!String(manualCustomerName||'').trim()} helperText={!String(manualCustomerName||'').trim() ? 'Required' : ''} />
+            {manualMode === 'edit' ? (
+              <TextField
+                select
+                label="Status"
+                size="small"
+                sx={{ minWidth: 180 }}
+                value={manualStatus}
+                onChange={(e)=> setManualStatus(e.target.value as any)}
+                disabled={manualIsLocked}
+              >
+                <MenuItem value="processing" disabled={manualPrevStatus === 'shipped'}>PROCESSING</MenuItem>
+                <MenuItem value="shipped">SHIPPED</MenuItem>
+                <MenuItem value="completed">COMPLETED</MenuItem>
+                <MenuItem value="canceled" disabled={manualPrevStatus === 'shipped'}>CANCELED</MenuItem>
+              </TextField>
+            ) : null}
+            <TextField disabled={manualIsLocked} label="Customer Email" size="small" value={manualCustomerEmail} onChange={(e)=>setManualCustomerEmail(e.target.value)} sx={{ minWidth: 200 }} error={!isValidEmail(manualCustomerEmail)} helperText={!isValidEmail(manualCustomerEmail) ? 'Required (valid email)' : ''} />
+            <TextField disabled={manualIsLocked} label="Customer Name" size="small" value={manualCustomerName} onChange={(e)=>setManualCustomerName(e.target.value)} sx={{ minWidth: 200 }} error={!String(manualCustomerName||'').trim()} helperText={!String(manualCustomerName||'').trim() ? 'Required' : ''} />
           </Stack>
           <Stack direction={{ xs:'column', sm:'row' }} spacing={2} sx={{ mb: 2 }}>
-            <TextField label="Phone Number" size="small" value={manualCustomerPhone} onChange={(e)=>setManualCustomerPhone(e.target.value)} sx={{ minWidth: 220 }} error={!String(manualCustomerPhone||'').trim()} helperText={!String(manualCustomerPhone||'').trim() ? 'Required' : ''} />
+            <TextField disabled={manualIsLocked} label="Phone Number" size="small" value={manualCustomerPhone} onChange={(e)=>setManualCustomerPhone(e.target.value)} sx={{ minWidth: 220 }} error={!String(manualCustomerPhone||'').trim()} helperText={!String(manualCustomerPhone||'').trim() ? 'Required' : ''} />
           </Stack>
           <Stack direction={{ xs:'column', sm:'row' }} spacing={2} sx={{ mb: 2 }}>
-            <TextField type="date" label="Created Order Date" InputLabelProps={{ shrink: true }} size="small" value={manualCreatedAt} onChange={(e)=>setManualCreatedAt(e.target.value)} sx={{ minWidth: 220 }} inputProps={{ max: todayYmd }} error={!manualCreatedAt || manualCreatedAt > todayYmd} helperText={!manualCreatedAt ? 'Required' : (manualCreatedAt > todayYmd ? 'Cannot be advance date' : '')} />
-            <TextField type="date" label="Estimated Shipdate for Customer" InputLabelProps={{ shrink: true }} size="small" value={manualEstFulfillment} onChange={(e)=>{ setManualShipdateTouched(true); setManualEstFulfillment(e.target.value); }} sx={{ minWidth: 220 }} inputProps={{ min: todayYmd }} error={!manualEstFulfillment || manualEstFulfillment < todayYmd} helperText={!manualEstFulfillment ? 'Required' : (manualEstFulfillment < todayYmd ? 'Must be today or later' : '')} />
+            <TextField type="date" label="Created Order Date" InputLabelProps={{ shrink: true }} size="small" value={manualCreatedAt} onChange={(e)=>setManualCreatedAt(e.target.value)} sx={{ minWidth: 220 }} inputProps={{ max: todayYmd }} error={!manualCreatedAt || manualCreatedAt > todayYmd} helperText={!manualCreatedAt ? 'Required' : (manualCreatedAt > todayYmd ? 'Cannot be advance date' : '')} disabled={manualMode === 'edit'} />
+            <TextField disabled={manualIsLocked} type="date" label="Estimated Shipdate for Customer" InputLabelProps={{ shrink: true }} size="small" value={manualEstFulfillment} onChange={(e)=>{ setManualShipdateTouched(true); setManualEstFulfillment(e.target.value); }} sx={{ minWidth: 220 }} inputProps={{ min: todayYmd }} error={!manualEstFulfillment || manualEstFulfillment < todayYmd} helperText={!manualEstFulfillment ? 'Required' : (manualEstFulfillment < todayYmd ? 'Must be today or later' : '')} />
+            <Button
+              variant="outlined"
+              disabled={!manualOpen || !manualWarehouseId || manualIsLocked}
+              onClick={() => {
+                const isProcessing = manualMode === 'edit' && manualPrevStatus === 'processing';
+                const next = isProcessing ? suggestShipdateForProcessingAllocations() : suggestShipdateForSelection();
+                setManualShipdateTouched(false);
+                setManualEstFulfillment(next);
+              }}
+              sx={{ minWidth: 170 }}
+            >
+              Reset to suggested
+            </Button>
           </Stack>
           <TextField
             fullWidth
@@ -1195,7 +1451,47 @@ export default function Orders() {
             sx={{ mb: 2 }}
             error={!String(manualShippingAddress||'').trim()}
             helperText={!String(manualShippingAddress||'').trim() ? 'Required' : ''}
+            disabled={manualIsLocked}
           />
+
+          {manualMode === 'edit' ? (
+            <Box sx={{ mb: 2 }}>
+              <Accordion
+                defaultExpanded={false}
+                sx={{ border: '2px solid', borderColor: 'primary.main', borderRadius: 1, overflow: 'hidden' }}
+              >
+                <AccordionSummary
+                  expandIcon={<ExpandMoreIcon />}
+                  sx={{ bgcolor: 'rgba(25, 118, 210, 0.06)' }}
+                >
+                  <Typography variant="subtitle1">Reserved Stock for This Order (Hierarchy)</Typography>
+                </AccordionSummary>
+                <AccordionDetails>
+                  {manualReservedRows.length ? (
+                    <div style={{ height: 220, width: '100%' }}>
+                      <DataGrid
+                        rows={manualReservedRows}
+                        columns={([
+                          { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 240 },
+                          { field: 'primary', headerName: manualAllocationWarehouseLabels.primaryLabel, width: 150, type: 'number', align: 'right', headerAlign: 'right' },
+                          { field: 'onWater', headerName: 'On-Water', width: 120, type: 'number', align: 'right', headerAlign: 'right' },
+                          { field: 'second', headerName: manualAllocationWarehouseLabels.secondLabel, width: 150, type: 'number', align: 'right', headerAlign: 'right' },
+                          { field: 'onProcess', headerName: 'On-Process', width: 120, type: 'number', align: 'right', headerAlign: 'right' },
+                        ]) as GridColDef[]}
+                        disableRowSelectionOnClick
+                        density="compact"
+                        hideFooter
+                      />
+                    </div>
+                  ) : (
+                    <Typography variant="body2" color="text.secondary">
+                      No reservation breakdown available yet.
+                    </Typography>
+                  )}
+                </AccordionDetails>
+              </Accordion>
+            </Box>
+          ) : null}
 
           <Typography variant="subtitle1" sx={{ mb: 1 }}>Pallets to Order</Typography>
 
@@ -1213,8 +1509,11 @@ export default function Orders() {
           <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ xs:'stretch', sm:'center' }} sx={{ mb: 1 }}>
             <Button
               variant="outlined"
-              onClick={()=> setManualPickOpen(true)}
-              disabled={!manualWarehouseId}
+              disabled={!manualWarehouseId || manualIsCanceled}
+              onClick={() => {
+                setManualPickSelected({ type: 'include', ids: new Set((manualOrderGroups || []).map((x)=> String(x))) });
+                setManualPickOpen(true);
+              }}
             >
               Add to list
             </Button>
@@ -1234,16 +1533,117 @@ export default function Orders() {
                 const cols: any[] = [
                   { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
                   { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
-                  { field: 'queueSource', headerName: 'Queue / Source', width: 140, sortable: false, filterable: false, renderCell: (p: any) => {
-                    const src = getRowSupplySource(p?.row);
-                    return <span>{src || '-'}</span>;
-                  } },
                   { field: 'selectedWarehouseAvailable', headerName: `THIS - ${manualWarehouseName || 'Warehouse'}`, width: 170, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
-                  { field: 'onWaterPallets', headerName: 'On-Water', width: 110, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.onWaterPallets ?? 0) },
-                  { field: 'onWaterEdd', headerName: 'On-Water EDD', width: 130, renderCell: (p: any) => String(p?.row?.onWaterEdd || '-') },
-                  { field: 'onProcessPallets', headerName: 'On-Process', width: 120, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.onProcessPallets ?? 0) },
-                  { field: 'onProcessEdd', headerName: 'On-Process EDD', width: 140, renderCell: (p: any) => String(p?.row?.onProcessEdd || '-') },
+                  {
+                    field: 'onWaterPallets',
+                    headerName: 'On-Water',
+                    width: 110,
+                    type: 'number',
+                    align: 'right',
+                    headerAlign: 'right',
+                    renderCell: (p: any) => {
+                      const qty = Number(p?.row?.onWaterPallets ?? 0);
+                      const groupName = String(p?.row?.groupName || '').trim();
+                      const wid = String(manualWarehouseId || '').trim();
+                      if (!qty) return '0';
+                      return (
+                        <Button
+                          variant="text"
+                          size="small"
+                          onClick={() => openOnWaterDetails({ warehouseId: wid, groupName })}
+                          sx={{ minWidth: 0, p: 0, textDecoration: 'underline', fontSize: 16, fontWeight: 700 }}
+                        >
+                          {qty}
+                        </Button>
+                      );
+                    },
+                  },
                 ];
+
+                if (secondWarehouse?._id) {
+                  cols.push({
+                    field: 'secondWarehouseAvailable',
+                    headerName: `${secondWarehouse.name || 'Warehouse'}`,
+                    width: 170,
+                    type: 'number',
+                    align: 'right',
+                    headerAlign: 'right',
+                    sortable: false,
+                    filterable: false,
+                    renderCell: (p: any) => {
+                      const per = (p?.row as any)?.perWarehouse || {};
+                      const wid = String(secondWarehouse._id);
+                      const v = Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0);
+                      return String(Number.isFinite(v) ? v : 0);
+                    },
+                  });
+                }
+
+                cols.push({
+                  field: 'onProcessPallets',
+                  headerName: 'On-Process',
+                  width: 120,
+                  type: 'number',
+                  align: 'right',
+                  headerAlign: 'right',
+                  renderCell: (p: any) => {
+                    const qty = Number(p?.row?.onProcessPallets ?? 0);
+                    const groupName = String(p?.row?.groupName || '').trim();
+                    if (!qty) return '0';
+                    return (
+                      <Button
+                        variant="text"
+                        size="small"
+                        onClick={() => openOnProcessDetails({ groupName })}
+                        sx={{ minWidth: 0, p: 0, textDecoration: 'underline', fontSize: 16, fontWeight: 700 }}
+                      >
+                        {qty}
+                      </Button>
+                    );
+                  },
+                });
+
+                cols.push({
+                  field: 'maxQtyOrder',
+                  headerName: 'Max Qty Order',
+                  width: 140,
+                  type: 'number',
+                  align: 'right',
+                  headerAlign: 'right',
+                  sortable: false,
+                  filterable: false,
+                  valueGetter: (...args: any[]) => {
+                    // MUI DataGrid has had multiple valueGetter signatures across versions:
+                    // - (params) => any
+                    // - (value, row) => any
+                    const maybeParams = args?.[0];
+                    const maybeRow = args?.[1];
+                    const row = (maybeRow && typeof maybeRow === 'object') ? maybeRow : (maybeParams?.row || {});
+
+                    // Max Qty Order is the total orderable quantity across tiers.
+                    // It should reflect the displayed tier quantities (Primary + On-Water + 2nd Warehouse + On-Process).
+                    const primary = Number(row?.selectedWarehouseAvailable ?? 0);
+                    const onWater = Number(row?.onWaterPallets ?? 0);
+                    const onProcess = Number(row?.onProcessPallets ?? 0);
+                    let second = 0;
+                    if (secondWarehouse?._id) {
+                      const per = row?.perWarehouse || {};
+                      const wid = String(secondWarehouse._id);
+                      second = Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0);
+                    }
+                    const total =
+                      (Number.isFinite(primary) ? primary : 0) +
+                      (Number.isFinite(onWater) ? onWater : 0) +
+                      (Number.isFinite(second) ? second : 0) +
+                      (Number.isFinite(onProcess) ? onProcess : 0);
+                    return Math.max(0, Math.floor(total));
+                  },
+                  renderCell: (p: any) => {
+                    const v = Number((p && typeof p === 'object' && 'value' in p) ? (p as any).value : 0);
+                    return String(Number.isFinite(v) ? v : 0);
+                  },
+                });
+
                 cols.push({
                   field: 'orderQty',
                   headerName: 'Order Qty',
@@ -1258,12 +1658,23 @@ export default function Orders() {
                         type="number"
                         size="small"
                         value={val}
+                        disabled={manualIsLocked}
                         onChange={(e)=>{
-                          const raw = e.target.value;
+                          const raw = sanitizeIntText(e.target.value);
                           setManualValidationErrors([]);
                           setManualOrderQtyByGroup((prev)=> ({ ...prev, [groupName]: raw }));
                         }}
-                        inputProps={{ min: 0, step: 1 }}
+                        onBlur={(e)=>{
+                          const raw = normalizeIntText(e.target.value);
+                          setManualOrderQtyByGroup((prev)=> ({ ...prev, [groupName]: raw }));
+                        }}
+                        onKeyDown={(e)=>{
+                          const k = (e as any).key;
+                          if (k === 'e' || k === 'E' || k === '.' || k === '-' || k === '+' ) {
+                            e.preventDefault();
+                          }
+                        }}
+                        inputProps={{ inputMode: 'numeric', pattern: '[0-9]*', min: 0, step: 1 }}
                         sx={{ width: 100 }}
                       />
                     );
@@ -1278,14 +1689,20 @@ export default function Orders() {
                   renderCell: (p: any) => {
                     const groupName = String(p?.row?.groupName || '');
                     return (
-                      <Button size="small" color="error" onClick={()=>{
-                        setManualOrderGroups((prev)=> prev.filter((x)=> String(x) !== groupName));
-                        setManualOrderQtyByGroup((prev)=> {
-                          const next = { ...(prev || {}) };
-                          delete next[groupName];
-                          return next;
-                        });
-                      }}>Remove</Button>
+                      <IconButton
+                        size="small"
+                        disabled={manualIsLocked}
+                        onClick={() => {
+                          setManualOrderGroups((prev)=> prev.filter((x)=> String(x) !== groupName));
+                          setManualOrderQtyByGroup((prev)=> {
+                            const next = { ...prev };
+                            delete (next as any)[groupName];
+                            return next;
+                          });
+                        }}
+                      >
+                        <DeleteIcon fontSize="small" />
+                      </IconButton>
                     );
                   }
                 });
@@ -1329,19 +1746,61 @@ export default function Orders() {
               </Stack>
               <div style={{ height: 520, width: '100%' }}>
                 <DataGrid
-                  rows={(manualPickerRowsFiltered || []).map((r: any) => ({ id: String(r.groupName || r.lineItem || ''), ...r }))}
+                  rows={(Array.isArray(manualPickerRows) ? manualPickerRows : []).map((r: any) => ({ id: String(r.groupName || r.lineItem || ''), ...r }))}
                   columns={(() => {
                     const cols: any[] = [
                       { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
                       { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
                       { field: 'selectedWarehouseAvailable', headerName: `THIS - ${manualWarehouseName || 'Warehouse'}`, width: 170, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
-                      { field: 'onWaterPallets', headerName: 'On-Water', width: 110, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.onWaterPallets ?? 0) },
-                      { field: 'onWaterEdd', headerName: 'On-Water EDD', width: 130, renderCell: (p: any) => String(p?.row?.onWaterEdd || '-') },
-                      { field: 'onProcessPallets', headerName: 'On-Process', width: 120, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.onProcessPallets ?? 0) },
-                      { field: 'onProcessEdd', headerName: 'On-Process EDD', width: 140, renderCell: (p: any) => String(p?.row?.onProcessEdd || '-') },
+                      {
+                        field: 'onWaterPallets',
+                        headerName: 'On-Water',
+                        width: 120,
+                        type: 'number',
+                        align: 'right',
+                        headerAlign: 'right',
+                        renderCell: (p: any) => {
+                          const qty = Number(p?.row?.onWaterPallets ?? 0);
+                          const groupName = String(p?.row?.groupName || '').trim();
+                          const wid = String(manualWarehouseId || '').trim();
+                          if (!qty) return '0';
+                          return (
+                            <Button
+                              variant="text"
+                              size="small"
+                              onClick={() => openOnWaterDetails({ warehouseId: wid, groupName })}
+                              sx={{ minWidth: 0, p: 0, textDecoration: 'underline', fontSize: 16, fontWeight: 700 }}
+                            >
+                              {qty}
+                            </Button>
+                          );
+                        },
+                      },
                     ];
+
+                    const wid = String(manualWarehouseId || '').trim();
+                    const list = Array.isArray(manualPickerWarehouses) ? manualPickerWarehouses : [];
+                    const second = list.find((w: any) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
+                    const secondId = second ? String(second._id) : '';
+
+                    if (secondId && second) {
+                      cols.push({
+                        field: `wh_${secondId}`,
+                        headerName: second.name,
+                        width: 120,
+                        type: 'number',
+                        align: 'right',
+                        headerAlign: 'right',
+                        renderCell: (p: any) => {
+                          const per = (p?.row as any)?.perWarehouse || {};
+                          return String(Number(per?.[String(secondId)] ?? 0));
+                        },
+                      });
+                    }
+
                     for (const w of (manualPickerWarehouses || [])) {
                       if (String(w?._id || '') === String(manualWarehouseId)) continue;
+                      if (secondId && String(w?._id || '') === String(secondId)) continue;
                       cols.push({
                         field: `wh_${w._id}`,
                         headerName: w.name,
@@ -1349,21 +1808,164 @@ export default function Orders() {
                         type: 'number',
                         align: 'right',
                         headerAlign: 'right',
-                        valueGetter: (params: any) => {
-                          const per = (params?.row as any)?.perWarehouse || {};
-                          return Number(per?.[String(w._id)] ?? 0);
+                        renderCell: (p: any) => {
+                          const per = (p?.row as any)?.perWarehouse || {};
+                          return String(Number(per?.[String(w._id)] ?? 0));
                         },
                       });
                     }
+
+                    cols.push({
+                      field: 'onProcessPallets',
+                      headerName: 'On-Process',
+                      width: 120,
+                      type: 'number',
+                      align: 'right',
+                      headerAlign: 'right',
+                      renderCell: (p: any) => {
+                        const qty = Number(p?.row?.onProcessPallets ?? 0);
+                        const groupName = String(p?.row?.groupName || '').trim();
+                        if (!qty) return '0';
+                        return (
+                          <Button
+                            variant="text"
+                            size="small"
+                            onClick={() => openOnProcessDetails({ groupName })}
+                            sx={{ minWidth: 0, p: 0, textDecoration: 'underline', fontSize: 16, fontWeight: 700 }}
+                          >
+                            {qty}
+                          </Button>
+                        );
+                      },
+                    });
+
+                    cols.push({
+                      field: 'maxOrder',
+                      headerName: 'Max Order',
+                      width: 140,
+                      type: 'number',
+                      align: 'right',
+                      headerAlign: 'right',
+                      sortable: true,
+                      valueGetter: (...args: any[]) => {
+                        const maybeParams = args?.[0];
+                        const maybeRow = args?.[1];
+                        const row = (maybeRow && typeof maybeRow === 'object') ? maybeRow : (maybeParams?.row || {});
+                        const primary = Number(row?.selectedWarehouseAvailable ?? 0);
+                        const onWater = Number(row?.onWaterPallets ?? 0);
+                        const onProcess = Number(row?.onProcessPallets ?? 0);
+                        let secondQty = 0;
+                        if (secondId) {
+                          const per = row?.perWarehouse || {};
+                          secondQty = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
+                        }
+                        const total =
+                          (Number.isFinite(primary) ? primary : 0) +
+                          (Number.isFinite(onWater) ? onWater : 0) +
+                          (Number.isFinite(onProcess) ? onProcess : 0) +
+                          (Number.isFinite(secondQty) ? secondQty : 0);
+                        return Math.max(0, Math.floor(total));
+                      },
+                      renderCell: (p: any) => {
+                        const v = Number((p && typeof p === 'object' && 'value' in p) ? (p as any).value : 0);
+                        return String(Number.isFinite(v) ? v : 0);
+                      },
+                    });
                     return cols;
                   })()}
                   loading={manualPickerLoading}
+                  getRowClassName={(params: any) => {
+                    const row = (params as any)?.row || {};
+                    const primary = Number(row?.selectedWarehouseAvailable ?? 0);
+                    const onWater = Number(row?.onWaterPallets ?? 0);
+                    const onProcess = Number(row?.onProcessPallets ?? 0);
+                    const wid = String(manualWarehouseId || '').trim();
+                    const list = Array.isArray(manualPickerWarehouses) ? manualPickerWarehouses : [];
+                    const second = list.find((w: any) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
+                    const secondId = second ? String(second._id) : '';
+                    let secondQty = 0;
+                    if (secondId) {
+                      const per = row?.perWarehouse || {};
+                      secondQty = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
+                    }
+                    const total =
+                      (Number.isFinite(primary) ? primary : 0) +
+                      (Number.isFinite(onWater) ? onWater : 0) +
+                      (Number.isFinite(onProcess) ? onProcess : 0) +
+                      (Number.isFinite(secondQty) ? secondQty : 0);
+                    const maxOrder = Math.max(0, Math.floor(total));
+                    return maxOrder <= 0 ? 'row-maxorder-zero' : '';
+                  }}
+                  sx={{
+                    '& .row-maxorder-zero': {
+                      bgcolor: 'rgba(211, 47, 47, 0.08)',
+                      '&:hover': { bgcolor: 'rgba(211, 47, 47, 0.12)' },
+                    },
+                  }}
                   checkboxSelection
+                  isRowSelectable={(params: any) => {
+                    const row = (params as any)?.row || {};
+                    const primary = Number(row?.selectedWarehouseAvailable ?? 0);
+                    const onWater = Number(row?.onWaterPallets ?? 0);
+                    const onProcess = Number(row?.onProcessPallets ?? 0);
+                    const wid = String(manualWarehouseId || '').trim();
+                    const list = Array.isArray(manualPickerWarehouses) ? manualPickerWarehouses : [];
+                    const second = list.find((w: any) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
+                    const secondId = second ? String(second._id) : '';
+                    let secondQty = 0;
+                    if (secondId) {
+                      const per = row?.perWarehouse || {};
+                      secondQty = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
+                    }
+                    const total =
+                      (Number.isFinite(primary) ? primary : 0) +
+                      (Number.isFinite(onWater) ? onWater : 0) +
+                      (Number.isFinite(onProcess) ? onProcess : 0) +
+                      (Number.isFinite(secondQty) ? secondQty : 0);
+                    const maxOrder = Math.max(0, Math.floor(total));
+                    return maxOrder > 0;
+                  }}
                   disableRowSelectionOnClick
                   density="compact"
                   slots={{ toolbar: GridToolbar }}
                   slotProps={{ toolbar: { showQuickFilter: true, quickFilterProps: { debounceMs: 250 } } as any }}
-                  onRowSelectionModelChange={(m: any)=> setManualPickSelected(m)}
+                  onRowSelectionModelChange={(m: any)=> {
+                    const idsArr = m?.ids ? Array.from(m.ids) : [];
+                    const idsStr = idsArr.map((x: any) => String(x));
+                    const byId = new Map(
+                      (Array.isArray(manualPickerRows) ? manualPickerRows : [])
+                        .map((r: any) => ({ id: String(r?.groupName || r?.lineItem || ''), row: r }))
+                        .filter((x: any) => x.id)
+                        .map((x: any) => [x.id, x.row])
+                    );
+
+                    const wid = String(manualWarehouseId || '').trim();
+                    const list = Array.isArray(manualPickerWarehouses) ? manualPickerWarehouses : [];
+                    const second = list.find((w: any) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
+                    const secondId = second ? String(second._id) : '';
+
+                    const allowed = new Set<string>();
+                    for (const id of idsStr) {
+                      const row = byId.get(id) || {};
+                      const primary = Number(row?.selectedWarehouseAvailable ?? 0);
+                      const onWater = Number(row?.onWaterPallets ?? 0);
+                      const onProcess = Number(row?.onProcessPallets ?? 0);
+                      let secondQty = 0;
+                      if (secondId) {
+                        const per = row?.perWarehouse || {};
+                        secondQty = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
+                      }
+                      const total =
+                        (Number.isFinite(primary) ? primary : 0) +
+                        (Number.isFinite(onWater) ? onWater : 0) +
+                        (Number.isFinite(onProcess) ? onProcess : 0) +
+                        (Number.isFinite(secondQty) ? secondQty : 0);
+                      const maxOrder = Math.max(0, Math.floor(total));
+                      if (maxOrder > 0) allowed.add(id);
+                    }
+
+                    setManualPickSelected({ type: 'include', ids: allowed });
+                  }}
                   rowSelectionModel={manualPickSelected}
                   pagination
                   pageSizeOptions={[10, 20, 50, 100]}
@@ -1376,9 +1978,35 @@ export default function Orders() {
               <Button variant="contained" onClick={()=>{
                 const idsArr = manualPickSelected?.ids ? Array.from(manualPickSelected.ids) : [];
                 const selected = new Set(idsArr.map((x)=> String(x)));
+                const wid = String(manualWarehouseId || '').trim();
+                const list = Array.isArray(manualPickerWarehouses) ? manualPickerWarehouses : [];
+                const second = list.find((w: any) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
+                const secondId = second ? String(second._id) : '';
                 const picked = (manualPickerRows || [])
-                  .map((r: any) => String(r?.groupName || r?.lineItem || ''))
-                  .filter((id: string) => selected.has(id));
+                  .map((r: any) => ({
+                    id: String(r?.groupName || r?.lineItem || ''),
+                    row: r,
+                  }))
+                  .filter((x: any) => x.id && selected.has(x.id))
+                  .filter((x: any) => {
+                    const row = x.row || {};
+                    const primary = Number(row?.selectedWarehouseAvailable ?? 0);
+                    const onWater = Number(row?.onWaterPallets ?? 0);
+                    const onProcess = Number(row?.onProcessPallets ?? 0);
+                    let secondQty = 0;
+                    if (secondId) {
+                      const per = row?.perWarehouse || {};
+                      secondQty = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
+                    }
+                    const total =
+                      (Number.isFinite(primary) ? primary : 0) +
+                      (Number.isFinite(onWater) ? onWater : 0) +
+                      (Number.isFinite(onProcess) ? onProcess : 0) +
+                      (Number.isFinite(secondQty) ? secondQty : 0);
+                    const maxOrder = Math.max(0, Math.floor(total));
+                    return maxOrder > 0;
+                  })
+                  .map((x: any) => x.id);
                 setManualOrderGroups((prev)=> {
                   const base = Array.isArray(prev) ? prev : [];
                   const set = new Set(base.map((x)=> String(x)));
@@ -1406,12 +2034,225 @@ export default function Orders() {
               !manualEstFulfillment ||
               manualEstFulfillment < todayYmd ||
               !String(manualShippingAddress||'').trim() ||
+              manualIsLocked ||
               (manualOrderGroups.length === 0) ||
               (Object.entries(manualOrderQtyByGroup || {}).filter(([g, q]) => manualOrderGroups.includes(g) && Number(q) > 0).length === 0)
             }
           >
             Save
           </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={viewOrderableOpen} onClose={()=> setViewOrderableOpen(false)} fullWidth maxWidth="xl">
+        <DialogTitle>VIEW ORDERABLE PALLETS</DialogTitle>
+        <DialogContent>
+          <Stack direction={{ xs:'column', sm:'row' }} spacing={2} alignItems={{ xs:'stretch', sm:'center' }} sx={{ mb: 1, mt: 1 }}>
+            <TextField
+              size="small"
+              label="Search Pallet ID / Pallet Description"
+              value={viewOrderableQ}
+              onChange={(e)=>setViewOrderableQ(e.target.value)}
+              sx={{ flex: 1, minWidth: 260 }}
+            />
+            <Button
+              variant="outlined"
+              onClick={exportAllOrderablePalletsXlsx}
+              disabled={viewOrderableLoading || viewOrderableExporting || !viewOrderableWarehouseId}
+            >
+              Export XLSX
+            </Button>
+            <Button
+              variant="outlined"
+              onClick={openViewOrderableItems}
+              disabled={!viewOrderableWarehouseId || viewOrderableLoading}
+            >
+              Refresh
+            </Button>
+          </Stack>
+
+          <div style={{ height: 520, width: '100%' }}>
+            <DataGrid
+              rows={(Array.isArray(viewOrderableFilteredRows) ? viewOrderableFilteredRows : []).map((r: any) => ({ id: String(r.groupName || r.lineItem || ''), ...r }))}
+              columns={(() => {
+                const selectedWarehouseName =
+                  String((Array.isArray(warehouses) ? warehouses : []).find((w: any) => String(w?._id || '') === String(viewOrderableWarehouseId))?.name || '').trim();
+                const wid = String(viewOrderableWarehouseId || '').trim();
+                const list = Array.isArray(viewOrderableWarehouses) ? viewOrderableWarehouses : [];
+                const second = list.find((w: any) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
+                const secondId = second ? String(second._id) : '';
+                const secondName = second ? String(second.name || '').trim() : '';
+
+                const cols: any[] = [
+                  { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
+                  { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
+                  { field: 'selectedWarehouseAvailable', headerName: `THIS - ${selectedWarehouseName || 'Warehouse'}`, width: 170, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
+                  { field: 'onWaterPallets', headerName: 'On-Water', width: 120, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.onWaterPallets ?? 0) },
+                ];
+
+                if (secondId) {
+                  cols.push({
+                    field: 'secondWarehouseAvailable',
+                    headerName: secondName || '2nd Warehouse',
+                    width: 150,
+                    type: 'number',
+                    align: 'right',
+                    headerAlign: 'right',
+                    sortable: true,
+                    filterable: false,
+                    valueGetter: (...args: any[]) => {
+                      const maybeParams = args?.[0];
+                      const maybeRow = args?.[1];
+                      const row = (maybeRow && typeof maybeRow === 'object') ? maybeRow : (maybeParams?.row || {});
+                      const per = row?.perWarehouse || {};
+                      const v = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
+                      return Math.max(0, Math.floor(Number.isFinite(v) ? v : 0));
+                    },
+                    renderCell: (p: any) => {
+                      const per = (p?.row as any)?.perWarehouse || {};
+                      const v = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
+                      return String(Number.isFinite(v) ? v : 0);
+                    },
+                  });
+                }
+
+                cols.push({
+                  field: 'onProcessPallets',
+                  headerName: 'On-Process',
+                  width: 120,
+                  type: 'number',
+                  align: 'right',
+                  headerAlign: 'right',
+                  renderCell: (p: any) => String(p?.row?.onProcessPallets ?? 0),
+                });
+
+                cols.push({
+                  field: 'maxOrder',
+                  headerName: 'Max Order',
+                  width: 140,
+                  type: 'number',
+                  align: 'right',
+                  headerAlign: 'right',
+                  sortable: true,
+                  filterable: false,
+                  valueGetter: (...args: any[]) => {
+                    const maybeParams = args?.[0];
+                    const maybeRow = args?.[1];
+                    const row = (maybeRow && typeof maybeRow === 'object') ? maybeRow : (maybeParams?.row || {});
+                    const primary = Number(row?.selectedWarehouseAvailable ?? 0);
+                    const onWater = Number(row?.onWaterPallets ?? 0);
+                    const onProcess = Number(row?.onProcessPallets ?? 0);
+                    let secondQty = 0;
+                    if (secondId) {
+                      const per = row?.perWarehouse || {};
+                      secondQty = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
+                    }
+                    const total =
+                      (Number.isFinite(primary) ? primary : 0) +
+                      (Number.isFinite(onWater) ? onWater : 0) +
+                      (Number.isFinite(onProcess) ? onProcess : 0) +
+                      (Number.isFinite(secondQty) ? secondQty : 0);
+                    return Math.max(0, Math.floor(total));
+                  },
+                  renderCell: (p: any) => {
+                    const v = Number((p && typeof p === 'object' && 'value' in p) ? (p as any).value : 0);
+                    return String(Number.isFinite(v) ? v : 0);
+                  },
+                });
+
+                return cols;
+              })()}
+              loading={viewOrderableLoading}
+              getRowClassName={(params: any) => {
+                const row = (params as any)?.row || {};
+                const primary = Number(row?.selectedWarehouseAvailable ?? 0);
+                const onWater = Number(row?.onWaterPallets ?? 0);
+                const onProcess = Number(row?.onProcessPallets ?? 0);
+                const list = Array.isArray(viewOrderableWarehouses) ? viewOrderableWarehouses : [];
+                const wid = String(viewOrderableWarehouseId || '').trim();
+                const second = list.find((w: any) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
+                const secondId = second ? String(second._id) : '';
+                let secondQty = 0;
+                if (secondId) {
+                  const per = row?.perWarehouse || {};
+                  secondQty = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
+                }
+                const total =
+                  (Number.isFinite(primary) ? primary : 0) +
+                  (Number.isFinite(onWater) ? onWater : 0) +
+                  (Number.isFinite(onProcess) ? onProcess : 0) +
+                  (Number.isFinite(secondQty) ? secondQty : 0);
+                const maxOrder = Math.max(0, Math.floor(total));
+                return maxOrder <= 0 ? 'row-maxorder-zero' : '';
+              }}
+              sx={{
+                '& .row-maxorder-zero': {
+                  bgcolor: 'rgba(211, 47, 47, 0.08)',
+                  '&:hover': { bgcolor: 'rgba(211, 47, 47, 0.12)' },
+                },
+              }}
+              disableRowSelectionOnClick
+              density="compact"
+              slots={{ toolbar: GridToolbar }}
+              slotProps={{ toolbar: { showQuickFilter: true, quickFilterProps: { debounceMs: 250 } } as any }}
+              pagination
+              pageSizeOptions={[10, 20, 50, 100]}
+              initialState={{ pagination: { paginationModel: { page: 0, pageSize: 20 } } }}
+            />
+          </div>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={()=> setViewOrderableOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={onWaterOpen} onClose={()=> setOnWaterOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle>{`On-Water - ${onWaterGroupName || ''}`}</DialogTitle>
+        <DialogContent sx={{ pt: 2 }}>
+          {onWaterLoading ? <LinearProgress sx={{ mb: 2 }} /> : null}
+          <div style={{ height: 420, width: '100%' }}>
+            <DataGrid
+              rows={(onWaterRows || []).map((r: any, idx: number) => ({ id: r?.id || `${idx}`, ...r }))}
+              columns={([
+                { field: 'reference', headerName: 'Reference', flex: 1, minWidth: 180 },
+                { field: 'edd', headerName: 'EDD', width: 140 },
+                { field: 'qty', headerName: 'QTY', width: 120, type: 'number', align: 'right', headerAlign: 'right' },
+              ]) as GridColDef[]}
+              disableRowSelectionOnClick
+              density="compact"
+              pagination
+              pageSizeOptions={[5, 10, 20]}
+              initialState={{ pagination: { paginationModel: { page: 0, pageSize: 10 } } }}
+            />
+          </div>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={()=> setOnWaterOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={onProcessOpen} onClose={()=> setOnProcessOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle>{`On-Process - ${onProcessGroupName || ''}`}</DialogTitle>
+        <DialogContent sx={{ pt: 2 }}>
+          {onProcessLoading ? <LinearProgress sx={{ mb: 2 }} /> : null}
+          <div style={{ height: 420, width: '100%' }}>
+            <DataGrid
+              rows={(onProcessRows || []).map((r: any, idx: number) => ({ id: r?.id || `${idx}`, ...r }))}
+              columns={([
+                { field: 'reference', headerName: 'Reference', flex: 1, minWidth: 180 },
+                { field: 'edd', headerName: 'EDD', width: 140 },
+                { field: 'qty', headerName: 'QTY', width: 120, type: 'number', align: 'right', headerAlign: 'right' },
+              ]) as GridColDef[]}
+              disableRowSelectionOnClick
+              density="compact"
+              pagination
+              pageSizeOptions={[5, 10, 20]}
+              initialState={{ pagination: { paginationModel: { page: 0, pageSize: 10 } } }}
+            />
+          </div>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={()=> setOnProcessOpen(false)}>Close</Button>
         </DialogActions>
       </Dialog>
     </Container>

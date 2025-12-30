@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Container, Typography, Paper, Stack, TextField, Button, IconButton, MenuItem, Chip } from '@mui/material';
+import { Container, Typography, Paper, Stack, TextField, Button, IconButton, MenuItem, Chip, Dialog, DialogTitle, DialogContent, DialogActions, Box, LinearProgress, ButtonGroup } from '@mui/material';
 import * as XLSX from 'xlsx';
 import { DataGrid, GridColDef, GridRenderCellParams } from '@mui/x-data-grid';
 import api from '../api';
@@ -22,6 +22,8 @@ interface Shipment {
   createdAt: string;
 }
 
+interface ItemGroupRow { name: string; lineItem?: string }
+
 export default function Ship() {
   const [rows, setRows] = useState<Shipment[]>([]);
   const [loading, setLoading] = useState(false);
@@ -29,6 +31,7 @@ export default function Ship() {
   const [eddEdit, setEddEdit] = useState<Record<string, string>>({});
   const toast = useToast();
   const [warehouses, setWarehouses] = useState<any[]>([]);
+  const [palletIdByGroup, setPalletIdByGroup] = useState<Record<string, string>>({});
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(10);
   const [rowCount, setRowCount] = useState(0);
@@ -38,6 +41,11 @@ export default function Ship() {
   const [eddTo, setEddTo] = useState('');
   const [exporting, setExporting] = useState(false);
   const [exportingRowId, setExportingRowId] = useState<string>('');
+  const [viewOpen, setViewOpen] = useState(false);
+  const [viewLoading, setViewLoading] = useState(false);
+  const [viewShipment, setViewShipment] = useState<any>(null);
+  const [viewPalletRows, setViewPalletRows] = useState<any[]>([]);
+  const [viewItemRows, setViewItemRows] = useState<any[]>([]);
   const nameOf = useMemo(()=>{
     const map: Record<string,string> = {};
     for (const w of warehouses) map[String((w as any)._id)] = (w as any).name;
@@ -80,6 +88,24 @@ export default function Ship() {
     loadWarehouses();
   }, []);
 
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await api.get<ItemGroupRow[]>('/item-groups');
+        const groups = Array.isArray(data) ? data : [];
+        const map: Record<string, string> = {};
+        for (const g of groups) {
+          const name = String((g as any)?.name || '').trim();
+          if (!name) continue;
+          map[name] = String((g as any)?.lineItem || '').trim();
+        }
+        setPalletIdByGroup(map);
+      } catch {
+        setPalletIdByGroup({});
+      }
+    })();
+  }, []);
+
   // When warehouses list changes, force the grid rows to re-render so nameOf is applied
   useEffect(() => {
     setRows(prev => prev.slice());
@@ -97,6 +123,9 @@ export default function Ship() {
         const itemCodes = Array.from(new Set(items.map((i:any)=> i.itemCode).filter(Boolean)));
         window.dispatchEvent(new CustomEvent('shipment-delivered', { detail: { itemCodes } }));
       } catch {}
+      try {
+        window.dispatchEvent(new CustomEvent('shipments-changed', { detail: { kind: 'deliver', shipmentId: id } }));
+      } catch {}
       load();
     } catch (e: any) {
       toast.error(e?.response?.data?.message || 'Failed to deliver');
@@ -108,9 +137,88 @@ export default function Ship() {
       const date = eddEdit[id];
       await api.put(`/shipments/${id}/edd`, { estDeliveryDate: date });
       toast.success('EDD updated');
+      try {
+        window.dispatchEvent(new CustomEvent('shipments-changed', { detail: { kind: 'edd', shipmentId: id } }));
+      } catch {}
       load();
     } catch (e: any) {
       toast.error(e?.response?.data?.message || 'Failed to update EDD');
+    }
+  };
+
+  const parsePalletSegments = (noteText: string) => {
+    const out: Array<{ groupName: string; pallets: number }> = [];
+    try {
+      const re = /pallet-group:([^;|]+);\s*pallets:(\d+)/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(String(noteText || ''))) !== null) {
+        const groupName = String(m[1] || '').trim();
+        const pallets = Number(m[2] || 0);
+        if (!groupName || !Number.isFinite(pallets) || pallets <= 0) continue;
+        out.push({ groupName, pallets });
+      }
+    } catch {}
+    return out;
+  };
+
+  const openView = async (shipmentId: string) => {
+    if (!shipmentId) return;
+    setViewOpen(true);
+    setViewLoading(true);
+    setViewShipment(null);
+    setViewPalletRows([]);
+    setViewItemRows([]);
+    try {
+      const { data } = await api.get(`/shipments/${encodeURIComponent(shipmentId)}`);
+      setViewShipment(data);
+
+      const notes = String(data?.notes || '');
+      const palletSegs = parsePalletSegments(notes);
+      if (palletSegs.length) {
+        setViewPalletRows(
+          palletSegs.map((p, idx) => ({
+            id: `${p.groupName}-${idx}`,
+            palletId: String(palletIdByGroup[String(p.groupName || '').trim()] || ''),
+            ...p,
+          }))
+        );
+      } else {
+        const list: any[] = Array.isArray(data?.items) ? data.items : [];
+        const codes = Array.from(new Set(list.map((i:any)=> i.itemCode).filter(Boolean)));
+        const details: Record<string, any> = {};
+        await Promise.all(codes.map(async (code) => {
+          try {
+            const res = await api.get(`/items/${encodeURIComponent(code)}`);
+            details[code] = res?.data || {};
+          } catch {}
+        }));
+        const grouped = new Map<string, number>();
+        for (const it of list) {
+          const meta = details[it.itemCode] || {};
+          const palletGroup = String(meta.itemGroup || '').trim() || String(it.itemCode || '').trim() || 'Unknown';
+          const qty = Number(it.qtyPieces || 0);
+          if (!Number.isFinite(qty) || qty <= 0) continue;
+          grouped.set(palletGroup, (grouped.get(palletGroup) || 0) + qty);
+        }
+        setViewPalletRows(
+          Array.from(grouped.entries()).map(([groupName, pallets], idx) => ({
+            id: `${groupName}-${idx}`,
+            palletId: String(palletIdByGroup[String(groupName || '').trim()] || ''),
+            groupName,
+            pallets,
+          }))
+        );
+      }
+
+      const list: any[] = Array.isArray(data?.items) ? data.items : [];
+      setViewItemRows(list.map((it, idx) => ({ id: `${it.itemCode || 'item'}-${idx}`, ...it })));
+    } catch (e: any) {
+      toast.error(e?.response?.data?.message || 'Failed to load shipment details');
+      setViewShipment(null);
+      setViewPalletRows([]);
+      setViewItemRows([]);
+    } finally {
+      setViewLoading(false);
     }
   };
 
@@ -148,7 +256,7 @@ export default function Ship() {
       const text = !w ? 'NA' : (typeof w === 'object' && w?.name) ? w.name : nameOf(w);
       return <span>{text}</span>;
     } },
-    { field: 'items', headerName: 'Pallet', flex: 1, minWidth: 180, renderCell: (params: GridRenderCellParams) => {
+    { field: 'items', headerName: 'Pallet', flex: 1, minWidth: 280, renderCell: (params: GridRenderCellParams) => {
       const row: any = params?.row || {};
       const list: any[] = Array.isArray(row?.items) ? row.items : [];
       const exportItems = async () => {
@@ -228,9 +336,22 @@ export default function Ship() {
         }
       };
       return (
-        <Stack direction="row" spacing={1} alignItems="center">
-          <Button size="small" variant="outlined" onClick={exportItems} disabled={exportingRowId === (row._id||'')}>EXPORT PALLET</Button>
-        </Stack>
+        <ButtonGroup
+          variant="contained"
+          size="small"
+          sx={{
+            '& .MuiButton-root': {
+              justifyContent: 'flex-start',
+              minWidth: 0,
+              paddingLeft: 1,
+              paddingRight: 1,
+              whiteSpace: 'nowrap',
+            }
+          }}
+        >
+          <Button onClick={()=> openView(String(row._id || ''))}>View</Button>
+          <Button onClick={exportItems} disabled={exportingRowId === (row._id||'')}>EXPORT PALLET</Button>
+        </ButtonGroup>
       );
     } },
     { field: 'estDeliveryDate', headerName: 'Estimated Date Delivery', width: 300, renderCell: (params: GridRenderCellParams) => {
@@ -264,13 +385,13 @@ export default function Ship() {
         </Stack>
       );
     }},
-    { field: 'actions', headerName: 'Actions', width: 160, renderCell: (params: GridRenderCellParams) => {
+    { field: 'actions', headerName: 'Actions', width: 190, renderCell: (params: GridRenderCellParams) => {
       const row: any = params?.row || {};
       const edd = row?.estDeliveryDate ? String(row.estDeliveryDate).substring(0,10) : '';
       return (
-        <Stack direction="row" spacing={1}>
+        <Stack direction="column" spacing={0.5} sx={{ width: '100%' }}>
           {row?.status === 'on_water' && row?._id ? (
-            <Button size="small" startIcon={<LocalShippingIcon />} disabled={!edd} onClick={()=>{
+            <Button variant="contained" size="small" startIcon={<LocalShippingIcon />} disabled={!edd} onClick={()=>{
               if (!edd) { toast.error('Set EDD first'); return; }
               const d = new Date(`${edd}T00:00:00`);
               const now = new Date();
@@ -283,7 +404,7 @@ export default function Ship() {
               const ok = window.confirm(`Mark this shipment as Delivered with delivery date ${edd}?`);
               if (!ok) return;
               deliver(row._id);
-            }}>Deliver</Button>
+            }} sx={{ justifyContent: 'flex-start' }}>Deliver</Button>
           ) : null}
         </Stack>
       );
@@ -356,6 +477,13 @@ export default function Ship() {
             columns={columns}
             loading={loading}
             disableRowSelectionOnClick
+            getRowHeight={()=> 'auto'}
+            sx={{
+              '& .MuiDataGrid-cell': {
+                py: 0.75,
+                alignItems: 'center',
+              },
+            }}
             paginationMode="server"
             rowCount={rowCount}
             paginationModel={{ page, pageSize }}
@@ -364,6 +492,37 @@ export default function Ship() {
           />
         </div>
       </Paper>
+
+      <Dialog open={viewOpen} onClose={()=> setViewOpen(false)} fullWidth maxWidth="lg">
+        <DialogTitle>
+          {`Pallet Details${viewShipment ? ` - ${String(viewShipment?.owNumber || viewShipment?._id || '')}` : ''}`}
+        </DialogTitle>
+        <DialogContent sx={{ pt: 2 }}>
+          {viewLoading ? <LinearProgress sx={{ mb: 2 }} /> : null}
+          {viewShipment ? (
+            <Box>
+              <div style={{ height: 420, width: '100%' }}>
+                <DataGrid
+                  rows={viewPalletRows}
+                  columns={([
+                    { field: 'palletId', headerName: 'Pallet ID', width: 160 },
+                    { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 240 },
+                    { field: 'pallets', headerName: 'Qty', width: 120, type: 'number', align: 'right', headerAlign: 'right' },
+                  ]) as GridColDef[]}
+                  disableRowSelectionOnClick
+                  density="compact"
+                  pagination
+                  pageSizeOptions={[5, 10, 20]}
+                  initialState={{ pagination: { paginationModel: { page: 0, pageSize: 10 } } }}
+                />
+              </div>
+            </Box>
+          ) : null}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={()=> setViewOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
     </Container>
   );
 }

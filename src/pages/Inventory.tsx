@@ -241,6 +241,7 @@ export default function Inventory() {
           columns={columns}
           loading={loading}
           disableRowSelectionOnClick
+          onRowDoubleClick={(p: any) => onView(String(p?.row?.groupName || ''))}
           initialState={{ pagination: { paginationModel: { pageSize: 20, page: 0 } } }}
           pageSizeOptions={[10,20,50,100]}
           density="compact"
@@ -249,7 +250,7 @@ export default function Inventory() {
       <PalletImportModal open={importOpen} onClose={()=>setImportOpen(false)} onImported={loadGroups} />
 
       <Dialog open={lossOpen} onClose={()=>setLossOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>Record Loss (Inventory Adjustment)</DialogTitle>
+        <DialogTitle sx={{ color: 'error.main' }}>Record Loss (Inventory Adjustment)</DialogTitle>
         <DialogContent sx={{ pt: 2 }}>
           <TextField
             select

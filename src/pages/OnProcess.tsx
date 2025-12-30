@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Container, Typography, Paper, Stack, Button, TextField, MenuItem, Dialog, DialogTitle, DialogContent, DialogActions, FormControlLabel, Checkbox, Chip, IconButton, Select, InputLabel, FormControl, Autocomplete } from '@mui/material';
+import { useNavigate } from 'react-router-dom';
 import SaveIcon from '@mui/icons-material/Save';
 import AddIcon from '@mui/icons-material/Add';
 import { DataGrid, GridColDef } from '@mui/x-data-grid';
@@ -9,11 +10,19 @@ import { useToast } from '../components/ToastProvider';
 
 interface OnProcPallet { _id?: string; poNumber: string; groupName: string; totalPallet: number; finishedPallet: number; transferredPallet?: number; status?: string; notes?: string; locked?: boolean; remainingPallet?: number; createdAt?: string }
 interface OnProcBatch { _id: string; reference: string; poNumber: string; status: 'in-progress'|'partial-done'|'completed'; estFinishDate?: string; notes?: string; itemCount?: number; createdAt?: string }
+interface ItemGroupRow { name: string; lineItem?: string }
 
 export default function OnProcess() {
   const toast = useToast();
+  const navigate = useNavigate();
   const todayYmd = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const defaultBatchEstYmd = useMemo(() => {
+    const d = new Date();
+    d.setMonth(d.getMonth() + 1);
+    return d.toISOString().slice(0, 10);
+  }, []);
   const [items, setItems] = useState<OnProcPallet[]>([]);
+  const [palletIdByGroup, setPalletIdByGroup] = useState<Record<string, string>>({});
   const [q, setQ] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
@@ -69,9 +78,28 @@ export default function OnProcess() {
     })();
   }, [transferBulkOpen]);
 
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await api.get<ItemGroupRow[]>('/item-groups');
+        const groups = Array.isArray(data) ? data : [];
+        const map: Record<string, string> = {};
+        for (const g of groups) {
+          const name = String((g as any)?.name || '').trim();
+          if (!name) continue;
+          map[name] = String((g as any)?.lineItem || '').trim();
+        }
+        setPalletIdByGroup(map);
+      } catch {
+        setPalletIdByGroup({});
+      }
+    })();
+  }, []);
+
   // Stable columns for DataGrid to prevent width reset on re-render
   const itemColumns = useMemo<GridColDef[]>(() => ([
     { field: 'poNumber', headerName: 'PO #', width: 120 },
+    { field: 'palletId', headerName: 'Pallet ID', width: 140 },
     { field: 'groupName', headerName: 'Pallet Description', flex: 2, minWidth: 220 },
     { field: 'totalPallet', headerName: 'Total Pallet', type: 'number', width: 140, editable: true, cellClassName: 'cell-editable-total' },
     { field: 'finishedPallet', headerName: 'Finished', type: 'number', width: 120, editable: true, cellClassName: 'cell-editable' },
@@ -96,6 +124,7 @@ export default function OnProcess() {
       .map(r => ({
         id: String((r as any)._id || `${selectedBatch?._id}:${r.groupName}`),
         poNumber: r.poNumber,
+        palletId: String(palletIdByGroup[String(r.groupName || '').trim()] || ''),
         groupName: r.groupName,
         totalPallet: r.totalPallet,
         finishedPallet: r.finishedPallet ?? 0,
@@ -104,7 +133,7 @@ export default function OnProcess() {
         status: r.status || 'in_progress',
         locked: Boolean((r as any).locked) && (Math.max(0, (r.totalPallet || 0) - (((r as any).transferredPallet || 0) + (r.finishedPallet || 0)))) === 0,
       }))
-  ), [batchItems, itemsSearch, selectedBatch]);
+  ), [batchItems, itemsSearch, selectedBatch, palletIdByGroup]);
 
   const load = async () => {
     setLoading(true);
@@ -203,7 +232,7 @@ export default function OnProcess() {
       poNumber: b.poNumber,
       pallets: '',
       status: b._id === selectedBatch?._id ? batchStatus : b.status,
-      estFinishDate: b._id === selectedBatch?._id ? (batchEst || '') : (b.estFinishDate ? b.estFinishDate.substring(0,10) : ''),
+      estFinishDate: b._id === selectedBatch?._id ? (batchEst || '') : (b.estFinishDate ? new Date(b.estFinishDate as any).toISOString().slice(0, 10) : ''),
       notes: b.notes || '',
       __raw: b,
     }));
@@ -234,7 +263,7 @@ export default function OnProcess() {
   const selectBatch = (b: OnProcBatch) => {
     setSelectedBatch(b);
     setBatchStatus(b.status);
-    setBatchEst(b.estFinishDate ? b.estFinishDate.substring(0,10) : '');
+    setBatchEst(b.estFinishDate ? new Date(b.estFinishDate as any).toISOString().slice(0, 10) : defaultBatchEstYmd);
     setBatchNotes(b.notes || '');
     loadBatchItems(b._id);
   };
@@ -258,6 +287,9 @@ export default function OnProcess() {
       if (issues) toast.warning(`Import completed with issues. Created: ${created}, Issues: ${issues}. See details below.`);
       else toast.success(`Import completed. Created: ${created}.`);
       setFile(null);
+      if (selectedBatch && !String(batchEst || '').trim()) {
+        setBatchEst(defaultBatchEstYmd);
+      }
       await load();
       await loadBatches();
       if (selectedBatch) await loadBatchItems(selectedBatch._id);
@@ -334,13 +366,27 @@ export default function OnProcess() {
             rows={batchRows}
             columns={batchCols}
             disableRowSelectionOnClick
+            onRowDoubleClick={(params: any) => {
+              const raw = (params as any)?.row?.__raw;
+              if (raw) selectBatch(raw);
+            }}
             density="compact"
             pageSizeOptions={[5,10,20,50,100]}
           />
         </div>
-        {selectedBatch && (
-          <Paper variant="outlined" sx={{ p:2, mt:2 }}>
-            <Typography variant="subtitle1" gutterBottom>Batch {selectedBatch.reference} — Items</Typography>
+        <Dialog
+          open={Boolean(selectedBatch)}
+          onClose={()=> {
+            setTransferBulkOpen(false);
+            setTransferConfirmed(false);
+            setAddOpen(false);
+            setSelectedBatch(null);
+          }}
+          maxWidth="xl"
+          fullWidth
+        >
+          <DialogTitle>Batch {selectedBatch?.reference || ''} — Items</DialogTitle>
+          <DialogContent sx={{ pt: 2 }}>
             <Stack direction={{ xs:'column', sm:'row' }} spacing={2} alignItems={{ xs:'stretch', sm:'center' }} sx={{ mb: 2 }}>
               <TextField fullWidth label="Notes/Remarks" value={batchNotes} onChange={(e)=> setBatchNotes(e.target.value)} />
               <Button variant="outlined" onClick={refreshSelectedBatch} disabled={batchRefreshing} sx={{ minWidth: 120 }}>
@@ -377,7 +423,7 @@ export default function OnProcess() {
                 />
               </Stack>
             </Stack>
-            <div style={{ height: 420, width: '100%' }}>
+            <div style={{ height: 520, width: '100%' }}>
               <DataGrid
                 rows={itemRows}
                 columns={itemColumns}
@@ -398,22 +444,16 @@ export default function OnProcess() {
                   return !locked && finished > 0;
                 }}
                 isCellEditable={(params:any)=>{
-                  // Allow editing for specific columns.
-                  // Special rule: totalPallet is editable even if completed/locked (increase-only enforced in processRowUpdate).
                   const editableFields = new Set(['totalPallet','finishedPallet','status']);
                   const remaining = Number((params.row as any)?.remainingPallet || 0);
                   const locked = Boolean((params.row as any)?.locked) && remaining === 0;
                   const st = String((params.row as any)?.status || '');
 
                   if (params.field === 'totalPallet') {
-                    // Never edit cancelled rows
                     return st !== 'cancelled';
                   }
 
-                  // locked rows: only totalPallet can be edited
                   if (locked) return false;
-
-                  // cancelled rows: do not allow editing finished/status via grid
                   if (st === 'cancelled') return false;
 
                   return editableFields.has(params.field);
@@ -448,7 +488,6 @@ export default function OnProcess() {
                       let status = String(fieldVals.status || it.status || 'in_progress');
                       if (!['in_progress','partial','completed','cancelled'].includes(status)) status = it.status || 'in_progress';
                       if (status === 'cancelled') {
-                        // Only allow cancel if nothing transferred; zero out values
                         if (transferred > 0) {
                           status = it.status || 'in_progress';
                         } else {
@@ -457,13 +496,10 @@ export default function OnProcess() {
                         }
                       }
 
-                      // For locked or completed rows, only allow increasing totalPallet.
-                      // Prevent any decrease (and always respect transferred as minimum).
                       if (wasLocked || prevStatus === 'completed') {
                         total = Math.max(prevTotal, total || 0);
                       }
 
-                      // For non-cancelled, total must be > 0 and cannot go below transferred
                       if (status !== 'cancelled') {
                         total = Math.max(1, transferred, total || 0);
                       } else {
@@ -479,7 +515,6 @@ export default function OnProcess() {
                       const nextLocked = wasLocked && total > prevTotal ? false : (it as any).locked;
                       return { ...it, totalPallet: total, finishedPallet: finished, status, locked: nextLocked } as any;
                     });
-                    // Apply auto batch status rules
                     const allDoneOrCancelled = next.length > 0 && next.every((r:any)=> ['completed','cancelled'].includes(String(r.status || '')));
                     const allZero = next.length > 0 && next.every((r:any)=> Number(r.finishedPallet||0) === 0 && Number((r as any).transferredPallet||0) === 0);
                     if (allDoneOrCancelled) {
@@ -519,7 +554,9 @@ export default function OnProcess() {
                 }}
               />
             </div>
-            <Stack direction="row" spacing={2} sx={{ mt: 2 }}>
+          </DialogContent>
+          <DialogActions>
+            <Stack direction="row" spacing={2} sx={{ width: '100%', justifyContent: 'flex-start', pl: 1 }}>
               <IconButton color="primary" onClick={async()=> {
                 setAddOpen(true);
                 setAddGroupName('');
@@ -538,6 +575,7 @@ export default function OnProcess() {
                     toast.error('Estimated Date Finish cannot be earlier than today');
                     return;
                   }
+                  if (!selectedBatch?._id) return;
                   await api.patch(`/on-process/batches/${selectedBatch._id}`, { status: batchStatus, estFinishDate: batchEst || null, notes: batchNotes });
                   await api.patch(`/on-process/batches/${selectedBatch._id}/pallets`, { pallets: batchItems.map(b => ({ groupName: b.groupName, totalPallet: b.totalPallet, finishedPallet: b.finishedPallet, status: b.status })) });
                   toast.success('Changes saved');
@@ -554,9 +592,9 @@ export default function OnProcess() {
               </Button>
               <Button variant="outlined" onClick={()=> setSelectedBatch(null)}>CLOSE/CANCEL</Button>
             </Stack>
-            
+          </DialogActions>
 
-            <Dialog open={addOpen} onClose={()=> setAddOpen(false)} maxWidth="xs" fullWidth>
+          <Dialog open={addOpen} onClose={()=> setAddOpen(false)} maxWidth="xs" fullWidth>
               <DialogTitle>Add Pallet Description</DialogTitle>
               <DialogContent sx={{ pt: 2 }}>
                 <Autocomplete
@@ -574,11 +612,13 @@ export default function OnProcess() {
                 <Button onClick={()=> setAddOpen(false)}>Cancel</Button>
                 <Button variant="contained" disabled={!addGroupSelected || !(Number(addTotal) > 0)} onClick={async()=>{
                   try {
-                    await api.post(`/on-process/batches/${selectedBatch._id}/pallets`, { groupName: addGroupSelected?.name, totalPallet: Number(addTotal) });
+                    const batchId = selectedBatch?._id;
+                    if (!batchId) return;
+                    await api.post(`/on-process/batches/${batchId}/pallets`, { groupName: addGroupSelected?.name, totalPallet: Number(addTotal) });
                     toast.success('Pallet description added');
                     setAddOpen(false);
                     setAddGroupName(''); setAddGroupSelected(null); setAddTotal('');
-                    await loadBatchItems(selectedBatch._id);
+                    await loadBatchItems(batchId);
                   } catch (e:any) { toast.error(e?.response?.data?.message || 'Failed to add'); }
                 }}>Add</Button>
               </DialogActions>
@@ -625,7 +665,7 @@ export default function OnProcess() {
                   />
                 )}
                 <Typography variant="body2" sx={{ mb: 1 }}>
-                  Reference used: <b>PO - {selectedBatch.poNumber}</b>
+                  Reference used: <b>PO - {selectedBatch?.poNumber || ''}</b>
                 </Typography>
                 <FormControlLabel control={<Checkbox checked={transferConfirmed} onChange={(e)=> setTransferConfirmed(e.target.checked)} />} label="I confirm this action is correct and cannot be undone." />
               </DialogContent>
@@ -637,8 +677,10 @@ export default function OnProcess() {
                       toast.error('EDD cannot be earlier than today');
                       return;
                     }
+                    const batchId = selectedBatch?._id;
+                    if (!batchId) return;
                     const transferItems = eligibleSelected.map(b => ({ groupName: b.groupName, pallets: b.finishedPallet || 0 }));
-                    await api.post(`/on-process/batches/${selectedBatch._id}/pallets/transfer`, { mode: transferMode, warehouseId: transferWarehouse, estDeliveryDate: transferMode==='on_water' ? transferEDD : undefined, items: transferItems });
+                    await api.post(`/on-process/batches/${batchId}/pallets/transfer`, { mode: transferMode, warehouseId: transferWarehouse, estDeliveryDate: transferMode==='on_water' ? transferEDD : undefined, items: transferItems });
                     toast.success('Transfer created');
                     setTransferBulkOpen(false);
                     setTransferWarehouse('');
@@ -646,13 +688,16 @@ export default function OnProcess() {
                     setTransferEDD('');
                     setTransferConfirmed(false);
                     await loadBatches();
-                    await loadBatchItems(selectedBatch._id);
+                    await loadBatchItems(batchId);
+                    if (transferMode === 'on_water') {
+                      setSelectedBatch(null);
+                      navigate('/ship');
+                    }
                   } catch (e:any) { toast.error(e?.response?.data?.message || 'Transfer failed'); }
                 }}>Confirm & Transfer</Button>
               </DialogActions>
             </Dialog>
-          </Paper>
-        )}
+        </Dialog>
       </Paper>
     </Container>
   );

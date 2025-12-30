@@ -125,7 +125,7 @@ export default function PalletImportModal({ open, onClose, onImported }: Props) 
 
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
-      <DialogTitle>IMPORT EXISTING PALLET INVENTORY ONLY</DialogTitle>
+      <DialogTitle sx={{ color: 'error.main' }}>IMPORT EXISTING PALLET INVENTORY ONLY</DialogTitle>
       <DialogContent>
         <Box sx={{ my: 2, display:'flex', gap:1, alignItems:'center' }}>
           <input key={fileInputKey} type="file" accept=".xlsx" onChange={handleFileChange} />

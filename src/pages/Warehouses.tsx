@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { Container, Typography, Paper, Stack, TextField, Button, Dialog, DialogTitle, DialogContent, DialogActions, IconButton, Menu, MenuItem } from '@mui/material';
+import { Container, Typography, Paper, Stack, TextField, Button, Dialog, DialogTitle, DialogContent, DialogActions, IconButton, Menu, MenuItem, Chip } from '@mui/material';
 import * as XLSX from 'xlsx';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
 import { DataGrid, GridColDef, GridRenderCellParams } from '@mui/x-data-grid';
 import api from '../api';
 import { useToast } from '../components/ToastProvider';
 
-interface Warehouse { _id: string; name: string; address?: string }
+interface Warehouse { _id: string; name: string; address?: string; isPrimary?: boolean }
 
 export default function Warehouses() {
   const [rows, setRows] = useState<Warehouse[]>([]);
@@ -118,7 +118,7 @@ export default function Warehouses() {
     }
   };
 
-  function ActionsMenuCell({ row, disabled, onEdit, onDelete, onExport }: { row: any, disabled?: boolean, onEdit: ()=>void, onDelete: ()=>void, onExport: ()=>void }) {
+  function ActionsMenuCell({ row, disabled, onEdit, onDelete, onExport, onSetPrimary }: { row: any, disabled?: boolean, onEdit: ()=>void, onDelete: ()=>void, onExport: ()=>void, onSetPrimary: ()=>void }) {
     const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
     const open = Boolean(anchorEl);
     const handleOpen = (e: React.MouseEvent<HTMLElement>) => setAnchorEl(e.currentTarget);
@@ -128,6 +128,7 @@ export default function Warehouses() {
       <>
         <IconButton size="small" onClick={handleOpen} aria-label="Actions"><MoreVertIcon fontSize="small" /></IconButton>
         <Menu anchorEl={anchorEl} open={open} onClose={handleClose} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }} transformOrigin={{ vertical: 'top', horizontal: 'right' }}>
+          <MenuItem onClick={wrap(onSetPrimary)} disabled={Boolean((row as any)?.isPrimary)}>Set as Primary</MenuItem>
           <MenuItem onClick={wrap(onEdit)}>Edit</MenuItem>
           <MenuItem onClick={wrap(onDelete)} disabled={!!disabled}>Delete</MenuItem>
           <MenuItem onClick={wrap(onExport)} disabled={!!disabled}>Export Stock</MenuItem>
@@ -137,7 +138,21 @@ export default function Warehouses() {
   }
 
   const columns: GridColDef[] = [
-    { field: 'name', headerName: 'Name', flex: 1, minWidth: 180 },
+    {
+      field: 'name',
+      headerName: 'Name',
+      flex: 1,
+      minWidth: 220,
+      renderCell: (p: any) => {
+        const isPrimary = Boolean((p?.row as any)?.isPrimary);
+        return (
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ width: '100%' }}>
+            <span>{String((p?.row as any)?.name || '')}</span>
+            {isPrimary ? <Chip size="small" label="PRIMARY" color="primary" variant="outlined" /> : null}
+          </Stack>
+        );
+      },
+    },
     { field: 'address', headerName: 'Address', flex: 2, minWidth: 240 },
     { field: 'actions', headerName: 'Actions', width: 80, sortable: false, filterable: false, renderCell: (params: GridRenderCellParams) => {
       const r = params.row as any;
@@ -145,6 +160,17 @@ export default function Warehouses() {
         <ActionsMenuCell
           row={r}
           disabled={exportingId === r._id}
+          onSetPrimary={async ()=>{
+            try {
+              const ok = window.confirm(`Set ${String(r.name || 'this warehouse')} as the primary warehouse?`);
+              if (!ok) return;
+              await api.put(`/warehouses/${r._id}/set-primary`);
+              toast.success('Primary warehouse updated');
+              load();
+            } catch (e:any) {
+              toast.error(e?.response?.data?.message || 'Failed to set primary');
+            }
+          }}
           onEdit={()=>{ setEditId(r._id); setEditName(r.name || ''); setEditAddress(r.address || ''); setEditOpen(true); }}
           onDelete={async ()=>{ if (!window.confirm('Delete this warehouse?')) return; try { await api.delete(`/warehouses/${r._id}`); toast.success('Deleted'); load(); } catch(e:any){ toast.error(e?.response?.data?.message || 'Delete failed'); } }}
           onExport={()=>{ exportStock(r._id, r.name || ''); }}

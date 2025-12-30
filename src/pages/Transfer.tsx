@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Container, Typography, Paper, Stack, TextField, Button, MenuItem } from '@mui/material';
+import { useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import api from '../api';
 import { useToast } from '../components/ToastProvider';
@@ -18,9 +19,11 @@ export default function Transfer() {
   const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const toast = useToast();
+  const navigate = useNavigate();
   const [available, setAvailable] = useState<Record<string, number>>({});
   const [file, setFile] = useState<File | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
+  const todayYmd = useMemo(() => new Date().toISOString().slice(0, 10), []);
 
   const loadWarehouses = async () => {
     try {
@@ -81,6 +84,7 @@ export default function Transfer() {
     if (!sourceWarehouseId || !warehouseId) { toast.error('Select both source and destination warehouses'); return; }
     if (sourceWarehouseId === warehouseId) { toast.error('Source and destination must be different'); return; }
     if (!poNumber.trim()) { toast.error('PO# is required'); return; }
+    if (edd && String(edd) < todayYmd) { toast.error('Estimated Delivery cannot be earlier than today'); return; }
     const valid = items.filter(i => i.groupName && Number.isFinite(i.pallets) && i.pallets > 0);
     if (!valid.length) { toast.error('Import at least one valid pallet row (Pallet Description, Total Pallet)'); return; }
     // client-side availability check
@@ -98,6 +102,7 @@ export default function Transfer() {
       toast.success('Transfer created and items moved to on-water');
       setItems([]);
       setPoNumber(''); setEdd(''); setFile(null);
+      navigate('/ship');
     } catch (e: any) {
       toast.error(e?.response?.data?.message || 'Failed to create transfer');
     } finally {
@@ -146,7 +151,23 @@ export default function Transfer() {
           <TextField select label="To Warehouse" size="small" sx={{ minWidth: 220 }} value={warehouseId} onChange={(e)=>setWarehouseId(e.target.value)}>
             {warehouses.map(w => <MenuItem key={w._id} value={w._id}>{w.name}</MenuItem>)}
           </TextField>
-          <TextField type="date" label="Estimated Delivery" size="small" sx={{ minWidth: 200 }} value={edd} onChange={(e)=>setEdd(e.target.value)} InputLabelProps={{ shrink: true }} />
+          <TextField
+            type="date"
+            label="Estimated Delivery"
+            size="small"
+            sx={{ minWidth: 200 }}
+            value={edd}
+            inputProps={{ min: todayYmd }}
+            onChange={(e)=> {
+              const v = String(e.target.value || '');
+              if (v && v < todayYmd) {
+                toast.error('Estimated Delivery cannot be earlier than today');
+                return;
+              }
+              setEdd(v);
+            }}
+            InputLabelProps={{ shrink: true }}
+          />
           <Button variant="outlined" onClick={refresh} disabled={refreshing} sx={{ minWidth: 120 }}>
             Refresh
           </Button>
@@ -193,7 +214,7 @@ export default function Transfer() {
           <Button variant="outlined" onClick={()=>{ setItems([]); setFile(null); }}>Clear</Button>
           <Button variant="contained" onClick={submit} disabled={submitting || !items.length || !poNumber.trim() || items.some(i=> (available[i.groupName]||0) < Number(i.pallets) || Number(i.pallets)<=0)}>Create Transfer</Button>
         </Stack>
-        <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
+        <Typography variant="body2" sx={{ display: 'block', mt: 1, color: 'error.main' }}>
           Note: After you create a transfer, you can view the transfer request in the Ship page.
         </Typography>
       </Paper>

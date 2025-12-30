@@ -16,10 +16,40 @@ const LinkButton = ({ to, label }: { to: string; label: string }) => {
 
 export default function NavBar() {
   const nav = useNavigate();
+  const loc = useLocation();
   const [due, setDue] = useState(0);
   const [onProcessDue, setOnProcessDue] = useState(0);
+  const [ordersDueToday, setOrdersDueToday] = useState(0);
   useEffect(() => {
     let alive = true;
+
+    const pad2 = (n: number) => String(n).padStart(2, '0');
+    const toLocalYmd = (v?: any) => {
+      if (!v) return '';
+      // Accept Date, ISO string, or YYYY-MM-DD. Always normalize to local date.
+      const d = v instanceof Date ? v : new Date(String(v));
+      if (Number.isNaN(d.getTime())) {
+        const s = String(v);
+        const slice = s.slice(0, 10);
+        return /^\d{4}-\d{2}-\d{2}$/.test(slice) ? slice : '';
+      }
+      return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    };
+    const todayYmd = () => toLocalYmd(new Date());
+
+    const normalizeStatus = (v: any) => {
+      const s = String(v || '').trim().toLowerCase();
+      if (!s) return '';
+      if (s === 'created') return 'processing';
+      if (s === 'create') return 'processing';
+      if (s === 'backorder') return 'processing';
+      if (s === 'fulfilled') return 'completed';
+      if (s === 'cancelled') return 'canceled';
+      if (s === 'cancel') return 'canceled';
+      return s;
+    };
+
+    const toYmd = (v: any) => toLocalYmd(v);
 
     const fetchCounts = async () => {
       if (!alive) return;
@@ -34,6 +64,20 @@ export default function NavBar() {
         setOnProcessDue(Number(data?.count || 0));
       } catch {
         setOnProcessDue(0);
+      }
+      try {
+        const { data } = await api.get<any[]>('/orders/unfulfilled');
+        const list = Array.isArray(data) ? data : [];
+        const today = todayYmd();
+        const count = list.filter((o: any) => {
+          const st = normalizeStatus(o?.status);
+          if (st !== 'processing') return false;
+          const ymd = toYmd(o?.estFulfillmentDate || o?.estFulfillment || o?.estShipDate || o?.estShipdate);
+          return ymd && ymd === today;
+        }).length;
+        setOrdersDueToday(count);
+      } catch {
+        setOrdersDueToday(0);
       }
     };
 
@@ -87,14 +131,16 @@ export default function NavBar() {
           <LinkButton to="/pallets" label="PALLETS SUMMARY" />
           <LinkButton to="/inventory" label="Inventory" />
           <Badge color="error" badgeContent={onProcessDue} max={99} overlap="circular">
-            <Button component={Link} to="/on-process" color={useLocation().pathname === '/on-process' ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: useLocation().pathname === '/on-process' ? 1 : 0.85 }}>On-Process</Button>
+            <Button component={Link} to="/on-process" color={loc.pathname === '/on-process' ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: loc.pathname === '/on-process' ? 1 : 0.85 }}>On-Process</Button>
           </Badge>
           <LinkButton to="/transfer" label="Transfer" />
           {/* Ship link with notifications badge */}
           <Badge color="error" badgeContent={due} max={99} overlap="circular">
-            <Button component={Link} to="/ship" color={useLocation().pathname === '/ship' ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: useLocation().pathname === '/ship' ? 1 : 0.85 }}>Ship</Button>
+            <Button component={Link} to="/ship" color={loc.pathname === '/ship' ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: loc.pathname === '/ship' ? 1 : 0.85 }}>Ship</Button>
           </Badge>
-          <LinkButton to="/orders" label="Orders" />
+          <Badge color="error" badgeContent={ordersDueToday} max={99} overlap="circular">
+            <Button component={Link} to="/orders" color={loc.pathname === '/orders' ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: loc.pathname === '/orders' ? 1 : 0.85 }}>Orders</Button>
+          </Badge>
           <Typography component="span" sx={{ color: 'rgba(255,255,255,0.7)', mx: 2, userSelect: 'none' }}>|</Typography>
           <LinkButton to="/warehouses" label="Warehouses" />
           <LinkButton to="/item-registry" label="Pallet Registry" />

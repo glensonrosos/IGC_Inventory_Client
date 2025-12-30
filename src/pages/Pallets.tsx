@@ -13,21 +13,38 @@ type SummaryRow = {
 };
 type SummaryResponse = { warehouses: SummaryWarehouse[]; rows: SummaryRow[] };
 
+type ItemGroupRow = { name: string; lineItem?: string };
+
 export default function Pallets() {
   const [loading, setLoading] = useState(false);
   const [warehouses, setWarehouses] = useState<SummaryWarehouse[]>([]);
   const [rows, setRows] = useState<SummaryRow[]>([]);
+  const [palletIdByGroup, setPalletIdByGroup] = useState<Record<string, string>>({});
   const [q, setQ] = useState('');
 
   const load = async () => {
     setLoading(true);
     try {
-      const { data } = await api.get<SummaryResponse>('/reports/pallet-summary-by-group');
+      const [summaryResp, groupsResp] = await Promise.all([
+        api.get<SummaryResponse>('/reports/pallet-summary-by-group'),
+        api.get<ItemGroupRow[]>('/item-groups'),
+      ]);
+      const data = summaryResp?.data as any;
       setWarehouses(Array.isArray(data?.warehouses) ? data.warehouses : []);
       setRows(Array.isArray(data?.rows) ? data.rows : []);
+
+      const groups = Array.isArray(groupsResp?.data) ? groupsResp.data : [];
+      const map: Record<string, string> = {};
+      for (const g of groups) {
+        const name = String((g as any)?.name || '').trim();
+        if (!name) continue;
+        map[name] = String((g as any)?.lineItem || '').trim();
+      }
+      setPalletIdByGroup(map);
     } catch {
       setWarehouses([]);
       setRows([]);
+      setPalletIdByGroup({});
     } finally {
       setLoading(false);
     }
@@ -49,6 +66,7 @@ export default function Pallets() {
       type: 'number',
     }));
     return [
+      { field: 'palletId', headerName: 'Pallet ID', width: 160 },
       { field: 'itemGroup', headerName: 'Pallet Description', flex: 1, minWidth: 220 },
       ...whCols,
       { field: 'onProcessQty', headerName: 'On-Process', width: 150, type: 'number' },
@@ -66,8 +84,10 @@ export default function Pallets() {
       }
       const warehousesTotal = warehouses.reduce((sum, w) => sum + Number(wh[String(w._id)] || 0), 0);
       const totalQty = warehousesTotal + Number(r.onProcessQty || 0) + Number(r.onWaterQty || 0);
+      const groupName = String(r.itemGroup || '');
       return {
         id: r.itemGroup,
+        palletId: String(palletIdByGroup[groupName] || ''),
         itemGroup: r.itemGroup,
         warehouses: wh,
         onProcessQty: Number(r.onProcessQty || 0),
@@ -76,10 +96,11 @@ export default function Pallets() {
         ...flat,
       };
     })
-  ), [filteredRows, warehouses]);
+  ), [filteredRows, warehouses, palletIdByGroup]);
 
   const exportExcel = () => {
     const header = [
+      'Pallet ID',
       'Pallet Description',
       ...warehouses.map(w => `${w.name}`),
       'On-Process',
@@ -87,6 +108,7 @@ export default function Pallets() {
       'Total Qty',
     ];
     const aoa = gridRows.map((r:any) => [
+      String(r.palletId || ''),
       r.itemGroup,
       ...warehouses.map(w => Number(r.warehouses?.[String(w._id)] || 0)),
       Number(r.onProcessQty || 0),
