@@ -14,7 +14,12 @@ export default function Transfer() {
   const [sourceWarehouseId, setSourceWarehouseId] = useState('');
   const [warehouseId, setWarehouseId] = useState('');
   const [items, setItems] = useState<TransferPallet[]>([]);
-  const [edd, setEdd] = useState('');
+  const defaultEddYmd = useMemo(() => {
+    const d = new Date();
+    d.setMonth(d.getMonth() + 3);
+    return d.toISOString().slice(0, 10);
+  }, []);
+  const [edd, setEdd] = useState(defaultEddYmd);
   const [poNumber, setPoNumber] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -33,6 +38,17 @@ export default function Transfer() {
       setWarehouses([]);
     }
   };
+
+  useEffect(() => {
+    const list = Array.isArray(warehouses) ? warehouses : [];
+    if (!list.length) return;
+
+    const primary = list.find((w: any) => Boolean((w as any)?.isPrimary));
+    const second = list.find((w: any) => !Boolean((w as any)?.isPrimary));
+
+    if (!sourceWarehouseId && second?._id) setSourceWarehouseId(String(second._id));
+    if (!warehouseId && primary?._id) setWarehouseId(String(primary._id));
+  }, [warehouses, sourceWarehouseId, warehouseId]);
 
   const loadStock = async (srcId: string) => {
     if (!srcId) { setAvailable({}); return; }
@@ -101,7 +117,7 @@ export default function Transfer() {
       });
       toast.success('Transfer created and items moved to on-water');
       setItems([]);
-      setPoNumber(''); setEdd(''); setFile(null);
+      setPoNumber(''); setEdd(defaultEddYmd); setFile(null);
       navigate('/ship');
     } catch (e: any) {
       toast.error(e?.response?.data?.message || 'Failed to create transfer');
@@ -116,6 +132,19 @@ export default function Transfer() {
       const buf = await file.arrayBuffer();
       const wb = XLSX.read(buf, { type: 'array' });
       const ws = wb.Sheets[wb.SheetNames[0]];
+      const rawRows: any[] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+      if (!rawRows.length) { toast.error('Empty worksheet'); return; }
+      const expectedHeader = ['Pallet Description', 'Total Pallet'];
+      const normHeader = (h: any) => String(h || '').trim().toLowerCase();
+      const receivedHeader = Array.isArray(rawRows[0]) ? rawRows[0].map(normHeader) : [];
+      const expectedHeaderNorm = expectedHeader.map(normHeader);
+      const headerMatches = receivedHeader.length === expectedHeaderNorm.length
+        && expectedHeaderNorm.every((h, i) => receivedHeader[i] === h);
+      if (!headerMatches) {
+        toast.error('Invalid template. Column headers must match the template exactly.');
+        return;
+      }
+
       const rows: any[] = XLSX.utils.sheet_to_json(ws, { defval: '' });
       const parsed: TransferPallet[] = [];
       for (const r of rows) {

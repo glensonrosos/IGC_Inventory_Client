@@ -3,8 +3,8 @@ import { Container, Typography, Paper, Stack, TextField, Button, IconButton, Dia
 import Autocomplete from '@mui/material/Autocomplete';
 import DeleteIcon from '@mui/icons-material/Delete';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
-import { DataGrid, GridColDef, GridToolbar } from '@mui/x-data-grid';
 import * as XLSX from 'xlsx';
+import { DataGrid, GridColDef, GridToolbar } from '@mui/x-data-grid';
 import api from '../api';
 import { useToast } from '../components/ToastProvider';
 
@@ -12,7 +12,7 @@ type Warehouse = { _id: string; name: string };
 
 type Allocation = { groupName?: string; qty?: number; source?: string; warehouseId?: string };
 
-type OrderStatus = 'processing' | 'shipped' | 'completed' | 'canceled';
+type OrderStatus = 'processing' | 'ready_to_ship' | 'shipped' | 'completed' | 'canceled';
 type OrdersRow = {
   id: string;
   rawId: string;
@@ -22,6 +22,7 @@ type OrdersRow = {
   warehouseId: string;
   warehouseName?: string;
   createdAt: string;
+  updatedAt?: string;
   dateCreated?: string;
   refDate: string;
   lineCount: number;
@@ -34,12 +35,16 @@ type OrdersRow = {
   shippingAddress?: string;
   createdAtOrder?: string;
   estFulfillmentDate?: string;
+  estDeliveredDate?: string;
+  notes?: string;
   source?: string;
 };
 
 export default function Orders() {
   const todayYmd = useMemo(() => new Date().toISOString().slice(0, 10), []);
   const lastAutoSavedShipdateRef = useRef<{ orderId: string; ymd: string; at: number }>({ orderId: '', ymd: '', at: 0 });
+  const lastAutoSuggestedShipdateRef = useRef<{ ymd: string; at: number }>({ ymd: '', at: 0 });
+  const shipmentsRebalanceTimerRef = useRef<any>(null);
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersRows, setOrdersRows] = useState<OrdersRow[]>([]);
@@ -64,8 +69,11 @@ export default function Orders() {
   const [manualCustomerName, setManualCustomerName] = useState('');
   const [manualCustomerPhone, setManualCustomerPhone] = useState('');
   const [manualCreatedAt, setManualCreatedAt] = useState('');
+  const [manualLastUpdatedAt, setManualLastUpdatedAt] = useState('');
   const [manualEstFulfillment, setManualEstFulfillment] = useState('');
+  const [manualEstDelivered, setManualEstDelivered] = useState('');
   const [manualShippingAddress, setManualShippingAddress] = useState('');
+  const [manualNotes, setManualNotes] = useState('');
   const [manualLineMode, setManualLineMode] = useState<'pallet_group' | 'line_item'>('pallet_group');
   const [manualPalletGroupOptions, setManualPalletGroupOptions] = useState<string[]>([]);
   const [manualLineItemOptions, setManualLineItemOptions] = useState<string[]>([]);
@@ -111,23 +119,23 @@ export default function Orders() {
     });
   }, [viewOrderableQ, viewOrderableRows]);
 
-  const openOnWaterDetails = async ({ warehouseId, groupName }: { warehouseId: string; groupName: string }) => {
-    const wid = String(warehouseId || '').trim();
+  const openOnWaterDetails = useCallback(async ({ warehouseId, groupName }: { warehouseId: string; groupName: string }) => {
     const g = String(groupName || '').trim();
-    if (!wid || !g) return;
+    const w = String(warehouseId || '').trim();
+    if (!w || !g) return;
     setOnWaterOpen(true);
     setOnWaterGroupName(g);
     setOnWaterRows([]);
     setOnWaterLoading(true);
     try {
-      const { data } = await api.get('/orders/pallet-picker/on-water', { params: { warehouseId: wid, groupName: g } });
+      const { data } = await api.get('/orders/pallet-picker/on-water', { params: { warehouseId: w, groupName: g } });
       setOnWaterRows(Array.isArray(data?.rows) ? data.rows : []);
     } catch {
       setOnWaterRows([]);
     } finally {
       setOnWaterLoading(false);
     }
-  };
+  }, []);
 
   const exportAllOrderablePalletsXlsx = async () => {
     const wid = String(viewOrderableWarehouseId || fixedWarehouseId || '').trim();
@@ -165,6 +173,7 @@ export default function Orders() {
           'On-Water': Math.max(0, Math.floor(Number.isFinite(onWater) ? onWater : 0)),
           'On-Process': Math.max(0, Math.floor(Number.isFinite(onProcess) ? onProcess : 0)),
         };
+
         if (secondId) out[secondName || '2nd Warehouse'] = Math.max(0, Math.floor(Number.isFinite(secondQty) ? secondQty : 0));
         out['Max Order'] = Math.max(0, Math.floor(Number.isFinite(maxOrder) ? maxOrder : 0));
         return out;
@@ -191,6 +200,12 @@ export default function Orders() {
       const slice = s.slice(0, 10);
       return /^\d{4}-\d{2}-\d{2}$/.test(slice) ? slice : '';
     };
+    const toLocalDateTime = (v: any) => {
+      if (!v) return '';
+      const dt = new Date(v);
+      if (Number.isNaN(dt.getTime())) return '';
+      return dt.toLocaleString();
+    };
 
     setManualMode('edit');
     setManualEditRow(row);
@@ -201,9 +216,12 @@ export default function Orders() {
     setManualCustomerName(String(row?.customerName || '').trim());
     setManualCustomerPhone(String(row?.customerPhone || '').trim());
     setManualCreatedAt(toYmd(row?.createdAtOrder || row?.dateCreated || row?.createdAt));
+    setManualLastUpdatedAt(toLocalDateTime((row as any)?.updatedAt || row?.createdAt || ''));
     setManualEstFulfillment(toYmd(row?.estFulfillmentDate));
+    setManualEstDelivered(toYmd((row as any)?.estDeliveredDate));
     setManualShipdateTouched(false);
     setManualShippingAddress(String(row?.shippingAddress || '').trim());
+    setManualNotes(String((row as any)?.notes || '').trim());
     setManualLineMode('pallet_group');
     setManualLines([{ lineItem: '', qty: '' }]);
     setManualAvailable({});
@@ -214,6 +232,7 @@ export default function Orders() {
     setManualPickOpen(false);
     setManualPickSelected({ type: 'include', ids: new Set() });
     setManualAllocations(Array.isArray((row as any)?.allocations) ? ((row as any).allocations as any) : []);
+    setManualReservedBreakdown([]);
 
     const baseLines = Array.isArray(row?.lines) ? row.lines : [];
     const groups: string[] = [];
@@ -248,9 +267,12 @@ export default function Orders() {
       if (rawId) {
         const { data } = await api.get(`/orders/unfulfilled/${rawId}`);
         setManualAllocations(Array.isArray((data as any)?.allocations) ? (data as any).allocations : []);
+        setManualReservedBreakdown(Array.isArray((data as any)?.reservedBreakdown) ? (data as any).reservedBreakdown : []);
+        setManualLastUpdatedAt(toLocalDateTime((data as any)?.updatedAt || (data as any)?.createdAt || ''));
       }
     } catch {
       setManualAllocations(Array.isArray((row as any)?.allocations) ? ((row as any).allocations as any) : []);
+      setManualReservedBreakdown([]);
     }
 
     try {
@@ -270,7 +292,7 @@ export default function Orders() {
     }
   };
 
-  const openOnProcessDetails = async ({ groupName }: { groupName: string }) => {
+  const openOnProcessDetails = useCallback(async ({ groupName }: { groupName: string }) => {
     const g = String(groupName || '').trim();
     if (!g) return;
     setOnProcessOpen(true);
@@ -285,7 +307,7 @@ export default function Orders() {
     } finally {
       setOnProcessLoading(false);
     }
-  };
+  }, []);
 
   const fixedWarehouseId = useMemo(() => {
     const wh = Array.isArray(warehouses) ? warehouses : [];
@@ -320,7 +342,9 @@ export default function Orders() {
 
   const manualIsCanceled = manualMode === 'edit' && manualPrevStatus === 'canceled';
   const manualIsCompleted = manualMode === 'edit' && manualPrevStatus === 'completed';
+  const manualIsShipped = manualMode === 'edit' && manualPrevStatus === 'shipped';
   const manualIsLocked = manualIsCanceled || manualIsCompleted;
+  const manualFieldsLocked = manualIsLocked || manualIsShipped;
 
   const manualWarehouseName = useMemo(() => {
     const wh = Array.isArray(warehouses) ? warehouses : [];
@@ -365,6 +389,182 @@ export default function Orders() {
       })
       .filter((r) => String(r.groupName || '').trim());
   }, [manualOrderGroups, manualPickerRowByGroup]);
+
+  const manualOrderColumns = useMemo(() => {
+    const cols: any[] = [
+      { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
+      { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
+      { field: 'selectedWarehouseAvailable', headerName: `THIS - ${manualWarehouseName || 'Warehouse'}`, width: 170, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
+      {
+        field: 'onWaterPallets',
+        headerName: 'On-Water',
+        width: 110,
+        type: 'number',
+        align: 'right',
+        headerAlign: 'right',
+        renderCell: (p: any) => {
+          const qty = Number(p?.row?.onWaterPallets ?? 0);
+          const groupName = String(p?.row?.groupName || '').trim();
+          const wid = String(manualWarehouseId || '').trim();
+          if (!qty) return '0';
+          return (
+            <Button
+              variant="text"
+              size="small"
+              onClick={() => openOnWaterDetails({ warehouseId: wid, groupName })}
+              sx={{ minWidth: 0, p: 0, textDecoration: 'underline', fontSize: 16, fontWeight: 700 }}
+            >
+              {qty}
+            </Button>
+          );
+        },
+      },
+    ];
+
+    if (secondWarehouse?._id) {
+      cols.push({
+        field: 'secondWarehouseAvailable',
+        headerName: `${secondWarehouse.name || 'Warehouse'}`,
+        width: 170,
+        type: 'number',
+        align: 'right',
+        headerAlign: 'right',
+        sortable: false,
+        filterable: false,
+        renderCell: (p: any) => {
+          const per = (p?.row as any)?.perWarehouse || {};
+          const wid = String(secondWarehouse._id);
+          const v = Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0);
+          return String(Number.isFinite(v) ? v : 0);
+        },
+      });
+    }
+
+    cols.push({
+      field: 'onProcessPallets',
+      headerName: 'On-Process',
+      width: 120,
+      type: 'number',
+      align: 'right',
+      headerAlign: 'right',
+      renderCell: (p: any) => {
+        const qty = Number(p?.row?.onProcessPallets ?? 0);
+        const groupName = String(p?.row?.groupName || '').trim();
+        if (!qty) return '0';
+        return (
+          <Button
+            variant="text"
+            size="small"
+            onClick={() => openOnProcessDetails({ groupName })}
+            sx={{ minWidth: 0, p: 0, textDecoration: 'underline', fontSize: 16, fontWeight: 700 }}
+          >
+            {qty}
+          </Button>
+        );
+      },
+    });
+
+    cols.push({
+      field: 'maxQtyOrder',
+      headerName: 'Max Qty Order',
+      width: 140,
+      type: 'number',
+      align: 'right',
+      headerAlign: 'right',
+      sortable: false,
+      filterable: false,
+      valueGetter: (...args: any[]) => {
+        const maybeParams = args?.[0];
+        const maybeRow = args?.[1];
+        const row = (maybeRow && typeof maybeRow === 'object') ? maybeRow : (maybeParams?.row || {});
+        const primary = Number(row?.selectedWarehouseAvailable ?? 0);
+        const onWater = Number(row?.onWaterPallets ?? 0);
+        const onProcess = Number(row?.onProcessPallets ?? 0);
+        let second = 0;
+        if (secondWarehouse?._id) {
+          const per = row?.perWarehouse || {};
+          const wid = String(secondWarehouse._id);
+          second = Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0);
+        }
+        const total =
+          (Number.isFinite(primary) ? primary : 0) +
+          (Number.isFinite(onWater) ? onWater : 0) +
+          (Number.isFinite(second) ? second : 0) +
+          (Number.isFinite(onProcess) ? onProcess : 0);
+        return Math.max(0, Math.floor(total));
+      },
+      renderCell: (p: any) => {
+        const v = Number((p && typeof p === 'object' && 'value' in p) ? (p as any).value : 0);
+        return String(Number.isFinite(v) ? v : 0);
+      },
+    });
+
+    cols.push({
+      field: 'orderQty',
+      headerName: 'Order Qty',
+      width: 120,
+      sortable: false,
+      filterable: false,
+      renderCell: (p: any) => {
+        const groupName = String(p?.row?.groupName || '');
+        const val = manualOrderQtyByGroup[groupName] ?? '';
+        return (
+          <TextField
+            type="number"
+            size="small"
+            value={val}
+            disabled={manualFieldsLocked}
+            onChange={(e)=>{
+              const raw = sanitizeIntText(e.target.value);
+              setManualValidationErrors([]);
+              setManualOrderQtyByGroup((prev)=> ({ ...prev, [groupName]: raw }));
+            }}
+            onBlur={(e)=>{
+              const raw = normalizeIntText(e.target.value);
+              setManualOrderQtyByGroup((prev)=> ({ ...prev, [groupName]: raw }));
+            }}
+            onKeyDown={(e)=>{
+              const k = (e as any).key;
+              if (k === 'e' || k === 'E' || k === '.' || k === '-' || k === '+' ) {
+                e.preventDefault();
+              }
+            }}
+            inputProps={{ inputMode: 'numeric', pattern: '[0-9]*', min: 0, step: 1 }}
+            sx={{ width: 100 }}
+          />
+        );
+      }
+    });
+
+    cols.push({
+      field: 'remove',
+      headerName: 'Remove',
+      width: 110,
+      sortable: false,
+      filterable: false,
+      renderCell: (p: any) => {
+        const groupName = String(p?.row?.groupName || '');
+        return (
+          <IconButton
+            size="small"
+            disabled={manualFieldsLocked}
+            onClick={() => {
+              setManualOrderGroups((prev)=> prev.filter((x)=> String(x) !== groupName));
+              setManualOrderQtyByGroup((prev)=> {
+                const next = { ...prev };
+                delete (next as any)[groupName];
+                return next;
+              });
+            }}
+          >
+            <DeleteIcon fontSize="small" />
+          </IconButton>
+        );
+      }
+    });
+
+    return cols;
+  }, [manualWarehouseName, manualWarehouseId, secondWarehouse, manualOrderQtyByGroup, manualFieldsLocked, openOnWaterDetails, openOnProcessDetails]);
 
   const manualAllocationRows = useMemo(() => {
     const allocs = Array.isArray(manualAllocations) ? manualAllocations : [];
@@ -441,6 +641,103 @@ export default function Orders() {
       secondLabel: secondName || '2nd',
     };
   }, [manualAllocations, manualEditRow, manualPickerWarehouses, manualReservedBreakdown, manualWarehouseId, warehouses]);
+
+  const exportManualOrderXlsx = useCallback(() => {
+    if (manualMode !== 'edit' || !manualEditRow) return;
+    const orderNumber = String(manualEditRow?.orderNumber || manualEditRow?.rawId || manualEditRow?.id || '').trim();
+    const sStatus = normalizeStatus(manualStatus || '');
+
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const d = new Date();
+    const ts = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+
+    const safe = (v: any) => String(v ?? '').replace(/[/\\:*?"<>|]/g, '-');
+    const fname = `order-details-${safe(orderNumber || 'order')}-(${safe(sStatus || 'status')})-(${ts}).xlsx`;
+
+    const rows: any[] = [];
+    const addKV = (k: string, v: any) => rows.push([k, v ?? '']);
+
+    addKV('Order ID', orderNumber);
+    addKV('Current Status', sStatus ? String(sStatus).toUpperCase() : '');
+    addKV('Customer Email', manualCustomerEmail);
+    addKV('Customer Name', manualCustomerName);
+    addKV('Phone Number', manualCustomerPhone);
+    addKV('Create Order Date', manualCreatedAt);
+    addKV('Estimated Shipdate for Customer', manualEstFulfillment);
+    addKV('Estimated Order Delivered', manualEstDelivered);
+    addKV('Shipping Address', manualShippingAddress);
+    addKV('Remarks/Notes', manualNotes);
+    addKV('Last Updated', manualLastUpdatedAt);
+
+    rows.push([]);
+    rows.push(['Current Stock Reserved of this Order']);
+    rows.push([
+      'Pallet Description',
+      manualAllocationWarehouseLabels.primaryLabel,
+      'On-Water',
+      manualAllocationWarehouseLabels.secondLabel,
+      'On-Process',
+    ]);
+
+    const reserved = Array.isArray(manualReservedRows) ? manualReservedRows : [];
+    for (const r of reserved) {
+      rows.push([
+        String(r?.groupName || ''),
+        Number(r?.primary ?? 0),
+        Number(r?.onWater ?? 0),
+        Number(r?.second ?? 0),
+        Number(r?.onProcess ?? 0),
+      ]);
+    }
+
+    rows.push([]);
+    rows.push(['Pallets to Order']);
+    rows.push(['Pallet ID', 'Pallet Description', 'Qty Ordered']);
+
+    const pickerRows = Array.isArray(manualPickerRows) ? manualPickerRows : [];
+    const toPalletId = (groupName: string) => {
+      const g = String(groupName || '').trim().toLowerCase();
+      if (!g) return '';
+      const hit = pickerRows.find((p: any) => String(p?.groupName || '').trim().toLowerCase() === g);
+      return String(hit?.lineItem || '').trim();
+    };
+
+    const groups = Array.isArray(manualOrderGroups) ? manualOrderGroups : [];
+    for (const groupName of groups) {
+      const g = String(groupName || '').trim();
+      if (!g) continue;
+      const qty = Math.floor(Number((manualOrderQtyByGroup as any)?.[g] ?? 0));
+      if (!Number.isFinite(qty) || qty <= 0) continue;
+
+      const byMap = manualPickerRowByGroup?.get ? manualPickerRowByGroup.get(g) : null;
+      const palletId = String(byMap?.lineItem || toPalletId(g) || '').trim();
+      rows.push([palletId, g, qty]);
+    }
+
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Order Details');
+    XLSX.writeFile(wb, fname);
+  }, [
+    manualMode,
+    manualEditRow,
+    manualStatus,
+    manualCustomerEmail,
+    manualCustomerName,
+    manualCustomerPhone,
+    manualCreatedAt,
+    manualEstFulfillment,
+    manualEstDelivered,
+    manualShippingAddress,
+    manualNotes,
+    manualLastUpdatedAt,
+    manualReservedRows,
+    manualOrderGroups,
+    manualOrderQtyByGroup,
+    manualPickerRows,
+    manualPickerRowByGroup,
+    manualAllocationWarehouseLabels,
+  ]);
 
   const isValidEmail = (email: string) => {
     const s = String(email || '').trim();
@@ -608,6 +905,66 @@ export default function Orders() {
     return out || today;
   }, [manualAllocations, manualPickerRows, todayYmd]);
 
+  const suggestShipdateForReservedBreakdown = useCallback((opts?: { rows?: any[]; reserved?: any[] }) => {
+    const today = todayYmd;
+    const pickerRows = Array.isArray(opts?.rows) ? opts!.rows : (manualPickerRows || []);
+    const reserved = Array.isArray(opts?.reserved) ? opts!.reserved : (Array.isArray(manualReservedBreakdown) ? manualReservedBreakdown : []);
+
+    const rowsByGroup = new Map((pickerRows || []).map((r: any) => [String(r.groupName || ''), r]));
+    const toYmd = (s: any) => {
+      const v = String(s || '');
+      const slice = v.slice(0, 10);
+      return /^\d{4}-\d{2}-\d{2}$/.test(slice) ? slice : '';
+    };
+    const addMonthsYmd = (ymd: string, months: number) => {
+      const s = String(ymd || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return '';
+      const dt = new Date(`${s}T00:00:00`);
+      if (Number.isNaN(dt.getTime())) return '';
+      const next = new Date(dt);
+      next.setMonth(next.getMonth() + Math.floor(Number(months || 0)));
+      const pad = (n: number) => String(n).padStart(2, '0');
+      return `${next.getFullYear()}-${pad(next.getMonth() + 1)}-${pad(next.getDate())}`;
+    };
+
+    let best = '';
+    let hasSecond = false;
+
+    for (const rr of reserved) {
+      const g = String((rr as any)?.groupName || (rr as any)?.id || '').trim();
+      if (!g) continue;
+      const onWaterQty = Math.floor(Number((rr as any)?.onWater || 0));
+      const onProcessQty = Math.floor(Number((rr as any)?.onProcess || 0));
+      const secondQty = Math.floor(Number((rr as any)?.second || 0));
+
+      if (Number.isFinite(secondQty) && secondQty > 0) {
+        hasSecond = true;
+      }
+
+      const r: any = rowsByGroup.get(g) || {};
+      if (Number.isFinite(onWaterQty) && onWaterQty > 0) {
+        const edd = toYmd(r?.onWaterEdd);
+        if (edd && (!best || edd > best)) best = edd;
+      }
+      if (Number.isFinite(onProcessQty) && onProcessQty > 0) {
+        const base = toYmd(r?.onProcessEdd);
+        const ready = base ? addMonthsYmd(base, 3) : '';
+        if (ready && (!best || ready > best)) best = ready;
+      }
+    }
+
+    let out = best || today;
+    if (hasSecond) {
+      const cutoff = addMonthsYmd(today, 3);
+      if (cutoff) {
+        // When both second-warehouse and on-process/on-water are involved,
+        // shipdate should be the later of the two dates.
+        out = !out || cutoff > out ? cutoff : out;
+      }
+    }
+    return out || today;
+  }, [manualPickerRows, manualReservedBreakdown, todayYmd]);
+
   const refreshManualAvailable = useCallback(async (warehouseId: string) => {
     const wid = String(warehouseId || '').trim();
     if (!wid) {
@@ -659,7 +1016,7 @@ export default function Orders() {
     if (!id) {
       setManualAllocations([]);
       setManualReservedBreakdown([]);
-      return [] as any[];
+      return { allocations: [] as any[], reserved: [] as any[] };
     }
     try {
       const { data } = await api.get(`/orders/unfulfilled/${id}`, { params: { _ts: Date.now() } });
@@ -671,12 +1028,12 @@ export default function Orders() {
         if (!prev) return prev;
         return { ...(prev as any), allocations: nextAllocs } as any;
       });
-      return nextAllocs;
+      return { allocations: nextAllocs, reserved: nextReserved };
     } catch {
       // keep existing allocations if fetch fails
-      return Array.isArray(manualAllocations) ? manualAllocations : [];
+      return { allocations: Array.isArray(manualAllocations) ? manualAllocations : [], reserved: [] as any[] };
     }
-  }, [manualAllocations]);
+  }, [manualAllocations, manualReservedBreakdown]);
 
   const getRowSupplySource = (row: any) => {
     const r = row || {};
@@ -692,6 +1049,88 @@ export default function Orders() {
       setManualEstFulfillment(next);
     }
   }, [manualOpen, manualMode, manualShipdateTouched, manualOrderQtyByGroup, suggestShipdateForSelection, manualEstFulfillment]);
+
+  useEffect(() => {
+    const isEditing = manualOpen && manualMode === 'edit' && !manualIsLocked;
+    if (!isEditing) return;
+    if (manualShipdateTouched) return;
+
+    const rawId = String((manualEditRow as any)?.rawId || '').trim();
+
+    const reserved = Array.isArray(manualReservedBreakdown) ? manualReservedBreakdown : [];
+    const needByGroup = manualOrderQtyByGroup || {};
+
+    // Keep the server-computed completion date if the updated quantities are still fully covered by PRIMARY only.
+    const stillFullyPrimary = Object.entries(needByGroup)
+      .filter(([, qty]) => Number(qty || 0) > 0)
+      .every(([groupName, qty]) => {
+        const g = String(groupName || '').trim();
+        if (!g) return true;
+        const need = Math.floor(Number(qty || 0));
+        if (!Number.isFinite(need) || need <= 0) return true;
+        const rr: any = reserved.find((r: any) => String(r?.groupName || '').trim() === g) || {};
+        const primary = Math.floor(Number(rr?.primary || 0));
+        const onWater = Math.floor(Number(rr?.onWater || 0));
+        const second = Math.floor(Number(rr?.second || 0));
+        const onProcess = Math.floor(Number(rr?.onProcess || 0));
+        const other = (Number.isFinite(onWater) ? onWater : 0) + (Number.isFinite(second) ? second : 0) + (Number.isFinite(onProcess) ? onProcess : 0);
+        return (Number.isFinite(primary) ? primary : 0) >= need && other <= 0;
+      });
+
+    if (stillFullyPrimary) return;
+
+    // Edit mode shipdate must come from the reserved breakdown (system-managed) only.
+    // Do NOT fall back to selection-based logic because reserved breakdown can briefly be empty during refresh,
+    // which causes flip-flopping between two dates.
+    if (!reserved.length) return;
+    const next = suggestShipdateForReservedBreakdown({ rows: manualPickerRows, reserved });
+    // If quantities are no longer fully-primary, this order should no longer be READY TO SHIP.
+    if (manualStatus === 'ready_to_ship') {
+      setManualStatus('processing');
+      setManualEstDelivered('');
+      setManualEditRow((prev) => {
+        if (!prev) return prev;
+        const rawId = String((prev as any)?.rawId || '').trim();
+        if (!rawId) return prev;
+        return { ...(prev as any), status: 'processing', estDeliveredDate: '' } as any;
+      });
+      setOrdersRows((prev) => {
+        const rows = Array.isArray(prev) ? prev : [];
+        if (!rawId) return rows;
+        return rows.map((r) => {
+          const rRawId = String((r as any)?.rawId || '').trim();
+          if (rRawId && rRawId === rawId) return { ...(r as any), status: 'processing', estDeliveredDate: '' } as any;
+          return r;
+        });
+      });
+    }
+
+    if (next && next !== manualEstFulfillment) {
+      const last = lastAutoSuggestedShipdateRef.current || { ymd: '', at: 0 };
+      const now = Date.now();
+      const tooSoon = now - Number(last.at || 0) < 1500;
+      const same = String(last.ymd || '') === String(next || '');
+      if (tooSoon && same) return;
+      lastAutoSuggestedShipdateRef.current = { ymd: String(next || ''), at: now };
+
+      setManualEstFulfillment(next);
+      setManualEditRow((prev) => {
+        if (!prev) return prev;
+        const rawId = String((prev as any)?.rawId || '').trim();
+        if (!rawId) return prev;
+        return { ...(prev as any), estFulfillmentDate: next } as any;
+      });
+      setOrdersRows((prev) => {
+        const rows = Array.isArray(prev) ? prev : [];
+        if (!rawId) return rows;
+        return rows.map((r) => {
+          const rRawId = String((r as any)?.rawId || '').trim();
+          if (rRawId && rRawId === rawId) return { ...(r as any), estFulfillmentDate: next } as any;
+          return r;
+        });
+      });
+    }
+  }, [manualOpen, manualMode, manualIsLocked, manualShipdateTouched, manualOrderQtyByGroup, manualReservedBreakdown, manualPickerRows, suggestShipdateForReservedBreakdown, suggestShipdateForSelection, manualEstFulfillment, manualStatus, (manualEditRow as any)?.rawId]);
 
   useEffect(() => {
     const loadAvail = async () => {
@@ -713,43 +1152,7 @@ export default function Orders() {
       if (stopped) return;
       const picker = await refreshManualPicker(wid);
       await refreshManualAvailable(wid);
-      const allocs = await refreshManualAllocations(rawId);
-      if (!manualShipdateTouched) {
-        const next = suggestShipdateForProcessingAllocations({ rows: picker?.rows, allocations: allocs });
-        if (next && next !== manualEstFulfillment) {
-          setManualEstFulfillment(next);
-          setManualEditRow((prev) => {
-            if (!prev) return prev;
-            const prevRawId = String((prev as any)?.rawId || '').trim();
-            if (prevRawId && prevRawId !== rawId) return prev;
-            return { ...(prev as any), estFulfillmentDate: next } as any;
-          });
-          setOrdersRows((prev) => {
-            const rows = Array.isArray(prev) ? prev : [];
-            return rows.map((r) => {
-              const rRawId = String((r as any)?.rawId || '').trim();
-              if (rRawId && rRawId === rawId) return { ...(r as any), estFulfillmentDate: next } as any;
-              return r;
-            });
-          });
-
-          // Auto-persist the suggested shipdate so the user doesn't need to click Save.
-          // Only for PROCESSING orders and only if the user has not manually touched the shipdate.
-          try {
-            const last = lastAutoSavedShipdateRef.current || { orderId: '', ymd: '', at: 0 };
-            const now = Date.now();
-            const tooSoon = now - Number(last.at || 0) < 5000;
-            const sameOrder = String(last.orderId || '') === String(rawId || '');
-            const sameYmd = String(last.ymd || '') === String(next || '');
-            if (!(sameOrder && sameYmd) && !tooSoon) {
-              lastAutoSavedShipdateRef.current = { orderId: String(rawId || ''), ymd: String(next || ''), at: now };
-              await api.put(`/orders/unfulfilled/${rawId}`, { estFulfillmentDate: next });
-            }
-          } catch {
-            // ignore
-          }
-        }
-      }
+      await refreshManualAllocations(rawId);
     };
 
     tick();
@@ -766,7 +1169,7 @@ export default function Orders() {
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [manualOpen, manualMode, manualPrevStatus, manualIsLocked, manualWarehouseId, manualEditRow, manualShipdateTouched, manualEstFulfillment, refreshManualPicker, refreshManualAvailable, refreshManualAllocations, suggestShipdateForProcessingAllocations]);
+  }, [manualOpen, manualMode, manualPrevStatus, manualIsLocked, manualWarehouseId, manualEditRow, manualShipdateTouched, manualEstFulfillment, refreshManualPicker, refreshManualAvailable, refreshManualAllocations, suggestShipdateForReservedBreakdown]);
   const getManualRowOptions = (idx: number) => {
     const current = normalizeManualLine(manualLines[idx]?.lineItem);
     const selected = new Set(
@@ -790,6 +1193,8 @@ export default function Orders() {
     if (!s) return '';
     if (s === 'created') return 'processing';
     if (s === 'create') return 'processing';
+    if (s === 'ready-to-ship') return 'ready_to_ship';
+    if (s === 'ready to ship') return 'ready_to_ship';
     if (s === 'backorder') return 'processing';
     if (s === 'fulfilled') return 'completed';
     if (s === 'cancelled') return 'canceled';
@@ -834,6 +1239,7 @@ export default function Orders() {
         warehouseId: normalizeId(o?.warehouseId),
         warehouseName: whNameById.get(normalizeId(o?.warehouseId)) || '',
         createdAt: normalizeDateValue(o?.createdAt),
+        updatedAt: normalizeDateValue(o?.updatedAt),
         dateCreated: normalizeDateValue(o?.createdAtOrder || o?.createdAt),
         refDate: String(o?.createdAtOrder || o?.createdAt || ''),
         lineCount: Array.isArray(o?.lines) ? o.lines.length : 0,
@@ -846,6 +1252,8 @@ export default function Orders() {
         shippingAddress: String(o?.shippingAddress || ''),
         createdAtOrder: normalizeDateValue(o?.createdAtOrder),
         estFulfillmentDate: normalizeDateValue(o?.estFulfillmentDate),
+        estDeliveredDate: normalizeDateValue(o?.estDeliveredDate),
+        notes: String(o?.notes || ''),
         source: 'manual',
       }));
 
@@ -858,6 +1266,7 @@ export default function Orders() {
         warehouseId: normalizeId(o?.warehouseId),
         warehouseName: whNameById.get(normalizeId(o?.warehouseId)) || '',
         createdAt: normalizeDateValue(o?.createdAt),
+        updatedAt: normalizeDateValue(o?.updatedAt),
         dateCreated: normalizeDateValue(o?.createdAtOrder || o?.createdAt),
         refDate: String(o?.createdAtOrder || o?.createdAt || ''),
         lineCount: Array.isArray(o?.lines) ? o.lines.length : 0,
@@ -887,28 +1296,87 @@ export default function Orders() {
 
   useEffect(() => {
     const handler = async () => {
-      try {
-        await loadOrders();
-      } catch {
-        // ignore
+      if (shipmentsRebalanceTimerRef.current) {
+        clearTimeout(shipmentsRebalanceTimerRef.current);
       }
-
-      const isProcessing = manualOpen && manualMode === 'edit' && manualPrevStatus === 'processing' && !manualIsLocked;
-      const rawId = String((manualEditRow as any)?.rawId || '').trim();
-      if (isProcessing && rawId) {
+      shipmentsRebalanceTimerRef.current = setTimeout(async () => {
         try {
-          await refreshManualAllocations(rawId);
+          await api.post('/orders/unfulfilled/rebalance-processing', {});
         } catch {
           // ignore
         }
-      }
+
+        try {
+          await loadOrders();
+        } catch {
+          // ignore
+        }
+
+        const isProcessing = manualOpen && manualMode === 'edit' && manualPrevStatus === 'processing' && !manualIsLocked;
+        const rawId = String((manualEditRow as any)?.rawId || '').trim();
+        const wid = String(manualWarehouseId || '').trim();
+        if (isProcessing && rawId) {
+          try {
+            const picker = wid ? await refreshManualPicker(wid) : { rows: [] as any[], warehouses: [] as any[] };
+            if (wid) {
+              try {
+                await refreshManualAvailable(wid);
+              } catch {
+                // ignore
+              }
+            }
+            const { reserved } = await refreshManualAllocations(rawId);
+
+            if (!manualShipdateTouched) {
+              const next = suggestShipdateForReservedBreakdown({ rows: picker?.rows, reserved });
+              if (next && next !== manualEstFulfillment) {
+                setManualEstFulfillment(next);
+                setManualEditRow((prev) => {
+                  if (!prev) return prev;
+                  const prevRawId = String((prev as any)?.rawId || '').trim();
+                  if (prevRawId && prevRawId !== rawId) return prev;
+                  return { ...(prev as any), estFulfillmentDate: next } as any;
+                });
+                setOrdersRows((prev) => {
+                  const rows = Array.isArray(prev) ? prev : [];
+                  return rows.map((r) => {
+                    const rRawId = String((r as any)?.rawId || '').trim();
+                    if (rRawId && rRawId === rawId) return { ...(r as any), estFulfillmentDate: next } as any;
+                    return r;
+                  });
+                });
+
+                try {
+                  const last = lastAutoSavedShipdateRef.current || { orderId: '', ymd: '', at: 0 };
+                  const now = Date.now();
+                  const tooSoon = now - Number(last.at || 0) < 5000;
+                  const sameOrder = String(last.orderId || '') === String(rawId || '');
+                  const sameYmd = String(last.ymd || '') === String(next || '');
+                  if (!(sameOrder && sameYmd) && !tooSoon) {
+                    lastAutoSavedShipdateRef.current = { orderId: String(rawId || ''), ymd: String(next || ''), at: now };
+                    await api.put(`/orders/unfulfilled/${rawId}`, { estFulfillmentDate: next });
+                  }
+                } catch {
+                  // ignore
+                }
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }, 500);
     };
 
     window.addEventListener('shipments-changed', handler as any);
     return () => {
+      if (shipmentsRebalanceTimerRef.current) {
+        clearTimeout(shipmentsRebalanceTimerRef.current);
+        shipmentsRebalanceTimerRef.current = null;
+      }
       window.removeEventListener('shipments-changed', handler as any);
     };
-  }, [manualOpen, manualMode, manualPrevStatus, manualIsLocked, manualEditRow, refreshManualAllocations]);
+  }, [manualOpen, manualMode, manualPrevStatus, manualIsLocked, manualEditRow, manualWarehouseId, manualShipdateTouched, manualEstFulfillment, refreshManualPicker, refreshManualAvailable, refreshManualAllocations, suggestShipdateForReservedBreakdown]);
 
   useEffect(() => {
     let stopped = false;
@@ -994,8 +1462,16 @@ export default function Orders() {
       width: 140,
       renderCell: (p: any) => {
         const s = normalizeStatus((p?.row as any)?.status || '');
-        const label = s ? String(s).toUpperCase() : '-';
-        const color: any = s === 'completed' ? 'success' : s === 'canceled' ? 'error' : s === 'processing' ? 'warning' : 'default';
+        const label = s === 'ready_to_ship' ? 'READY TO SHIP' : (s ? String(s).toUpperCase() : '-');
+        const color: any = s === 'completed'
+          ? 'success'
+          : s === 'canceled'
+            ? 'error'
+            : s === 'processing'
+              ? 'warning'
+              : s === 'ready_to_ship'
+                ? 'info'
+                : 'default';
         const variant: any = s === 'processing' ? 'outlined' : 'filled';
         return <Chip size="small" label={label} color={color} variant={variant} />;
       },
@@ -1071,8 +1547,10 @@ export default function Orders() {
     setManualCustomerPhone('');
     setManualCreatedAt(new Date().toISOString().slice(0, 10));
     setManualEstFulfillment('');
+    setManualEstDelivered('');
     setManualShipdateTouched(false);
     setManualShippingAddress('');
+    setManualNotes('');
     setManualLineMode('pallet_group');
     setManualLines([{ lineItem: '', qty: '' }]);
     setManualAvailable({});
@@ -1188,8 +1666,9 @@ export default function Orders() {
     }
     if (!manualEstFulfillment) {
       errs.push('Estimated Shipdate for Customer is required');
-    } else if (manualEstFulfillment < todayYmd) {
-      errs.push('Estimated Shipdate for Customer must be today or later');
+    }
+    if (manualMode === 'edit' && manualStatus === 'shipped' && !manualEstDelivered) {
+      errs.push('Estimated Order Delivered is required when status is SHIPPED');
     }
     if (!String(manualShippingAddress || '').trim()) {
       errs.push('Shipping Address is required');
@@ -1233,13 +1712,22 @@ export default function Orders() {
     // For backorder, allow negative stock, so skip this check.
     try {
       if (manualMode === 'edit' && manualEditRow) {
-        if (manualPrevStatus !== 'processing' && manualStatus === 'processing') {
+        // Only block switching back to PROCESSING if inventory has already been deducted (SHIPPED/DELIVERED/COMPLETED).
+        // READY TO SHIP is not inventory-deducting and can revert to PROCESSING.
+        if ((manualPrevStatus === 'shipped' || manualPrevStatus === 'delivered' || manualPrevStatus === 'completed') && manualStatus === 'processing') {
           throw new Error('Changing status back to PROCESSING is not allowed because inventory has already been deducted.');
         }
 
         if (manualPrevStatus === 'processing' && manualStatus === 'shipped') {
           const ok = window.confirm(
-            'Changing the status to SHIPPED cannot be changed back to PROCESSING since the inventory will be deducted. Continue?'
+            'This action cannot be undone. Are you sure you want to ship this order now?'
+          );
+          if (!ok) return;
+        }
+
+        if (manualPrevStatus === 'ready_to_ship' && manualStatus === 'shipped') {
+          const ok = window.confirm(
+            'This action cannot be undone. Are you sure you want to ship this order now?'
           );
           if (!ok) return;
         }
@@ -1256,18 +1744,62 @@ export default function Orders() {
           if (!ok) return;
         }
 
-        // Status changes are handled by a separate endpoint.
-        await api.put(`/orders/unfulfilled/${manualEditRow.rawId}/status`, {
-          status: manualStatus,
-        });
-        if (manualStatus === 'processing') {
+        if (manualStatus === 'processing' || manualStatus === 'ready_to_ship') {
+          // Let the details endpoint recompute status based on reservations after edits.
           await api.put(`/orders/unfulfilled/${manualEditRow.rawId}`, {
             customerEmail: manualCustomerEmail.trim(),
             customerName: manualCustomerName.trim(),
             customerPhone: manualCustomerPhone.trim(),
             estFulfillmentDate: manualEstFulfillment || undefined,
+            estDeliveredDate: manualEstDelivered || undefined,
             shippingAddress: manualShippingAddress.trim(),
+            notes: manualNotes.trim(),
             lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty })),
+          });
+        } else {
+          // Status changes are handled by a separate endpoint.
+          // If shipping from READY TO SHIP, persist line edits first so allocations/inventory deduction use latest quantities.
+          if (manualPrevStatus === 'ready_to_ship' && manualStatus === 'shipped') {
+            const { data: updated } = await api.put(`/orders/unfulfilled/${manualEditRow.rawId}`, {
+              customerEmail: manualCustomerEmail.trim(),
+              customerName: manualCustomerName.trim(),
+              customerPhone: manualCustomerPhone.trim(),
+              estFulfillmentDate: manualEstFulfillment || undefined,
+              estDeliveredDate: manualEstDelivered || undefined,
+              shippingAddress: manualShippingAddress.trim(),
+              notes: manualNotes.trim(),
+              lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty })),
+            });
+
+            const recomputedStatus = normalizeStatus(updated?.status || '');
+            if (recomputedStatus !== 'ready_to_ship') {
+              const ok = window.confirm(
+                'Some pallets are no longer fully available in the primary warehouse. This order cannot be shipped yet and will be set to PROCESSING. Do you want to proceed?'
+              );
+              if (!ok) {
+                setManualStatus('ready_to_ship');
+                return;
+              }
+              setManualStatus('processing');
+              toast.info('Order updated and set to PROCESSING.');
+              setManualOpen(false);
+              await loadOrders();
+              return;
+            }
+          } else {
+            await api.put(`/orders/unfulfilled/${manualEditRow.rawId}`, {
+              customerEmail: manualCustomerEmail.trim(),
+              customerName: manualCustomerName.trim(),
+              customerPhone: manualCustomerPhone.trim(),
+              estFulfillmentDate: manualEstFulfillment || undefined,
+              estDeliveredDate: manualEstDelivered || undefined,
+              shippingAddress: manualShippingAddress.trim(),
+              notes: manualNotes.trim(),
+            });
+          }
+          await api.put(`/orders/unfulfilled/${manualEditRow.rawId}/status`, {
+            status: manualStatus,
+            estDeliveredDate: manualStatus === 'shipped' ? (manualEstDelivered || undefined) : undefined,
           });
         }
         toast.success('Order updated');
@@ -1284,7 +1816,9 @@ export default function Orders() {
         customerPhone: manualCustomerPhone.trim(),
         createdAtOrder: manualCreatedAt || undefined,
         estFulfillmentDate: manualEstFulfillment || undefined,
+        estDeliveredDate: manualEstDelivered || undefined,
         shippingAddress: manualShippingAddress.trim(),
+        notes: manualNotes.trim(),
         lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty })),
       });
       toast.success('Order created');
@@ -1334,6 +1868,7 @@ export default function Orders() {
             >
               <MenuItem value="all">All</MenuItem>
               <MenuItem value="processing">PROCESSING</MenuItem>
+              <MenuItem value="ready_to_ship">READY TO SHIP</MenuItem>
               <MenuItem value="shipped">SHIPPED</MenuItem>
               <MenuItem value="completed">COMPLETED</MenuItem>
               <MenuItem value="canceled">CANCELED</MenuItem>
@@ -1413,35 +1948,39 @@ export default function Orders() {
                 onChange={(e)=> setManualStatus(e.target.value as any)}
                 disabled={manualIsLocked}
               >
-                <MenuItem value="processing" disabled={manualPrevStatus === 'shipped'}>PROCESSING</MenuItem>
-                <MenuItem value="shipped">SHIPPED</MenuItem>
-                <MenuItem value="completed">COMPLETED</MenuItem>
-                <MenuItem value="canceled" disabled={manualPrevStatus === 'shipped'}>CANCELED</MenuItem>
+                <MenuItem value="processing" disabled>PROCESSING</MenuItem>
+                <MenuItem value="ready_to_ship" disabled>READY TO SHIP</MenuItem>
+                <MenuItem value="shipped" disabled={manualPrevStatus !== 'ready_to_ship'}>SHIPPED</MenuItem>
+                <MenuItem value="completed" disabled={manualPrevStatus !== 'shipped'}>COMPLETED</MenuItem>
+                <MenuItem value="canceled" disabled={manualPrevStatus === 'completed' || manualPrevStatus === 'canceled'}>CANCELED</MenuItem>
               </TextField>
             ) : null}
-            <TextField disabled={manualIsLocked} label="Customer Email" size="small" value={manualCustomerEmail} onChange={(e)=>setManualCustomerEmail(e.target.value)} sx={{ minWidth: 200 }} error={!isValidEmail(manualCustomerEmail)} helperText={!isValidEmail(manualCustomerEmail) ? 'Required (valid email)' : ''} />
-            <TextField disabled={manualIsLocked} label="Customer Name" size="small" value={manualCustomerName} onChange={(e)=>setManualCustomerName(e.target.value)} sx={{ minWidth: 200 }} error={!String(manualCustomerName||'').trim()} helperText={!String(manualCustomerName||'').trim() ? 'Required' : ''} />
+            <TextField disabled={manualFieldsLocked} label="Customer Email" size="small" value={manualCustomerEmail} onChange={(e)=>setManualCustomerEmail(e.target.value)} sx={{ minWidth: 200 }} error={!isValidEmail(manualCustomerEmail)} helperText={!isValidEmail(manualCustomerEmail) ? 'Required (valid email)' : ''} />
+            <TextField disabled={manualFieldsLocked} label="Customer Name" size="small" value={manualCustomerName} onChange={(e)=>setManualCustomerName(e.target.value)} sx={{ minWidth: 200 }} error={!String(manualCustomerName||'').trim()} helperText={!String(manualCustomerName||'').trim() ? 'Required' : ''} />
           </Stack>
           <Stack direction={{ xs:'column', sm:'row' }} spacing={2} sx={{ mb: 2 }}>
-            <TextField disabled={manualIsLocked} label="Phone Number" size="small" value={manualCustomerPhone} onChange={(e)=>setManualCustomerPhone(e.target.value)} sx={{ minWidth: 220 }} error={!String(manualCustomerPhone||'').trim()} helperText={!String(manualCustomerPhone||'').trim() ? 'Required' : ''} />
+            <TextField disabled={manualFieldsLocked} label="Phone Number" size="small" value={manualCustomerPhone} onChange={(e)=>setManualCustomerPhone(e.target.value)} sx={{ minWidth: 220 }} error={!String(manualCustomerPhone||'').trim()} helperText={!String(manualCustomerPhone||'').trim() ? 'Required' : ''} />
           </Stack>
           <Stack direction={{ xs:'column', sm:'row' }} spacing={2} sx={{ mb: 2 }}>
             <TextField type="date" label="Created Order Date" InputLabelProps={{ shrink: true }} size="small" value={manualCreatedAt} onChange={(e)=>setManualCreatedAt(e.target.value)} sx={{ minWidth: 220 }} inputProps={{ max: todayYmd }} error={!manualCreatedAt || manualCreatedAt > todayYmd} helperText={!manualCreatedAt ? 'Required' : (manualCreatedAt > todayYmd ? 'Cannot be advance date' : '')} disabled={manualMode === 'edit'} />
-            <TextField disabled={manualIsLocked} type="date" label="Estimated Shipdate for Customer" InputLabelProps={{ shrink: true }} size="small" value={manualEstFulfillment} onChange={(e)=>{ setManualShipdateTouched(true); setManualEstFulfillment(e.target.value); }} sx={{ minWidth: 220 }} inputProps={{ min: todayYmd }} error={!manualEstFulfillment || manualEstFulfillment < todayYmd} helperText={!manualEstFulfillment ? 'Required' : (manualEstFulfillment < todayYmd ? 'Must be today or later' : '')} />
-            <Button
-              variant="outlined"
-              disabled={!manualOpen || !manualWarehouseId || manualIsLocked}
-              onClick={() => {
-                const isProcessing = manualMode === 'edit' && manualPrevStatus === 'processing';
-                const next = isProcessing ? suggestShipdateForProcessingAllocations() : suggestShipdateForSelection();
-                setManualShipdateTouched(false);
-                setManualEstFulfillment(next);
-              }}
-              sx={{ minWidth: 170 }}
-            >
-              Reset to suggested
-            </Button>
+            <TextField disabled type="date" label="Estimated Shipdate for Customer" InputLabelProps={{ shrink: true }} size="small" value={manualEstFulfillment} onChange={()=>{}} sx={{ minWidth: 220 }} error={!manualEstFulfillment} helperText={!manualEstFulfillment ? 'Required' : ''} />
+            <TextField
+              type="date"
+              label="Estimated Order Delivered"
+              InputLabelProps={{ shrink: true }}
+              size="small"
+              sx={{ minWidth: 220 }}
+              value={manualEstDelivered}
+              onChange={(e)=> setManualEstDelivered(String(e.target.value || ''))}
+              disabled={manualIsLocked || !(manualStatus === 'shipped' || manualPrevStatus === 'shipped')}
+            />
           </Stack>
+
+          {manualMode === 'edit' && manualLastUpdatedAt ? (
+            <Typography variant="caption" color="error" sx={{ display: 'block', mb: 2 }}>
+              Last Updated: {manualLastUpdatedAt}
+            </Typography>
+          ) : null}
           <TextField
             fullWidth
             label="Shipping Address"
@@ -1451,7 +1990,19 @@ export default function Orders() {
             sx={{ mb: 2 }}
             error={!String(manualShippingAddress||'').trim()}
             helperText={!String(manualShippingAddress||'').trim() ? 'Required' : ''}
-            disabled={manualIsLocked}
+            disabled={manualFieldsLocked}
+          />
+
+          <TextField
+            fullWidth
+            label="Remarks/Notes"
+            size="small"
+            value={manualNotes}
+            onChange={(e)=> setManualNotes(e.target.value)}
+            sx={{ mb: 2 }}
+            multiline
+            minRows={3}
+            disabled={manualFieldsLocked}
           />
 
           {manualMode === 'edit' ? (
@@ -1509,7 +2060,7 @@ export default function Orders() {
           <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ xs:'stretch', sm:'center' }} sx={{ mb: 1 }}>
             <Button
               variant="outlined"
-              disabled={!manualWarehouseId || manualIsCanceled}
+              disabled={!manualWarehouseId || manualFieldsLocked}
               onClick={() => {
                 setManualPickSelected({ type: 'include', ids: new Set((manualOrderGroups || []).map((x)=> String(x))) });
                 setManualPickOpen(true);
@@ -1529,185 +2080,7 @@ export default function Orders() {
           <div style={{ height: 320, width: '100%' }}>
             <DataGrid
               rows={manualOrderRows}
-              columns={(() => {
-                const cols: any[] = [
-                  { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
-                  { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
-                  { field: 'selectedWarehouseAvailable', headerName: `THIS - ${manualWarehouseName || 'Warehouse'}`, width: 170, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
-                  {
-                    field: 'onWaterPallets',
-                    headerName: 'On-Water',
-                    width: 110,
-                    type: 'number',
-                    align: 'right',
-                    headerAlign: 'right',
-                    renderCell: (p: any) => {
-                      const qty = Number(p?.row?.onWaterPallets ?? 0);
-                      const groupName = String(p?.row?.groupName || '').trim();
-                      const wid = String(manualWarehouseId || '').trim();
-                      if (!qty) return '0';
-                      return (
-                        <Button
-                          variant="text"
-                          size="small"
-                          onClick={() => openOnWaterDetails({ warehouseId: wid, groupName })}
-                          sx={{ minWidth: 0, p: 0, textDecoration: 'underline', fontSize: 16, fontWeight: 700 }}
-                        >
-                          {qty}
-                        </Button>
-                      );
-                    },
-                  },
-                ];
-
-                if (secondWarehouse?._id) {
-                  cols.push({
-                    field: 'secondWarehouseAvailable',
-                    headerName: `${secondWarehouse.name || 'Warehouse'}`,
-                    width: 170,
-                    type: 'number',
-                    align: 'right',
-                    headerAlign: 'right',
-                    sortable: false,
-                    filterable: false,
-                    renderCell: (p: any) => {
-                      const per = (p?.row as any)?.perWarehouse || {};
-                      const wid = String(secondWarehouse._id);
-                      const v = Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0);
-                      return String(Number.isFinite(v) ? v : 0);
-                    },
-                  });
-                }
-
-                cols.push({
-                  field: 'onProcessPallets',
-                  headerName: 'On-Process',
-                  width: 120,
-                  type: 'number',
-                  align: 'right',
-                  headerAlign: 'right',
-                  renderCell: (p: any) => {
-                    const qty = Number(p?.row?.onProcessPallets ?? 0);
-                    const groupName = String(p?.row?.groupName || '').trim();
-                    if (!qty) return '0';
-                    return (
-                      <Button
-                        variant="text"
-                        size="small"
-                        onClick={() => openOnProcessDetails({ groupName })}
-                        sx={{ minWidth: 0, p: 0, textDecoration: 'underline', fontSize: 16, fontWeight: 700 }}
-                      >
-                        {qty}
-                      </Button>
-                    );
-                  },
-                });
-
-                cols.push({
-                  field: 'maxQtyOrder',
-                  headerName: 'Max Qty Order',
-                  width: 140,
-                  type: 'number',
-                  align: 'right',
-                  headerAlign: 'right',
-                  sortable: false,
-                  filterable: false,
-                  valueGetter: (...args: any[]) => {
-                    // MUI DataGrid has had multiple valueGetter signatures across versions:
-                    // - (params) => any
-                    // - (value, row) => any
-                    const maybeParams = args?.[0];
-                    const maybeRow = args?.[1];
-                    const row = (maybeRow && typeof maybeRow === 'object') ? maybeRow : (maybeParams?.row || {});
-
-                    // Max Qty Order is the total orderable quantity across tiers.
-                    // It should reflect the displayed tier quantities (Primary + On-Water + 2nd Warehouse + On-Process).
-                    const primary = Number(row?.selectedWarehouseAvailable ?? 0);
-                    const onWater = Number(row?.onWaterPallets ?? 0);
-                    const onProcess = Number(row?.onProcessPallets ?? 0);
-                    let second = 0;
-                    if (secondWarehouse?._id) {
-                      const per = row?.perWarehouse || {};
-                      const wid = String(secondWarehouse._id);
-                      second = Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0);
-                    }
-                    const total =
-                      (Number.isFinite(primary) ? primary : 0) +
-                      (Number.isFinite(onWater) ? onWater : 0) +
-                      (Number.isFinite(second) ? second : 0) +
-                      (Number.isFinite(onProcess) ? onProcess : 0);
-                    return Math.max(0, Math.floor(total));
-                  },
-                  renderCell: (p: any) => {
-                    const v = Number((p && typeof p === 'object' && 'value' in p) ? (p as any).value : 0);
-                    return String(Number.isFinite(v) ? v : 0);
-                  },
-                });
-
-                cols.push({
-                  field: 'orderQty',
-                  headerName: 'Order Qty',
-                  width: 120,
-                  sortable: false,
-                  filterable: false,
-                  renderCell: (p: any) => {
-                    const groupName = String(p?.row?.groupName || '');
-                    const val = manualOrderQtyByGroup[groupName] ?? '';
-                    return (
-                      <TextField
-                        type="number"
-                        size="small"
-                        value={val}
-                        disabled={manualIsLocked}
-                        onChange={(e)=>{
-                          const raw = sanitizeIntText(e.target.value);
-                          setManualValidationErrors([]);
-                          setManualOrderQtyByGroup((prev)=> ({ ...prev, [groupName]: raw }));
-                        }}
-                        onBlur={(e)=>{
-                          const raw = normalizeIntText(e.target.value);
-                          setManualOrderQtyByGroup((prev)=> ({ ...prev, [groupName]: raw }));
-                        }}
-                        onKeyDown={(e)=>{
-                          const k = (e as any).key;
-                          if (k === 'e' || k === 'E' || k === '.' || k === '-' || k === '+' ) {
-                            e.preventDefault();
-                          }
-                        }}
-                        inputProps={{ inputMode: 'numeric', pattern: '[0-9]*', min: 0, step: 1 }}
-                        sx={{ width: 100 }}
-                      />
-                    );
-                  }
-                });
-                cols.push({
-                  field: 'remove',
-                  headerName: 'Remove',
-                  width: 110,
-                  sortable: false,
-                  filterable: false,
-                  renderCell: (p: any) => {
-                    const groupName = String(p?.row?.groupName || '');
-                    return (
-                      <IconButton
-                        size="small"
-                        disabled={manualIsLocked}
-                        onClick={() => {
-                          setManualOrderGroups((prev)=> prev.filter((x)=> String(x) !== groupName));
-                          setManualOrderQtyByGroup((prev)=> {
-                            const next = { ...prev };
-                            delete (next as any)[groupName];
-                            return next;
-                          });
-                        }}
-                      >
-                        <DeleteIcon fontSize="small" />
-                      </IconButton>
-                    );
-                  }
-                });
-                return cols;
-              })()}
+              columns={manualOrderColumns as any}
               disableRowSelectionOnClick
               density="compact"
               slots={{ toolbar: GridToolbar }}
@@ -2022,6 +2395,13 @@ export default function Orders() {
         <DialogActions>
           <Button onClick={()=>setManualOpen(false)}>Cancel</Button>
           <Button
+            variant="outlined"
+            onClick={exportManualOrderXlsx}
+            disabled={manualMode !== 'edit' || !manualEditRow}
+          >
+            Export .xlsx
+          </Button>
+          <Button
             variant="contained"
             onClick={submitManual}
             disabled={
@@ -2032,7 +2412,6 @@ export default function Orders() {
               !manualCreatedAt ||
               manualCreatedAt > todayYmd ||
               !manualEstFulfillment ||
-              manualEstFulfillment < todayYmd ||
               !String(manualShippingAddress||'').trim() ||
               manualIsLocked ||
               (manualOrderGroups.length === 0) ||

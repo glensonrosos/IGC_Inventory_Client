@@ -59,18 +59,44 @@ export default function Pallets() {
   }, [rows, q]);
 
   const columns = useMemo<GridColDef[]>(() => {
-    const whCols: GridColDef[] = warehouses.map((w) => ({
-      field: `wh_${w._id}`,
-      headerName: `${w.name}`,
-      width: 170,
-      type: 'number',
-    }));
+    const primaryWh = warehouses.find((w) => Boolean((w as any)?.isPrimary)) || null;
+    const secondWh = warehouses.find((w) => !Boolean((w as any)?.isPrimary)) || null;
+    const primaryCols: GridColDef[] = primaryWh
+      ? [
+          {
+            field: `wh_${primaryWh._id}`,
+            headerName: `${primaryWh.name}`,
+            width: 170,
+            type: 'number',
+          },
+        ]
+      : [];
+    const secondCols: GridColDef[] = secondWh
+      ? [
+          {
+            field: `wh_${secondWh._id}`,
+            headerName: `${secondWh.name}`,
+            width: 170,
+            type: 'number',
+          },
+        ]
+      : [];
+    const otherWhCols: GridColDef[] = warehouses
+      .filter((w) => String(w?._id) !== String(primaryWh?._id || '') && String(w?._id) !== String(secondWh?._id || ''))
+      .map((w) => ({
+        field: `wh_${w._id}`,
+        headerName: `${w.name}`,
+        width: 170,
+        type: 'number',
+      }));
     return [
       { field: 'palletId', headerName: 'Pallet ID', width: 160 },
       { field: 'itemGroup', headerName: 'Pallet Description', flex: 1, minWidth: 220 },
-      ...whCols,
-      { field: 'onProcessQty', headerName: 'On-Process', width: 150, type: 'number' },
+      ...primaryCols,
       { field: 'onWaterQty', headerName: 'On-Water', width: 140, type: 'number' },
+      ...secondCols,
+      { field: 'onProcessQty', headerName: 'On-Process', width: 150, type: 'number' },
+      ...otherWhCols,
       { field: 'totalQty', headerName: 'Total Qty', width: 140, type: 'number' },
     ];
   }, [warehouses]);
@@ -99,20 +125,27 @@ export default function Pallets() {
   ), [filteredRows, warehouses, palletIdByGroup]);
 
   const exportExcel = () => {
+    const primaryWh = warehouses.find((w) => Boolean((w as any)?.isPrimary)) || null;
+    const secondWh = warehouses.find((w) => !Boolean((w as any)?.isPrimary)) || null;
+    const otherWh = warehouses.filter((w) => String(w?._id) !== String(primaryWh?._id || '') && String(w?._id) !== String(secondWh?._id || ''));
     const header = [
       'Pallet ID',
       'Pallet Description',
-      ...warehouses.map(w => `${w.name}`),
-      'On-Process',
+      ...(primaryWh ? [`${primaryWh.name}`] : []),
       'On-Water',
+      ...(secondWh ? [`${secondWh.name}`] : []),
+      'On-Process',
+      ...otherWh.map(w => `${w.name}`),
       'Total Qty',
     ];
     const aoa = gridRows.map((r:any) => [
       String(r.palletId || ''),
       r.itemGroup,
-      ...warehouses.map(w => Number(r.warehouses?.[String(w._id)] || 0)),
-      Number(r.onProcessQty || 0),
+      ...(primaryWh ? [Number(r.warehouses?.[String(primaryWh._id)] || 0)] : []),
       Number(r.onWaterQty || 0),
+      ...(secondWh ? [Number(r.warehouses?.[String(secondWh._id)] || 0)] : []),
+      Number(r.onProcessQty || 0),
+      ...otherWh.map(w => Number(r.warehouses?.[String(w._id)] || 0)),
       Number(r.totalQty || 0),
     ]);
     const ws = XLSX.utils.aoa_to_sheet([header, ...aoa]);

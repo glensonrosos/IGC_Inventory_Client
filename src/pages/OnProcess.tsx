@@ -45,7 +45,7 @@ export default function OnProcess() {
   const [transferMode, setTransferMode] = useState<'delivered'|'on_water'>('delivered');
   const [transferEDD, setTransferEDD] = useState<string>('');
   const [transferConfirmed, setTransferConfirmed] = useState(false);
-  const [warehouses, setWarehouses] = useState<Array<{ _id: string; name: string }>>([]);
+  const [warehouses, setWarehouses] = useState<Array<{ _id: string; name: string; isPrimary?: boolean }>>([]);
   const [pendingDates, setPendingDates] = useState<Record<string, string>>({});
   const [dirty, setDirty] = useState(false);
   const [batchRefreshing, setBatchRefreshing] = useState(false);
@@ -72,11 +72,24 @@ export default function OnProcess() {
     if (!transferBulkOpen) return;
     (async()=>{
       try {
-        const { data } = await api.get<Array<{ _id: string; name: string }>>('/warehouses');
+        const { data } = await api.get<Array<{ _id: string; name: string; isPrimary?: boolean }>>('/warehouses');
         setWarehouses(Array.isArray(data) ? data : []);
       } catch {}
     })();
   }, [transferBulkOpen]);
+
+  useEffect(() => {
+    if (!transferBulkOpen) return;
+    const list = Array.isArray(warehouses) ? warehouses : [];
+    if (!list.length) return;
+
+    const primary = list.find((w) => Boolean((w as any)?.isPrimary)) || null;
+    const second = list.find((w) => !Boolean((w as any)?.isPrimary)) || null;
+    const next = transferMode === 'on_water' ? (primary?._id || '') : (second?._id || '');
+    if (next && String(next) !== String(transferWarehouse || '')) {
+      setTransferWarehouse(String(next));
+    }
+  }, [transferBulkOpen, transferMode, warehouses, transferWarehouse]);
 
   useEffect(() => {
     (async () => {
@@ -119,7 +132,9 @@ export default function OnProcess() {
       .filter(r => {
         const t = itemsSearch.trim().toLowerCase();
         if (!t) return true;
-        return r.groupName.toLowerCase().includes(t);
+        const gn = String(r.groupName || '').toLowerCase();
+        const pid = String(palletIdByGroup[String(r.groupName || '').trim()] || '').toLowerCase();
+        return gn.includes(t) || pid.includes(t);
       })
       .map(r => ({
         id: String((r as any)._id || `${selectedBatch?._id}:${r.groupName}`),
@@ -317,6 +332,7 @@ export default function OnProcess() {
           <input key={fileInputKey} type="file" accept=".xlsx" onChange={(e)=> setFile(e.target.files?.[0] || null)} />
           <Button variant="contained" onClick={importFile} disabled={!file}>Import (.xlsx)</Button>
           <Button variant="outlined" onClick={downloadTemplate}>Download Template</Button>
+          <Button variant="outlined" onClick={refreshBatchesAndResetImport}>Refresh</Button>
         </Stack>
         {result && (
           <Paper variant="outlined" sx={{ p:2, mt:2, bgcolor:'#fafafa' }}>
@@ -359,7 +375,6 @@ export default function OnProcess() {
         <Typography variant="h6" gutterBottom>Batches</Typography>
         <Stack direction={{ xs:'column', sm:'row' }} spacing={2} alignItems="center" sx={{ mb: 1 }}>
           <TextField size="small" label="Search (PO#/Reference/Date/Notes)" value={bq} onChange={(e)=> setBq(e.target.value)} sx={{ minWidth: 280, flex: 1 }} />
-          <Button variant="outlined" onClick={refreshBatchesAndResetImport}>Refresh</Button>
         </Stack>
         <div style={{ height: 360, width: '100%' }}>
           <DataGrid
@@ -602,6 +617,15 @@ export default function OnProcess() {
                   getOptionLabel={(o)=> o?.name || ''}
                   value={addGroupSelected}
                   onChange={(_, v)=> { setAddGroupSelected(v); setAddGroupName(v?.name || ''); }}
+                  filterOptions={(options, state) => {
+                    const q = String(state?.inputValue || '').trim().toLowerCase();
+                    if (!q) return options;
+                    return (Array.isArray(options) ? options : []).filter((o: any) => {
+                      const name = String(o?.name || '').trim().toLowerCase();
+                      const pid = String(palletIdByGroup[String(o?.name || '').trim()] || '').trim().toLowerCase();
+                      return (name && name.includes(q)) || (pid && pid.includes(q));
+                    });
+                  }}
                   renderInput={(params)=> (
                     <TextField {...params} label="Search Pallet Description" placeholder="Type to search" sx={{ mb: 2 }} />
                   )}
@@ -633,11 +657,6 @@ export default function OnProcess() {
                 <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
                   {(rowSelection.length - eligibleSelected.length) > 0 ? `${rowSelection.length - eligibleSelected.length} selected row(s) are ineligible (finished = 0 or locked) and will be skipped.` : 'All selected rows are eligible.'}
                 </Typography>
-                <TextField fullWidth select label="Warehouse (required)" value={transferWarehouse} onChange={(e)=> setTransferWarehouse(e.target.value)} sx={{ mb: 2 }}>
-                  {warehouses.map(w => (
-                    <MenuItem key={w._id} value={w._id}>{w.name}</MenuItem>
-                  ))}
-                </TextField>
                 <FormControl fullWidth sx={{ mb: 2 }}>
                   <InputLabel id="transfer-mode-label-bulk">Transfer as</InputLabel>
                   <Select labelId="transfer-mode-label-bulk" value={transferMode} label="Transfer as" onChange={(e)=> setTransferMode(e.target.value as any)}>
@@ -645,6 +664,11 @@ export default function OnProcess() {
                     <MenuItem value="on_water">On-Water (ask EDD, create shipment)</MenuItem>
                   </Select>
                 </FormControl>
+                <TextField fullWidth select disabled label="Warehouse (required)" value={transferWarehouse} onChange={(e)=> setTransferWarehouse(e.target.value)} sx={{ mb: 2 }}>
+                  {warehouses.map(w => (
+                    <MenuItem key={w._id} value={w._id}>{w.name}</MenuItem>
+                  ))}
+                </TextField>
                 {transferMode === 'on_water' && (
                   <TextField
                     fullWidth

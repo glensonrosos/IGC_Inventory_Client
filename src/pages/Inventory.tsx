@@ -230,7 +230,7 @@ export default function Inventory() {
           />
           <Stack direction="row" spacing={1}>
             <Button variant="outlined" onClick={loadGroups}>Refresh</Button>
-            <Button variant="outlined" onClick={openLoss}>Record Loss</Button>
+            <Button variant="outlined" color="error" onClick={openLoss}>Record Loss</Button>
             <Button variant="contained" onClick={()=>setImportOpen(true)}>Import Existing Inventory</Button>
           </Stack>
         </Stack>
@@ -383,6 +383,10 @@ export default function Inventory() {
                       const rsn = String(t.reason || '').toLowerCase();
                       if (rsn === 'loss') statusLabel = 'adjustment | loss';
                       else if (rsn === 'order_fulfilled') statusLabel = 'adjustment | order_fulfilled';
+                      else if (rsn === 'order_shipped') statusLabel = 'adjustment | order_shipped';
+                      else if (rsn === 'order_shipped_second_warehouse') statusLabel = 'adjustment | order_shipped_second_warehouse';
+                      else if (rsn === 'order_canceled') statusLabel = 'adjustment | order_canceled';
+                      else if (rsn === 'order_canceled_second_warehouse') statusLabel = 'adjustment | order_canceled_second_warehouse';
                       else statusLabel = 'adjustment';
                     }
                     if (t.status === 'Delivered') {
