@@ -20,6 +20,7 @@ export default function NavBar() {
   const [due, setDue] = useState(0);
   const [onProcessDue, setOnProcessDue] = useState(0);
   const [ordersDueToday, setOrdersDueToday] = useState(0);
+  const [ordersDeliveredDue, setOrdersDeliveredDue] = useState(0);
   useEffect(() => {
     let alive = true;
 
@@ -69,15 +70,21 @@ export default function NavBar() {
         const { data } = await api.get<any[]>('/orders/unfulfilled');
         const list = Array.isArray(data) ? data : [];
         const today = todayYmd();
-        const count = list.filter((o: any) => {
+        const readyToShip = list.filter((o: any) => {
           const st = normalizeStatus(o?.status);
-          if (st !== 'processing') return false;
-          const ymd = toYmd(o?.estFulfillmentDate || o?.estFulfillment || o?.estShipDate || o?.estShipdate);
-          return ymd && ymd === today;
+          return st === 'ready_to_ship';
         }).length;
-        setOrdersDueToday(count);
+        const deliveredDue = list.filter((o: any) => {
+          const st = normalizeStatus(o?.status);
+          if (st !== 'shipped') return false;
+          const ymd = toYmd(o?.estDeliveredDate || o?.estDelivered);
+          return ymd && ymd <= today;
+        }).length;
+        setOrdersDueToday(readyToShip);
+        setOrdersDeliveredDue(deliveredDue);
       } catch {
         setOrdersDueToday(0);
+        setOrdersDeliveredDue(0);
       }
     };
 
@@ -138,7 +145,7 @@ export default function NavBar() {
           <Badge color="error" badgeContent={due} max={99} overlap="circular">
             <Button component={Link} to="/ship" color={loc.pathname === '/ship' ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: loc.pathname === '/ship' ? 1 : 0.85 }}>Ship</Button>
           </Badge>
-          <Badge color="error" badgeContent={ordersDueToday} max={99} overlap="circular">
+          <Badge color="error" badgeContent={(ordersDueToday || 0) + (ordersDeliveredDue || 0)} max={99} overlap="circular">
             <Button component={Link} to="/orders" color={loc.pathname === '/orders' ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: loc.pathname === '/orders' ? 1 : 0.85 }}>Orders</Button>
           </Badge>
           <Typography component="span" sx={{ color: 'rgba(255,255,255,0.7)', mx: 2, userSelect: 'none' }}>|</Typography>

@@ -34,6 +34,9 @@ type OrdersRow = {
   customerPhone?: string;
   shippingAddress?: string;
   createdAtOrder?: string;
+  originalPrice?: any;
+  discountPercent?: any;
+  finalPrice?: any;
   estFulfillmentDate?: string;
   estDeliveredDate?: string;
   notes?: string;
@@ -45,6 +48,8 @@ export default function Orders() {
   const lastAutoSavedShipdateRef = useRef<{ orderId: string; ymd: string; at: number }>({ orderId: '', ymd: '', at: 0 });
   const lastAutoSuggestedShipdateRef = useRef<{ ymd: string; at: number }>({ ymd: '', at: 0 });
   const shipmentsRebalanceTimerRef = useRef<any>(null);
+  const toast = useToast();
+  const [groupPriceByName, setGroupPriceByName] = useState<Record<string, number>>({});
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersRows, setOrdersRows] = useState<OrdersRow[]>([]);
@@ -74,6 +79,8 @@ export default function Orders() {
   const [manualEstDelivered, setManualEstDelivered] = useState('');
   const [manualShippingAddress, setManualShippingAddress] = useState('');
   const [manualNotes, setManualNotes] = useState('');
+  const [manualOriginalPrice, setManualOriginalPrice] = useState('');
+  const [manualDiscountPercent, setManualDiscountPercent] = useState('');
   const [manualLineMode, setManualLineMode] = useState<'pallet_group' | 'line_item'>('pallet_group');
   const [manualPalletGroupOptions, setManualPalletGroupOptions] = useState<string[]>([]);
   const [manualLineItemOptions, setManualLineItemOptions] = useState<string[]>([]);
@@ -109,6 +116,15 @@ export default function Orders() {
   const [viewOrderableLoading, setViewOrderableLoading] = useState(false);
   const [viewOrderableExporting, setViewOrderableExporting] = useState(false);
 
+  const [reportOpen, setReportOpen] = useState(false);
+  const [reportFrom, setReportFrom] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return d.toISOString().slice(0, 10);
+  });
+  const [reportTo, setReportTo] = useState(() => new Date().toISOString().slice(0, 10));
+  const [reportExporting, setReportExporting] = useState(false);
+
   const viewOrderableFilteredRows = useMemo(() => {
     const q = String(viewOrderableQ || '').trim().toLowerCase();
     const rows = Array.isArray(viewOrderableRows) ? viewOrderableRows : [];
@@ -118,6 +134,29 @@ export default function Orders() {
       return hay.includes(q);
     });
   }, [viewOrderableQ, viewOrderableRows]);
+
+  useEffect(() => {
+    let stopped = false;
+    const loadPrices = async () => {
+      try {
+        const { data } = await api.get<any[]>('/item-groups');
+        const map: Record<string, number> = {};
+        for (const g of (Array.isArray(data) ? data : [])) {
+          const name = String(g?.name || '').trim().toLowerCase();
+          if (!name) continue;
+          const p = Number(g?.price);
+          if (Number.isFinite(p)) map[name] = p;
+        }
+        if (!stopped) setGroupPriceByName(map);
+      } catch {
+        if (!stopped) setGroupPriceByName({});
+      }
+    };
+    loadPrices();
+    return () => {
+      stopped = true;
+    };
+  }, []);
 
   const openOnWaterDetails = useCallback(async ({ warehouseId, groupName }: { warehouseId: string; groupName: string }) => {
     const g = String(groupName || '').trim();
@@ -155,6 +194,11 @@ export default function Orders() {
         const primary = Number(r?.selectedWarehouseAvailable ?? 0);
         const onWater = Number(r?.onWaterPallets ?? 0);
         const onProcess = Number(r?.onProcessPallets ?? 0);
+        const price = (() => {
+          const g = String(r?.groupName || '').trim().toLowerCase();
+          const p = Number(groupPriceByName?.[g]);
+          return Number.isFinite(p) ? p : '';
+        })();
         let secondQty = 0;
         if (secondId) {
           const per = r?.perWarehouse || {};
@@ -169,6 +213,7 @@ export default function Orders() {
         const out: any = {
           'Pallet ID': String(r?.lineItem || ''),
           'Pallet Description': String(r?.groupName || ''),
+          'Price': price,
           [`THIS - ${thisWhName || 'Warehouse'}`]: Math.max(0, Math.floor(Number.isFinite(primary) ? primary : 0)),
           'On-Water': Math.max(0, Math.floor(Number.isFinite(onWater) ? onWater : 0)),
           'On-Process': Math.max(0, Math.floor(Number.isFinite(onProcess) ? onProcess : 0)),
@@ -193,6 +238,78 @@ export default function Orders() {
       setViewOrderableExporting(false);
     }
   };
+
+  const exportPalletSalesReportXlsx = useCallback(async () => {
+    const from = String(reportFrom || '').slice(0, 10);
+    const to = String(reportTo || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+      toast.error('Please select a valid date range');
+      return;
+    }
+
+    setReportExporting(true);
+    try {
+      const { data } = await api.get('/reports/pallet-sales', {
+        params: {
+          from,
+          to,
+          top: 20,
+        },
+      });
+
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const dt = new Date();
+      const stamp = `${dt.getFullYear()}${pad(dt.getMonth() + 1)}${pad(dt.getDate())}_${pad(dt.getHours())}${pad(dt.getMinutes())}${pad(dt.getSeconds())}`;
+      const safe = (v: any) => String(v ?? '').replace(/[/\\:*?"<>|]/g, '-');
+      const filename = `pallet_sales_report_${safe(from)}_${safe(to)}_${stamp}.xlsx`;
+
+      const rows: any[] = [];
+      rows.push(['Pallet Sales Report']);
+      rows.push([`Date Range: ${from} to ${to}`]);
+      rows.push([`Exported At: ${dt.toLocaleString()}`]);
+      rows.push([]);
+
+      rows.push(['Top Selling Pallets']);
+      rows.push(['Pallet ID', 'Pallet Description', 'Pallets Sold']);
+      const topSelling = Array.isArray(data?.topSelling) ? data.topSelling : [];
+      for (const r of topSelling) {
+        rows.push([
+          String(r?.palletId || ''),
+          String(r?.groupName || ''),
+          Number(r?.soldPallets || 0),
+        ]);
+      }
+      if (!topSelling.length) {
+        rows.push(['', '', 0]);
+      }
+
+      rows.push([]);
+      rows.push(['Non-Performing Pallets']);
+      rows.push(['Pallet ID', 'Pallet Description', 'Pallets Sold', 'Reason']);
+      const nonPerforming = Array.isArray(data?.nonPerforming) ? data.nonPerforming : [];
+      for (const r of nonPerforming) {
+        rows.push([
+          String(r?.palletId || ''),
+          String(r?.groupName || ''),
+          Number(r?.soldPallets || 0),
+          String(r?.reason || ''),
+        ]);
+      }
+      if (!nonPerforming.length) {
+        rows.push(['', '', 0, '']);
+      }
+
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Pallet Sales');
+      XLSX.writeFile(wb, filename);
+    } catch (e: any) {
+      const msg = e?.response?.data?.message || 'Failed to export report';
+      toast.error(msg);
+    } finally {
+      setReportExporting(false);
+    }
+  }, [reportFrom, reportTo, toast]);
 
   const openManualEdit = async (row: OrdersRow) => {
     const toYmd = (v: any) => {
@@ -222,6 +339,8 @@ export default function Orders() {
     setManualShipdateTouched(false);
     setManualShippingAddress(String(row?.shippingAddress || '').trim());
     setManualNotes(String((row as any)?.notes || '').trim());
+    setManualOriginalPrice(String((row as any)?.originalPrice ?? '').trim());
+    setManualDiscountPercent(String((row as any)?.discountPercent ?? '').trim());
     setManualLineMode('pallet_group');
     setManualLines([{ lineItem: '', qty: '' }]);
     setManualAvailable({});
@@ -394,6 +513,24 @@ export default function Orders() {
     const cols: any[] = [
       { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
       { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
+      {
+        field: 'price',
+        headerName: 'Price',
+        width: 110,
+        type: 'number',
+        align: 'right',
+        headerAlign: 'right',
+        valueGetter: (p: any) => {
+          const g = String(p?.row?.groupName || '').trim().toLowerCase();
+          const v = Number(groupPriceByName?.[g]);
+          return Number.isFinite(v) ? v : null;
+        },
+        renderCell: (p: any) => {
+          const g = String(p?.row?.groupName || '').trim().toLowerCase();
+          const v = Number(groupPriceByName?.[g]);
+          return Number.isFinite(v) ? v.toFixed(2) : '';
+        },
+      },
       { field: 'selectedWarehouseAvailable', headerName: `THIS - ${manualWarehouseName || 'Warehouse'}`, width: 170, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
       {
         field: 'onWaterPallets',
@@ -563,24 +700,39 @@ export default function Orders() {
       }
     });
 
+    // ... existing code ...
+
     return cols;
-  }, [manualWarehouseName, manualWarehouseId, secondWarehouse, manualOrderQtyByGroup, manualFieldsLocked, openOnWaterDetails, openOnProcessDetails]);
+  }, [
+    manualWarehouseName,
+    manualWarehouseId,
+    secondWarehouse,
+    manualOrderQtyByGroup,
+    manualFieldsLocked,
+    openOnWaterDetails,
+    openOnProcessDetails,
+    groupPriceByName,
+  ]);
 
   const manualAllocationRows = useMemo(() => {
     const allocs = Array.isArray(manualAllocations) ? manualAllocations : [];
     const byGroup = new Map<string, { groupName: string; primary: number; onWater: number; onProcess: number; second: number }>();
+
     for (const a of allocs) {
-      const g = String(a?.groupName || '').trim();
-      const src = String(a?.source || '').trim().toLowerCase();
-      const qty = Math.floor(Number(a?.qty || 0));
+      const g = String((a as any)?.groupName || '').trim();
+      const src = String((a as any)?.source || '').trim().toLowerCase();
+      const qty = Math.floor(Number((a as any)?.qty || 0));
       if (!g || !Number.isFinite(qty) || qty <= 0) continue;
+
       if (!byGroup.has(g)) byGroup.set(g, { groupName: g, primary: 0, onWater: 0, onProcess: 0, second: 0 });
       const rec = byGroup.get(g)!;
+
       if (src === 'primary') rec.primary += qty;
       else if (src === 'on_water') rec.onWater += qty;
       else if (src === 'on_process') rec.onProcess += qty;
       else if (src === 'second') rec.second += qty;
     }
+
     return Array.from(byGroup.values())
       .map((r) => ({ id: r.groupName, ...r }))
       .sort((a, b) => String(a.groupName).localeCompare(String(b.groupName)));
@@ -590,19 +742,24 @@ export default function Orders() {
     const rows = Array.isArray(manualReservedBreakdown) ? manualReservedBreakdown : [];
     if (rows.length) {
       return rows
-        .map((r: any) => ({
-          id: String(r?.id || r?.groupName || ''),
-          groupName: String(r?.groupName || ''),
-          primary: Math.floor(Number(r?.primary || 0)),
-          onWater: Math.floor(Number(r?.onWater || 0)),
-          second: Math.floor(Number(r?.second || 0)),
-          onProcess: Math.floor(Number(r?.onProcess || 0)),
-        }))
+        .map((r: any) => {
+          const groupName = String(r?.groupName || '');
+          const picker = manualPickerRowByGroup.get(groupName) || {};
+          return {
+            id: String(r?.id || r?.groupName || ''),
+            palletId: String(picker?.lineItem || ''),
+            groupName,
+            primary: Math.floor(Number(r?.primary || 0)),
+            onWater: Math.floor(Number(r?.onWater || 0)),
+            second: Math.floor(Number(r?.second || 0)),
+            onProcess: Math.floor(Number(r?.onProcess || 0)),
+          };
+        })
         .filter((r: any) => String(r.groupName || '').trim())
         .sort((a: any, b: any) => String(a.groupName).localeCompare(String(b.groupName)));
     }
     return manualAllocationRows;
-  }, [manualReservedBreakdown, manualAllocationRows]);
+  }, [manualReservedBreakdown, manualAllocationRows, manualPickerRowByGroup]);
 
   const manualAllocationWarehouseLabels = useMemo(() => {
     const all = [...(Array.isArray(warehouses) ? warehouses : []), ...(Array.isArray(manualPickerWarehouses) ? manualPickerWarehouses : [])] as any[];
@@ -647,6 +804,16 @@ export default function Orders() {
     const orderNumber = String(manualEditRow?.orderNumber || manualEditRow?.rawId || manualEditRow?.id || '').trim();
     const sStatus = normalizeStatus(manualStatus || '');
 
+    const exportFinalPrice = (() => {
+      const op = Number(manualOriginalPrice);
+      if (!Number.isFinite(op)) return '';
+      const dp = Number(manualDiscountPercent);
+      const disc = Number.isFinite(dp) ? Math.min(100, Math.max(0, dp)) : 0;
+      const out = op * (1 - disc / 100);
+      if (!Number.isFinite(out)) return '';
+      return out.toFixed(2);
+    })();
+
     const pad = (n: number) => n.toString().padStart(2, '0');
     const d = new Date();
     const ts = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
@@ -665,6 +832,9 @@ export default function Orders() {
     addKV('Create Order Date', manualCreatedAt);
     addKV('Estimated Shipdate for Customer', manualEstFulfillment);
     addKV('Estimated Order Delivered', manualEstDelivered);
+    addKV('Original Price', manualOriginalPrice);
+    addKV('Discount (%)', manualDiscountPercent);
+    addKV('Final Price', exportFinalPrice);
     addKV('Shipping Address', manualShippingAddress);
     addKV('Remarks/Notes', manualNotes);
     addKV('Last Updated', manualLastUpdatedAt);
@@ -672,6 +842,7 @@ export default function Orders() {
     rows.push([]);
     rows.push(['Current Stock Reserved of this Order']);
     rows.push([
+      'Pallet ID',
       'Pallet Description',
       manualAllocationWarehouseLabels.primaryLabel,
       'On-Water',
@@ -681,8 +852,16 @@ export default function Orders() {
 
     const reserved = Array.isArray(manualReservedRows) ? manualReservedRows : [];
     for (const r of reserved) {
+      const g = String(r?.groupName || '').trim();
+      const byMap = manualPickerRowByGroup?.get ? manualPickerRowByGroup.get(g) : null;
+      const gLower = g.toLowerCase();
+      const hit = (Array.isArray(manualPickerRows) ? manualPickerRows : []).find(
+        (p: any) => String(p?.groupName || '').trim().toLowerCase() === gLower
+      );
+      const palletId = String(byMap?.lineItem || hit?.lineItem || '').trim();
       rows.push([
-        String(r?.groupName || ''),
+        palletId,
+        g,
         Number(r?.primary ?? 0),
         Number(r?.onWater ?? 0),
         Number(r?.second ?? 0),
@@ -692,7 +871,7 @@ export default function Orders() {
 
     rows.push([]);
     rows.push(['Pallets to Order']);
-    rows.push(['Pallet ID', 'Pallet Description', 'Qty Ordered']);
+    rows.push(['Pallet ID', 'Pallet Description', 'Qty Ordered', 'Price']);
 
     const pickerRows = Array.isArray(manualPickerRows) ? manualPickerRows : [];
     const toPalletId = (groupName: string) => {
@@ -711,7 +890,9 @@ export default function Orders() {
 
       const byMap = manualPickerRowByGroup?.get ? manualPickerRowByGroup.get(g) : null;
       const palletId = String(byMap?.lineItem || toPalletId(g) || '').trim();
-      rows.push([palletId, g, qty]);
+      const priceKey = String(g || '').trim().toLowerCase();
+      const p = Number(groupPriceByName?.[priceKey]);
+      rows.push([palletId, g, qty, Number.isFinite(p) ? p.toFixed(2) : '']);
     }
 
     const ws = XLSX.utils.aoa_to_sheet(rows);
@@ -731,12 +912,15 @@ export default function Orders() {
     manualShippingAddress,
     manualNotes,
     manualLastUpdatedAt,
+    manualOriginalPrice,
+    manualDiscountPercent,
     manualReservedRows,
     manualOrderGroups,
     manualOrderQtyByGroup,
     manualPickerRows,
     manualPickerRowByGroup,
     manualAllocationWarehouseLabels,
+    groupPriceByName,
   ]);
 
   const isValidEmail = (email: string) => {
@@ -763,6 +947,37 @@ export default function Orders() {
   };
 
   const normalizeManualLine = (v: any) => String(v || '').trim();
+
+  const normalizePriceText = (v: any) => {
+    const s = String(v ?? '').trim();
+    if (!s) return '';
+    const cleaned = s.replace(/[^0-9.]/g, '');
+    if (!cleaned) return '';
+    const n = Number(cleaned);
+    if (!Number.isFinite(n) || n < 0) return '';
+    return String(n);
+  };
+
+  const normalizeDiscountText = (v: any) => {
+    const s = String(v ?? '').trim();
+    if (!s) return '';
+    const cleaned = s.replace(/[^0-9.]/g, '');
+    if (!cleaned) return '';
+    const n = Number(cleaned);
+    if (!Number.isFinite(n)) return '';
+    const clamped = Math.min(100, Math.max(0, n));
+    return String(clamped);
+  };
+
+  const manualFinalPrice = useMemo(() => {
+    const op = Number(manualOriginalPrice);
+    if (!Number.isFinite(op)) return '';
+    const dp = Number(manualDiscountPercent);
+    const disc = Number.isFinite(dp) ? Math.min(100, Math.max(0, dp)) : 0;
+    const out = op * (1 - disc / 100);
+    if (!Number.isFinite(out)) return '';
+    return out.toFixed(2);
+  }, [manualOriginalPrice, manualDiscountPercent]);
 
   const getActiveManualOptions = () => (manualLineMode === 'pallet_group' ? manualPalletGroupOptions : manualLineItemOptions);
 
@@ -1181,21 +1396,15 @@ export default function Orders() {
     return (getActiveManualOptions() || []).filter((o) => {
       const name = normalizeManualLine(o);
       if (!name) return false;
-      if (current && name.toLowerCase() === current.toLowerCase()) return true;
+      if (name.toLowerCase() === current.toLowerCase()) return true;
       return !selected.has(name.toLowerCase());
     });
   };
 
-  const toast = useToast();
-
   function normalizeStatus(v: any) {
     const s = String(v || '').trim().toLowerCase();
-    if (!s) return '';
-    if (s === 'created') return 'processing';
     if (s === 'create') return 'processing';
-    if (s === 'ready-to-ship') return 'ready_to_ship';
-    if (s === 'ready to ship') return 'ready_to_ship';
-    if (s === 'backorder') return 'processing';
+    if (s === 'created') return 'processing';
     if (s === 'fulfilled') return 'completed';
     if (s === 'cancelled') return 'canceled';
     if (s === 'cancel') return 'canceled';
@@ -1251,6 +1460,9 @@ export default function Orders() {
         customerPhone: String(o?.customerPhone || ''),
         shippingAddress: String(o?.shippingAddress || ''),
         createdAtOrder: normalizeDateValue(o?.createdAtOrder),
+        originalPrice: o?.originalPrice,
+        discountPercent: o?.discountPercent,
+        finalPrice: o?.finalPrice,
         estFulfillmentDate: normalizeDateValue(o?.estFulfillmentDate),
         estDeliveredDate: normalizeDateValue(o?.estDeliveredDate),
         notes: String(o?.notes || ''),
@@ -1490,6 +1702,61 @@ export default function Orders() {
       renderCell: (p: any) => fmtDate((p?.row as any)?.estFulfillmentDate),
     },
     {
+      field: 'estDeliveredDate',
+      headerName: 'Estimated Order Delivered',
+      width: 190,
+      renderCell: (p: any) => {
+        const row = (p?.row as any) || {};
+        const st = normalizeStatus(row?.status || '');
+        const ymd = String(row?.estDeliveredDate || '').slice(0, 10);
+        const isDue = st === 'shipped' && ymd && ymd <= todayYmd;
+        const label = fmtDate(row?.estDeliveredDate);
+        return (
+          <Box
+            component="span"
+            sx={
+              isDue
+                ? {
+                    px: 1,
+                    py: 0.25,
+                    borderRadius: 1,
+                    bgcolor: 'rgba(245, 124, 0, 0.18)',
+                    fontWeight: 600,
+                  }
+                : undefined
+            }
+          >
+            {label}
+          </Box>
+        );
+      },
+    },
+    {
+      field: 'discountPercent',
+      headerName: 'Discount (%)',
+      width: 130,
+      type: 'number',
+      renderCell: (p: any) => {
+        const v = (p?.row as any)?.discountPercent;
+        if (v === null || v === undefined || v === '') return '-';
+        const n = Number(v);
+        return Number.isFinite(n) ? `${n}%` : '-';
+      },
+    },
+    {
+      field: 'finalPrice',
+      headerName: 'Final Price',
+      width: 140,
+      type: 'number',
+      renderCell: (p: any) => {
+        const v = (p?.row as any)?.finalPrice;
+        if (v === null || v === undefined || v === '') return '-';
+        const n = Number(v);
+        if (!Number.isFinite(n)) return '-';
+        return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      },
+    },
+    {
       field: 'warehouseName',
       headerName: 'Warehouse',
       flex: 1,
@@ -1551,6 +1818,8 @@ export default function Orders() {
     setManualShipdateTouched(false);
     setManualShippingAddress('');
     setManualNotes('');
+    setManualOriginalPrice('');
+    setManualDiscountPercent('');
     setManualLineMode('pallet_group');
     setManualLines([{ lineItem: '', qty: '' }]);
     setManualAvailable({});
@@ -1670,6 +1939,10 @@ export default function Orders() {
     if (manualMode === 'edit' && manualStatus === 'shipped' && !manualEstDelivered) {
       errs.push('Estimated Order Delivered is required when status is SHIPPED');
     }
+    const dp = Number(manualDiscountPercent);
+    if (manualDiscountPercent && (!Number.isFinite(dp) || dp < 0 || dp > 100)) {
+      errs.push('Discount (%) must be between 0 and 100');
+    }
     if (!String(manualShippingAddress || '').trim()) {
       errs.push('Shipping Address is required');
     }
@@ -1683,6 +1956,24 @@ export default function Orders() {
       .filter((l) => l.groupName && allowed.has(l.groupName.toLowerCase()) && Number.isFinite(l.qty) && l.qty > 0);
     if (!parsed.length) {
       errs.push('At least 1 Pallet ID is required');
+    }
+
+    let computedOriginalPrice = 0;
+    const missingPrices: string[] = [];
+    for (const l of parsed) {
+      const key = String(l.groupName || '').trim().toLowerCase();
+      const unit = Number(groupPriceByName?.[key]);
+      if (!Number.isFinite(unit)) {
+        missingPrices.push(l.groupName);
+        continue;
+      }
+      computedOriginalPrice += unit * Number(l.qty || 0);
+    }
+    if (missingPrices.length) {
+      errs.push(`Missing pallet price for: ${missingPrices.join(', ')}`);
+    }
+    if (!Number.isFinite(computedOriginalPrice) || computedOriginalPrice <= 0) {
+      errs.push('Original Price is required');
     }
     const seen = new Set<string>();
     for (const l of parsed) {
@@ -1707,6 +1998,10 @@ export default function Orders() {
       toast.error(errs[0]);
       return;
     }
+
+    // Persist computed original price in state for display/export consistency
+    const computedOriginalPriceRounded = Number(computedOriginalPrice.toFixed(2));
+    setManualOriginalPrice(String(computedOriginalPriceRounded));
 
     // Client-side availability check (server also enforces)
     // For backorder, allow negative stock, so skip this check.
@@ -1750,6 +2045,8 @@ export default function Orders() {
             customerEmail: manualCustomerEmail.trim(),
             customerName: manualCustomerName.trim(),
             customerPhone: manualCustomerPhone.trim(),
+            originalPrice: computedOriginalPriceRounded,
+            discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
             estFulfillmentDate: manualEstFulfillment || undefined,
             estDeliveredDate: manualEstDelivered || undefined,
             shippingAddress: manualShippingAddress.trim(),
@@ -1764,6 +2061,8 @@ export default function Orders() {
               customerEmail: manualCustomerEmail.trim(),
               customerName: manualCustomerName.trim(),
               customerPhone: manualCustomerPhone.trim(),
+              originalPrice: computedOriginalPriceRounded,
+              discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
               estFulfillmentDate: manualEstFulfillment || undefined,
               estDeliveredDate: manualEstDelivered || undefined,
               shippingAddress: manualShippingAddress.trim(),
@@ -1791,6 +2090,8 @@ export default function Orders() {
               customerEmail: manualCustomerEmail.trim(),
               customerName: manualCustomerName.trim(),
               customerPhone: manualCustomerPhone.trim(),
+              originalPrice: computedOriginalPriceRounded,
+              discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
               estFulfillmentDate: manualEstFulfillment || undefined,
               estDeliveredDate: manualEstDelivered || undefined,
               shippingAddress: manualShippingAddress.trim(),
@@ -1815,6 +2116,8 @@ export default function Orders() {
         customerName: manualCustomerName.trim(),
         customerPhone: manualCustomerPhone.trim(),
         createdAtOrder: manualCreatedAt || undefined,
+        originalPrice: computedOriginalPriceRounded,
+        discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
         estFulfillmentDate: manualEstFulfillment || undefined,
         estDeliveredDate: manualEstDelivered || undefined,
         shippingAddress: manualShippingAddress.trim(),
@@ -1838,6 +2141,7 @@ export default function Orders() {
       <Paper sx={{ p:2, mb:2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ xs: 'stretch', sm: 'center' }}>
           <Button variant="outlined" onClick={openManual}>Add Order</Button>
+          <Button variant="outlined" onClick={() => setReportOpen(true)}>Report</Button>
           <Button
             variant="outlined"
             onClick={async () => {
@@ -1929,11 +2233,50 @@ export default function Orders() {
         </DialogActions>
       </Dialog>
 
+      <Dialog open={reportOpen} onClose={() => setReportOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Pallet Sales Report</DialogTitle>
+        <DialogContent>
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              type="date"
+              size="small"
+              label="From"
+              value={reportFrom}
+              onChange={(e) => setReportFrom(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
+            <TextField
+              type="date"
+              size="small"
+              label="To"
+              value={reportTo}
+              onChange={(e) => setReportTo(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
+          </Stack>
+          {reportExporting ? <LinearProgress sx={{ mt: 2 }} /> : null}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setReportOpen(false)} disabled={reportExporting}>Close</Button>
+          <Button variant="outlined" onClick={exportPalletSalesReportXlsx} disabled={reportExporting}>Export .xlsx</Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={manualOpen} onClose={()=>setManualOpen(false)} fullWidth maxWidth="xl">
         <DialogTitle>{manualMode === 'edit' ? `Edit Order${manualEditRow?.orderNumber ? ` - ${manualEditRow.orderNumber}` : ''}` : 'Add Order'}</DialogTitle>
         <DialogContent>
-          <Stack direction={{ xs:'column', sm:'row' }} spacing={2} sx={{ mb: 2, mt: 1 }}>
-            <TextField select disabled label="Warehouse" size="small" sx={{ minWidth: 220 }} value={manualWarehouseId} onChange={(e)=>setManualWarehouseId(e.target.value)} error={!manualWarehouseId} helperText={!manualWarehouseId ? 'Required' : ''}>
+          <Typography variant="subtitle2" sx={{ mt: 1, mb: 1 }}>Customer</Typography>
+          <Box
+            sx={{
+              display: 'grid',
+              gridTemplateColumns: { xs: '1fr', md: 'repeat(4, minmax(0, 1fr))' },
+              gap: 2,
+              mb: 2,
+            }}
+          >
+            <TextField select disabled label="Warehouse" size="small" value={manualWarehouseId} onChange={(e)=>setManualWarehouseId(e.target.value)} error={!manualWarehouseId} helperText={!manualWarehouseId ? 'Required' : ''}>
               {warehouses.map((w)=> (
                 <MenuItem key={w._id} value={w._id}>{w.name}</MenuItem>
               ))}
@@ -1943,7 +2286,6 @@ export default function Orders() {
                 select
                 label="Status"
                 size="small"
-                sx={{ minWidth: 180 }}
                 value={manualStatus}
                 onChange={(e)=> setManualStatus(e.target.value as any)}
                 disabled={manualIsLocked}
@@ -1955,26 +2297,62 @@ export default function Orders() {
                 <MenuItem value="canceled" disabled={manualPrevStatus === 'completed' || manualPrevStatus === 'canceled'}>CANCELED</MenuItem>
               </TextField>
             ) : null}
-            <TextField disabled={manualFieldsLocked} label="Customer Email" size="small" value={manualCustomerEmail} onChange={(e)=>setManualCustomerEmail(e.target.value)} sx={{ minWidth: 200 }} error={!isValidEmail(manualCustomerEmail)} helperText={!isValidEmail(manualCustomerEmail) ? 'Required (valid email)' : ''} />
-            <TextField disabled={manualFieldsLocked} label="Customer Name" size="small" value={manualCustomerName} onChange={(e)=>setManualCustomerName(e.target.value)} sx={{ minWidth: 200 }} error={!String(manualCustomerName||'').trim()} helperText={!String(manualCustomerName||'').trim() ? 'Required' : ''} />
-          </Stack>
-          <Stack direction={{ xs:'column', sm:'row' }} spacing={2} sx={{ mb: 2 }}>
-            <TextField disabled={manualFieldsLocked} label="Phone Number" size="small" value={manualCustomerPhone} onChange={(e)=>setManualCustomerPhone(e.target.value)} sx={{ minWidth: 220 }} error={!String(manualCustomerPhone||'').trim()} helperText={!String(manualCustomerPhone||'').trim() ? 'Required' : ''} />
-          </Stack>
-          <Stack direction={{ xs:'column', sm:'row' }} spacing={2} sx={{ mb: 2 }}>
-            <TextField type="date" label="Created Order Date" InputLabelProps={{ shrink: true }} size="small" value={manualCreatedAt} onChange={(e)=>setManualCreatedAt(e.target.value)} sx={{ minWidth: 220 }} inputProps={{ max: todayYmd }} error={!manualCreatedAt || manualCreatedAt > todayYmd} helperText={!manualCreatedAt ? 'Required' : (manualCreatedAt > todayYmd ? 'Cannot be advance date' : '')} disabled={manualMode === 'edit'} />
-            <TextField disabled type="date" label="Estimated Shipdate for Customer" InputLabelProps={{ shrink: true }} size="small" value={manualEstFulfillment} onChange={()=>{}} sx={{ minWidth: 220 }} error={!manualEstFulfillment} helperText={!manualEstFulfillment ? 'Required' : ''} />
+            <TextField disabled={manualFieldsLocked} label="Customer Email" size="small" value={manualCustomerEmail} onChange={(e)=>setManualCustomerEmail(e.target.value)} error={!isValidEmail(manualCustomerEmail)} helperText={!isValidEmail(manualCustomerEmail) ? 'Required (valid email)' : ''} />
+            <TextField disabled={manualFieldsLocked} label="Customer Name" size="small" value={manualCustomerName} onChange={(e)=>setManualCustomerName(e.target.value)} error={!String(manualCustomerName||'').trim()} helperText={!String(manualCustomerName||'').trim() ? 'Required' : ''} />
+            <TextField disabled={manualFieldsLocked} label="Phone Number" size="small" value={manualCustomerPhone} onChange={(e)=>setManualCustomerPhone(e.target.value)} error={!String(manualCustomerPhone||'').trim()} helperText={!String(manualCustomerPhone||'').trim() ? 'Required' : ''} />
+          </Box>
+
+          <Typography variant="subtitle2" sx={{ mb: 1 }}>Dates</Typography>
+          <Box
+            sx={{
+              display: 'grid',
+              gridTemplateColumns: { xs: '1fr', md: 'repeat(3, minmax(0, 1fr))' },
+              gap: 2,
+              mb: 2,
+            }}
+          >
+            <TextField type="date" label="Created Order Date" InputLabelProps={{ shrink: true }} size="small" value={manualCreatedAt} onChange={(e)=>setManualCreatedAt(e.target.value)} inputProps={{ max: todayYmd }} error={!manualCreatedAt || manualCreatedAt > todayYmd} helperText={!manualCreatedAt ? 'Required' : (manualCreatedAt > todayYmd ? 'Cannot be advance date' : '')} disabled={manualMode === 'edit'} />
+            <TextField disabled type="date" label="Estimated Shipdate for Customer" InputLabelProps={{ shrink: true }} size="small" value={manualEstFulfillment} onChange={()=>{}} error={!manualEstFulfillment} helperText={!manualEstFulfillment ? 'Required' : ''} />
             <TextField
               type="date"
               label="Estimated Order Delivered"
               InputLabelProps={{ shrink: true }}
               size="small"
-              sx={{ minWidth: 220 }}
               value={manualEstDelivered}
               onChange={(e)=> setManualEstDelivered(String(e.target.value || ''))}
               disabled={manualIsLocked || !(manualStatus === 'shipped' || manualPrevStatus === 'shipped')}
             />
-          </Stack>
+          </Box>
+
+          <Typography variant="subtitle2" sx={{ mb: 1 }}>Pricing</Typography>
+          <Box
+            sx={{
+              display: 'grid',
+              gridTemplateColumns: { xs: '1fr', md: 'repeat(3, minmax(0, 1fr))' },
+              gap: 2,
+              mb: 2,
+            }}
+          >
+            <TextField
+              label="Original Price"
+              size="small"
+              value={manualOriginalPrice}
+              disabled
+            />
+            <TextField
+              label="Discount (%)"
+              size="small"
+              value={manualDiscountPercent}
+              onChange={(e)=> setManualDiscountPercent(normalizeDiscountText(e.target.value))}
+              disabled={manualFieldsLocked}
+            />
+            <TextField
+              label="Final Price"
+              size="small"
+              value={manualFinalPrice}
+              disabled
+            />
+          </Box>
 
           {manualMode === 'edit' && manualLastUpdatedAt ? (
             <Typography variant="caption" color="error" sx={{ display: 'block', mb: 2 }}>
@@ -2023,6 +2401,7 @@ export default function Orders() {
                       <DataGrid
                         rows={manualReservedRows}
                         columns={([
+                          { field: 'palletId', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String((p?.row as any)?.palletId || '-') },
                           { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 240 },
                           { field: 'primary', headerName: manualAllocationWarehouseLabels.primaryLabel, width: 150, type: 'number', align: 'right', headerAlign: 'right' },
                           { field: 'onWater', headerName: 'On-Water', width: 120, type: 'number', align: 'right', headerAlign: 'right' },
@@ -2124,6 +2503,24 @@ export default function Orders() {
                     const cols: any[] = [
                       { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
                       { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
+                      {
+                        field: 'price',
+                        headerName: 'Price',
+                        width: 110,
+                        type: 'number',
+                        align: 'right',
+                        headerAlign: 'right',
+                        valueGetter: (p: any) => {
+                          const g = String(p?.row?.groupName || '').trim().toLowerCase();
+                          const v = Number(groupPriceByName?.[g]);
+                          return Number.isFinite(v) ? v : null;
+                        },
+                        renderCell: (p: any) => {
+                          const g = String(p?.row?.groupName || '').trim().toLowerCase();
+                          const v = Number(groupPriceByName?.[g]);
+                          return Number.isFinite(v) ? v.toFixed(2) : '';
+                        },
+                      },
                       { field: 'selectedWarehouseAvailable', headerName: `THIS - ${manualWarehouseName || 'Warehouse'}`, width: 170, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
                       {
                         field: 'onWaterPallets',
@@ -2155,11 +2552,12 @@ export default function Orders() {
                     const list = Array.isArray(manualPickerWarehouses) ? manualPickerWarehouses : [];
                     const second = list.find((w: any) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
                     const secondId = second ? String(second._id) : '';
+                    const secondName = second ? String((second as any).name || '') : '';
 
                     if (secondId && second) {
                       cols.push({
                         field: `wh_${secondId}`,
-                        headerName: second.name,
+                        headerName: secondName,
                         width: 120,
                         type: 'number',
                         align: 'right',
@@ -2465,6 +2863,24 @@ export default function Orders() {
                 const cols: any[] = [
                   { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
                   { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
+                  {
+                    field: 'price',
+                    headerName: 'Price',
+                    width: 110,
+                    type: 'number',
+                    align: 'right',
+                    headerAlign: 'right',
+                    valueGetter: (p: any) => {
+                      const g = String(p?.row?.groupName || '').trim().toLowerCase();
+                      const v = Number(groupPriceByName?.[g]);
+                      return Number.isFinite(v) ? v : null;
+                    },
+                    renderCell: (p: any) => {
+                      const g = String(p?.row?.groupName || '').trim().toLowerCase();
+                      const v = Number(groupPriceByName?.[g]);
+                      return Number.isFinite(v) ? v.toFixed(2) : '';
+                    },
+                  },
                   { field: 'selectedWarehouseAvailable', headerName: `THIS - ${selectedWarehouseName || 'Warehouse'}`, width: 170, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
                   { field: 'onWaterPallets', headerName: 'On-Water', width: 120, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.onWaterPallets ?? 0) },
                 ];

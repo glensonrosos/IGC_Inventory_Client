@@ -6,7 +6,7 @@ import api from '../api';
 import { useToast } from '../components/ToastProvider';
 import * as XLSX from 'xlsx';
 
-interface ItemGroup { _id: string; name: string }
+interface ItemGroup { _id: string; name: string; price?: number }
 interface Item { _id: string; itemCode: string; itemGroup: string; description: string; color: string; packSize?: number; enabled?: boolean }
 
 export default function ItemRegistry() {
@@ -142,8 +142,9 @@ export default function ItemRegistry() {
 
   const exportGroupsExcel = () => {
     // Export only active groups and enabled items, sorted
-    const header = ['Pallet Description','Pallet ID','Item Code','Item Description','Color','Pack Size'];
+    const header = ['Pallet Description','Pallet ID','Price','Item Code','Item Description','Color','Pack Size'];
     const lineItemByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).lineItem || '']));
+    const priceByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).price]));
     const activeSet = new Set(groups.filter(g => (g as any).active !== false).map(g => g.name));
     const sizeOrder = (d: string) => {
       const m = (d || '').match(/\b(XXL|XL|L|M|S)\b/i);
@@ -166,7 +167,7 @@ export default function ItemRegistry() {
         if (sd !== 0) return sd;
         return 0;
       })
-      .map(it => [it.itemGroup||'', lineItemByGroup.get(it.itemGroup||'') || '', it.itemCode, it.description||'', it.color||'', (it as any).packSize ?? 0]);
+      .map(it => [it.itemGroup||'', lineItemByGroup.get(it.itemGroup||'') || '', (priceByGroup.get(it.itemGroup||'') ?? ''), it.itemCode, it.description||'', it.color||'', (it as any).packSize ?? 0]);
     const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Groups + Items');
@@ -307,10 +308,10 @@ export default function ItemRegistry() {
 
   const downloadGroupTemplate = () => {
     // Provide a template that includes items per pallet group, with Line Item column
-    const header = ['Pallet Description','Pallet ID','Item Code','Item Description','Color','Pack Size'];
+    const header = ['Pallet Description','Pallet ID','Price','Item Code','Item Description','Color','Pack Size'];
     const example = [
-      ['Inverted Planters Smooth (OW)','Tall + Short Rounded Bottom Planters Pallet - Volcanic Ash Brown/Cement','PC2014AFBR-OW','Smooth Finish Inverted Planter S - Oyster White - Fiber Finish','Oyster White',8],
-      ['Inverted Planters Mixed Smooth and VA (OW / MB / C / DAB)','32" Beaded Commercial Planter - Cement','PC2014AFBR-OW','Smooth Finish Inverted Planter S - Oyster White - Fiber Finish','Oyster White',2]
+      ['Inverted Planters Smooth (OW)','Tall + Short Rounded Bottom Planters Pallet - Volcanic Ash Brown/Cement', 0,'PC2014AFBR-OW','Smooth Finish Inverted Planter S - Oyster White - Fiber Finish','Oyster White',8],
+      ['Inverted Planters Mixed Smooth and VA (OW / MB / C / DAB)','32" Beaded Commercial Planter - Cement', 0,'PC2014AFBR-OW','Smooth Finish Inverted Planter S - Oyster White - Fiber Finish','Oyster White',2]
     ];
     const ws = XLSX.utils.aoa_to_sheet([header, ...example]);
     const wb = XLSX.utils.book_new();
@@ -472,10 +473,31 @@ export default function ItemRegistry() {
           <DataGrid
             rows={groups
               .filter(g=>g.name.toLowerCase().includes(groupsQ.trim().toLowerCase()))
-              .map(g=>({ id: g._id, name: g.name, lineItem: (g as any).lineItem || '', active: (g as any).active !== false, itemCount: items.filter(it => (it.itemGroup||'') === g.name).length }))}
+              .map(g=>{
+                const rawPrice: any = (g as any).price;
+                const n = rawPrice === '' || rawPrice === null || typeof rawPrice === 'undefined' ? NaN : Number(rawPrice);
+                const price = Number.isFinite(n) ? n : undefined;
+                return ({ id: g._id, name: g.name, lineItem: (g as any).lineItem || '', price, active: (g as any).active !== false, itemCount: items.filter(it => (it.itemGroup||'') === g.name).length });
+              })}
             columns={([
               { field: 'lineItem', headerName: 'Pallet ID', flex: 1, minWidth: 220 },
               { field: 'name', headerName: 'Pallet Description', flex: 1, minWidth: 220 },
+              {
+                field: 'price',
+                headerName: 'Price',
+                width: 120,
+                type: 'number',
+                align: 'right',
+                headerAlign: 'right',
+                valueGetter: (params: any) => {
+                  const n = Number(params?.row?.price);
+                  return Number.isFinite(n) ? n : null;
+                },
+                renderCell: (params: any) => {
+                  const n = Number(params?.row?.price);
+                  return Number.isFinite(n) ? n.toFixed(2) : '';
+                },
+              },
               { field: 'active', headerName: 'Active', width: 80, renderCell: (p: GridRenderCellParams) => (
                 <Chip size="small" label={p.value ? 'Yes' : 'No'} color={p.value ? 'success' : 'default'} />
               ) },

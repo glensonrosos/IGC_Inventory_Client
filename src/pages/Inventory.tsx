@@ -48,6 +48,11 @@ export default function Inventory() {
   };
 
   const getLossGroupName = (g: any) => String(g?.name || '').trim();
+  const getLossPalletId = (g: any) => {
+    const name = String(g?.name || '').trim().toLowerCase();
+    if (!name) return '';
+    return String(groupLineItemByName[name] || '').trim();
+  };
   const getLossRowError = (idx: number) => {
     const current = getLossGroupName(lossItems[idx]?.group);
     if (!current) return '';
@@ -205,6 +210,16 @@ export default function Inventory() {
         reference: lossReference.trim() || undefined,
         items: normalized,
       });
+
+      try {
+        await api.post('/orders/unfulfilled/rebalance-processing', {
+          warehouseId: lossWarehouse,
+          groupNames: normalized.map((x) => x.groupName).filter((v) => v),
+        });
+      } catch {
+        // ignore
+      }
+
       toast.success('Loss recorded');
       setLossOpen(false);
       await loadGroups();
@@ -282,6 +297,13 @@ export default function Inventory() {
                 alignItems="center"
                 sx={{ p: 0.5, borderRadius: 1, bgcolor: getLossRowError(idx) ? '#fff4f4' : 'transparent' }}
               >
+                <TextField
+                  size="small"
+                  label="Pallet ID"
+                  value={getLossPalletId(row.group)}
+                  disabled
+                  sx={{ width: 140 }}
+                />
                 <Autocomplete
                   options={getLossRowOptions(idx)}
                   getOptionLabel={(o)=> o?.name || ''}
