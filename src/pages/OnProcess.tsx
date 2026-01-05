@@ -18,7 +18,7 @@ export default function OnProcess() {
   const todayYmd = useMemo(() => new Date().toISOString().slice(0, 10), []);
   const defaultBatchEstYmd = useMemo(() => {
     const d = new Date();
-    d.setMonth(d.getMonth() + 1);
+    d.setMonth(d.getMonth() + 2);
     return d.toISOString().slice(0, 10);
   }, []);
   const [items, setItems] = useState<OnProcPallet[]>([]);

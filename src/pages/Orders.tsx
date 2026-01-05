@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Container, Typography, Paper, Stack, TextField, Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions, LinearProgress, MenuItem, Box, Chip, Accordion, AccordionSummary, AccordionDetails } from '@mui/material';
+import { Container, Typography, Paper, Stack, TextField, Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions, LinearProgress, MenuItem, Box, Chip, Accordion, AccordionSummary, AccordionDetails, Tooltip } from '@mui/material';
 import Autocomplete from '@mui/material/Autocomplete';
 import DeleteIcon from '@mui/icons-material/Delete';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
 import * as XLSX from 'xlsx';
 import { DataGrid, GridColDef, GridToolbar } from '@mui/x-data-grid';
 import api from '../api';
@@ -48,11 +49,13 @@ export default function Orders() {
   const lastAutoSavedShipdateRef = useRef<{ orderId: string; ymd: string; at: number }>({ orderId: '', ymd: '', at: 0 });
   const lastAutoSuggestedShipdateRef = useRef<{ ymd: string; at: number }>({ ymd: '', at: 0 });
   const shipmentsRebalanceTimerRef = useRef<any>(null);
+  const manualEditRefreshInFlightRef = useRef(false);
+  const manualEditRefreshLastAtRef = useRef(0);
   const toast = useToast();
   const [groupPriceByName, setGroupPriceByName] = useState<Record<string, number>>({});
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
-  const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersRows, setOrdersRows] = useState<OrdersRow[]>([]);
+  const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersQ, setOrdersQ] = useState('');
   const [ordersStatusFilter, setOrdersStatusFilter] = useState<'all' | OrderStatus>('all');
   const [csvOpen, setCsvOpen] = useState(false);
@@ -513,24 +516,6 @@ export default function Orders() {
     const cols: any[] = [
       { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
       { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
-      {
-        field: 'price',
-        headerName: 'Price',
-        width: 110,
-        type: 'number',
-        align: 'right',
-        headerAlign: 'right',
-        valueGetter: (p: any) => {
-          const g = String(p?.row?.groupName || '').trim().toLowerCase();
-          const v = Number(groupPriceByName?.[g]);
-          return Number.isFinite(v) ? v : null;
-        },
-        renderCell: (p: any) => {
-          const g = String(p?.row?.groupName || '').trim().toLowerCase();
-          const v = Number(groupPriceByName?.[g]);
-          return Number.isFinite(v) ? v.toFixed(2) : '';
-        },
-      },
       { field: 'selectedWarehouseAvailable', headerName: `THIS - ${manualWarehouseName || 'Warehouse'}`, width: 170, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
       {
         field: 'onWaterPallets',
@@ -990,6 +975,25 @@ export default function Orders() {
       return /^\d{4}-\d{2}-\d{2}$/.test(slice) ? slice : '';
     };
 
+    const onWaterCompletionYmd = (row: any, neededQty: number) => {
+      let remaining = Math.max(0, Math.floor(Number(neededQty || 0)));
+      if (!Number.isFinite(remaining) || remaining <= 0) return '';
+
+      const ships = Array.isArray(row?.onWaterShipments) ? row.onWaterShipments : [];
+      const normalized = ships
+        .map((x: any) => ({ edd: toYmd(x?.edd), qty: Math.floor(Number(x?.qty || 0)) }))
+        .filter((x: any) => x.edd && Number.isFinite(x.qty) && x.qty > 0)
+        .sort((a: any, b: any) => String(a.edd).localeCompare(String(b.edd)));
+      for (const s of normalized) {
+        if (remaining <= 0) break;
+        remaining -= Math.min(remaining, Math.max(0, s.qty));
+        if (remaining <= 0) return s.edd;
+      }
+
+      // Backward compatibility fallback: if we don't have per-shipment rows, use the aggregated EDD.
+      return toYmd(row?.onWaterEdd);
+    };
+
     const addMonthsYmd = (ymd: string, months: number) => {
       const s = String(ymd || '').trim();
       if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return '';
@@ -1026,7 +1030,7 @@ export default function Orders() {
       const onWaterAvail = Math.max(0, Math.floor(Number(r?.onWaterPallets ?? 0)));
       const takeOnWater = Math.min(onWaterAvail, remaining);
       if (takeOnWater > 0) {
-        const onWaterReady = toYmd(r?.onWaterEdd);
+        const onWaterReady = onWaterCompletionYmd(r, takeOnWater);
         if (onWaterReady) useDates.push(onWaterReady);
         remaining -= takeOnWater;
       }
@@ -1073,6 +1077,23 @@ export default function Orders() {
       const slice = v.slice(0, 10);
       return /^\d{4}-\d{2}-\d{2}$/.test(slice) ? slice : '';
     };
+
+    const onWaterCompletionYmd = (row: any, neededQty: number) => {
+      let remaining = Math.max(0, Math.floor(Number(neededQty || 0)));
+      if (!Number.isFinite(remaining) || remaining <= 0) return '';
+
+      const ships = Array.isArray(row?.onWaterShipments) ? row.onWaterShipments : [];
+      const normalized = ships
+        .map((x: any) => ({ edd: toYmd(x?.edd), qty: Math.floor(Number(x?.qty || 0)) }))
+        .filter((x: any) => x.edd && Number.isFinite(x.qty) && x.qty > 0)
+        .sort((a: any, b: any) => String(a.edd).localeCompare(String(b.edd)));
+      for (const s of normalized) {
+        if (remaining <= 0) break;
+        remaining -= Math.min(remaining, Math.max(0, s.qty));
+        if (remaining <= 0) return s.edd;
+      }
+      return toYmd(row?.onWaterEdd);
+    };
     const addMonthsYmd = (ymd: string, months: number) => {
       const s = String(ymd || '').trim();
       if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return '';
@@ -1100,7 +1121,7 @@ export default function Orders() {
 
       const r: any = rowsByGroup.get(g) || {};
       if (src === 'on_water') {
-        const edd = toYmd(r?.onWaterEdd);
+        const edd = onWaterCompletionYmd(r, qty);
         if (edd && (!best || edd > best)) best = edd;
         continue;
       }
@@ -1131,6 +1152,23 @@ export default function Orders() {
       const slice = v.slice(0, 10);
       return /^\d{4}-\d{2}-\d{2}$/.test(slice) ? slice : '';
     };
+
+    const onWaterCompletionYmd = (row: any, neededQty: number) => {
+      let remaining = Math.max(0, Math.floor(Number(neededQty || 0)));
+      if (!Number.isFinite(remaining) || remaining <= 0) return '';
+
+      const ships = Array.isArray(row?.onWaterShipments) ? row.onWaterShipments : [];
+      const normalized = ships
+        .map((x: any) => ({ edd: toYmd(x?.edd), qty: Math.floor(Number(x?.qty || 0)) }))
+        .filter((x: any) => x.edd && Number.isFinite(x.qty) && x.qty > 0)
+        .sort((a: any, b: any) => String(a.edd).localeCompare(String(b.edd)));
+      for (const s of normalized) {
+        if (remaining <= 0) break;
+        remaining -= Math.min(remaining, Math.max(0, s.qty));
+        if (remaining <= 0) return s.edd;
+      }
+      return toYmd(row?.onWaterEdd);
+    };
     const addMonthsYmd = (ymd: string, months: number) => {
       const s = String(ymd || '').trim();
       if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return '';
@@ -1158,7 +1196,7 @@ export default function Orders() {
 
       const r: any = rowsByGroup.get(g) || {};
       if (Number.isFinite(onWaterQty) && onWaterQty > 0) {
-        const edd = toYmd(r?.onWaterEdd);
+        const edd = onWaterCompletionYmd(r, onWaterQty);
         if (edd && (!best || edd > best)) best = edd;
       }
       if (Number.isFinite(onProcessQty) && onProcessQty > 0) {
@@ -1365,9 +1403,17 @@ export default function Orders() {
     let stopped = false;
     const tick = async () => {
       if (stopped) return;
+      if (manualEditRefreshInFlightRef.current) return;
+      const now = Date.now();
+      const lastAt = Number(manualEditRefreshLastAtRef.current || 0);
+      // throttle to avoid accidental rapid re-runs due to re-render/effect churn
+      if (now - lastAt < 2500) return;
+      manualEditRefreshLastAtRef.current = now;
+      manualEditRefreshInFlightRef.current = true;
       const picker = await refreshManualPicker(wid);
       await refreshManualAvailable(wid);
       await refreshManualAllocations(rawId);
+      manualEditRefreshInFlightRef.current = false;
     };
 
     tick();
@@ -1384,7 +1430,7 @@ export default function Orders() {
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [manualOpen, manualMode, manualPrevStatus, manualIsLocked, manualWarehouseId, manualEditRow, manualShipdateTouched, manualEstFulfillment, refreshManualPicker, refreshManualAvailable, refreshManualAllocations, suggestShipdateForReservedBreakdown]);
+  }, [manualOpen, manualMode, manualPrevStatus, manualIsLocked, manualWarehouseId, (manualEditRow as any)?.rawId, refreshManualPicker, refreshManualAvailable, refreshManualAllocations]);
   const getManualRowOptions = (idx: number) => {
     const current = normalizeManualLine(manualLines[idx]?.lineItem);
     const selected = new Set(
@@ -1524,10 +1570,11 @@ export default function Orders() {
           // ignore
         }
 
-        const isProcessing = manualOpen && manualMode === 'edit' && manualPrevStatus === 'processing' && !manualIsLocked;
+        const curStatus = String(manualStatus || '').trim().toLowerCase();
+        const isRecalcAllowed = manualOpen && manualMode === 'edit' && !manualIsLocked && (curStatus === 'processing' || curStatus === 'ready_to_ship');
         const rawId = String((manualEditRow as any)?.rawId || '').trim();
         const wid = String(manualWarehouseId || '').trim();
-        if (isProcessing && rawId) {
+        if (isRecalcAllowed && rawId) {
           try {
             const picker = wid ? await refreshManualPicker(wid) : { rows: [] as any[], warehouses: [] as any[] };
             if (wid) {
@@ -1588,7 +1635,7 @@ export default function Orders() {
       }
       window.removeEventListener('shipments-changed', handler as any);
     };
-  }, [manualOpen, manualMode, manualPrevStatus, manualIsLocked, manualEditRow, manualWarehouseId, manualShipdateTouched, manualEstFulfillment, refreshManualPicker, refreshManualAvailable, refreshManualAllocations, suggestShipdateForReservedBreakdown]);
+  }, [manualOpen, manualMode, manualStatus, manualIsLocked, manualEditRow, manualWarehouseId, manualShipdateTouched, manualEstFulfillment, refreshManualPicker, refreshManualAvailable, refreshManualAllocations, suggestShipdateForReservedBreakdown]);
 
   useEffect(() => {
     let stopped = false;
@@ -1958,21 +2005,8 @@ export default function Orders() {
       errs.push('At least 1 Pallet ID is required');
     }
 
-    let computedOriginalPrice = 0;
-    const missingPrices: string[] = [];
-    for (const l of parsed) {
-      const key = String(l.groupName || '').trim().toLowerCase();
-      const unit = Number(groupPriceByName?.[key]);
-      if (!Number.isFinite(unit)) {
-        missingPrices.push(l.groupName);
-        continue;
-      }
-      computedOriginalPrice += unit * Number(l.qty || 0);
-    }
-    if (missingPrices.length) {
-      errs.push(`Missing pallet price for: ${missingPrices.join(', ')}`);
-    }
-    if (!Number.isFinite(computedOriginalPrice) || computedOriginalPrice <= 0) {
+    const op = Number(manualOriginalPrice);
+    if (!Number.isFinite(op) || op <= 0) {
       errs.push('Original Price is required');
     }
     const seen = new Set<string>();
@@ -1999,9 +2033,7 @@ export default function Orders() {
       return;
     }
 
-    // Persist computed original price in state for display/export consistency
-    const computedOriginalPriceRounded = Number(computedOriginalPrice.toFixed(2));
-    setManualOriginalPrice(String(computedOriginalPriceRounded));
+    const originalPriceRounded = Number(op.toFixed(2));
 
     // Client-side availability check (server also enforces)
     // For backorder, allow negative stock, so skip this check.
@@ -2045,7 +2077,7 @@ export default function Orders() {
             customerEmail: manualCustomerEmail.trim(),
             customerName: manualCustomerName.trim(),
             customerPhone: manualCustomerPhone.trim(),
-            originalPrice: computedOriginalPriceRounded,
+            originalPrice: originalPriceRounded,
             discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
             estFulfillmentDate: manualEstFulfillment || undefined,
             estDeliveredDate: manualEstDelivered || undefined,
@@ -2061,7 +2093,7 @@ export default function Orders() {
               customerEmail: manualCustomerEmail.trim(),
               customerName: manualCustomerName.trim(),
               customerPhone: manualCustomerPhone.trim(),
-              originalPrice: computedOriginalPriceRounded,
+              originalPrice: originalPriceRounded,
               discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
               estFulfillmentDate: manualEstFulfillment || undefined,
               estDeliveredDate: manualEstDelivered || undefined,
@@ -2090,7 +2122,7 @@ export default function Orders() {
               customerEmail: manualCustomerEmail.trim(),
               customerName: manualCustomerName.trim(),
               customerPhone: manualCustomerPhone.trim(),
-              originalPrice: computedOriginalPriceRounded,
+              originalPrice: originalPriceRounded,
               discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
               estFulfillmentDate: manualEstFulfillment || undefined,
               estDeliveredDate: manualEstDelivered || undefined,
@@ -2116,7 +2148,7 @@ export default function Orders() {
         customerName: manualCustomerName.trim(),
         customerPhone: manualCustomerPhone.trim(),
         createdAtOrder: manualCreatedAt || undefined,
-        originalPrice: computedOriginalPriceRounded,
+        originalPrice: originalPriceRounded,
         discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
         estFulfillmentDate: manualEstFulfillment || undefined,
         estDeliveredDate: manualEstDelivered || undefined,
@@ -2128,7 +2160,23 @@ export default function Orders() {
       setManualOpen(false);
       await loadOrders();
     } catch (e:any) {
-      const msg = e?.response?.data?.message || 'Failed to save';
+      const payload = e?.response?.data;
+      const code = String(payload?.code || '').trim();
+      if (code === 'NO_STOCKS' && Array.isArray(payload?.noStocks)) {
+        const lines: string[] = ['No Stocks available for:'];
+        for (const it of payload.noStocks) {
+          const pid = String(it?.lineItem || '-').trim() || '-';
+          const g = String(it?.groupName || '-').trim() || '-';
+          const avail = Math.max(0, Math.floor(Number(it?.available || 0)));
+          const req = Math.max(0, Math.floor(Number(it?.required || 0)));
+          lines.push(`${pid} - ${g} - ${avail} available${req ? ` (required ${req})` : ''}`);
+        }
+        setManualValidationErrors(lines);
+        toast.error('No Stocks available');
+        return;
+      }
+
+      const msg = payload?.message || 'Failed to save';
       setManualValidationErrors([msg]);
       toast.error(msg);
     }
@@ -2282,20 +2330,53 @@ export default function Orders() {
               ))}
             </TextField>
             {manualMode === 'edit' ? (
-              <TextField
-                select
-                label="Status"
-                size="small"
-                value={manualStatus}
-                onChange={(e)=> setManualStatus(e.target.value as any)}
-                disabled={manualIsLocked}
-              >
-                <MenuItem value="processing" disabled>PROCESSING</MenuItem>
-                <MenuItem value="ready_to_ship" disabled>READY TO SHIP</MenuItem>
-                <MenuItem value="shipped" disabled={manualPrevStatus !== 'ready_to_ship'}>SHIPPED</MenuItem>
-                <MenuItem value="completed" disabled={manualPrevStatus !== 'shipped'}>COMPLETED</MenuItem>
-                <MenuItem value="canceled" disabled={manualPrevStatus === 'completed' || manualPrevStatus === 'canceled'}>CANCELED</MenuItem>
-              </TextField>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                <TextField
+                  select
+                  label="Status"
+                  size="small"
+                  value={manualStatus}
+                  onChange={(e)=> setManualStatus(e.target.value as any)}
+                  disabled={manualIsLocked}
+                  sx={{ flex: 1, minWidth: 200 }}
+                >
+                  <MenuItem value="processing" disabled>PROCESSING</MenuItem>
+                  <MenuItem value="ready_to_ship" disabled>READY TO SHIP</MenuItem>
+                  <MenuItem value="shipped" disabled={manualPrevStatus !== 'ready_to_ship'}>SHIPPED</MenuItem>
+                  <MenuItem value="completed" disabled={manualPrevStatus !== 'shipped'}>COMPLETED</MenuItem>
+                  <MenuItem value="canceled" disabled={manualPrevStatus === 'completed' || manualPrevStatus === 'canceled'}>CANCELED</MenuItem>
+                </TextField>
+                <Tooltip
+                  arrow
+                  placement="top-start"
+                  title={(
+                    <Box sx={{ p: 0.5 }}>
+                      <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                        Order Status - Meaning
+                      </Typography>
+                      <Typography variant="body2" sx={{ mt: 0.5 }}>
+                        PROCESSING: pallets are not fully available in MPG (Primary WH) yet. Inventory is not deducted.
+                      </Typography>
+                      <Typography variant="body2" sx={{ mt: 0.5 }}>
+                        READY TO SHIP: all pallets are available in MPG (Primary WH). Inventory is not deducted yet.
+                      </Typography>
+                      <Typography variant="body2" sx={{ mt: 0.5 }}>
+                        SHIPPED: pallets are shipped and inventory is deducted. "Estimated Order Delivered" is required.
+                      </Typography>
+                      <Typography variant="body2" sx={{ mt: 0.5 }}>
+                        COMPLETED: customer received the order and it is fully fulfilled.
+                      </Typography>
+                      <Typography variant="body2" sx={{ mt: 0.5 }}>
+                        CANCELED: order is canceled and reserved quantity is returned back to inventory.
+                      </Typography>
+                    </Box>
+                  )}
+                >
+                  <IconButton size="small" aria-label="Order status help">
+                    <HelpOutlineIcon fontSize="inherit" />
+                  </IconButton>
+                </Tooltip>
+              </Box>
             ) : null}
             <TextField disabled={manualFieldsLocked} label="Customer Email" size="small" value={manualCustomerEmail} onChange={(e)=>setManualCustomerEmail(e.target.value)} error={!isValidEmail(manualCustomerEmail)} helperText={!isValidEmail(manualCustomerEmail) ? 'Required (valid email)' : ''} />
             <TextField disabled={manualFieldsLocked} label="Customer Name" size="small" value={manualCustomerName} onChange={(e)=>setManualCustomerName(e.target.value)} error={!String(manualCustomerName||'').trim()} helperText={!String(manualCustomerName||'').trim() ? 'Required' : ''} />
@@ -2337,7 +2418,11 @@ export default function Orders() {
               label="Original Price"
               size="small"
               value={manualOriginalPrice}
-              disabled
+              onChange={(e)=> setManualOriginalPrice(normalizePriceText(e.target.value))}
+              required
+              error={!(Number.isFinite(Number(manualOriginalPrice)) && Number(manualOriginalPrice) > 0)}
+              helperText={Number.isFinite(Number(manualOriginalPrice)) && Number(manualOriginalPrice) > 0 ? '' : 'Required'}
+              disabled={manualFieldsLocked}
             />
             <TextField
               label="Discount (%)"
@@ -2396,6 +2481,40 @@ export default function Orders() {
                   <Typography variant="subtitle1">Reserved Stock for This Order (Hierarchy)</Typography>
                 </AccordionSummary>
                 <AccordionDetails>
+                  <Box sx={{ mb: 1 }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                      <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                        Estimated Shipdate for Customer - Computation
+                      </Typography>
+                      <Tooltip
+                        arrow
+                        placement="top-start"
+                        title={(
+                          <Box sx={{ p: 0.5 }}>
+                            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                              Estimated Shipdate for Customer - Computation
+                            </Typography>
+                            <Typography variant="body2" sx={{ mt: 0.5 }}>
+                              We check where your ordered quantity will come from, then the shipdate is based on the slowest required source.
+                            </Typography>
+                            <Typography variant="body2" sx={{ mt: 0.5 }}>
+                              1) MPG (Primary WH): if covered, ready today
+                              <br />
+                              2) On-Water: use the earliest EDD that can cover the remaining qty
+                              <br />
+                              3) PEBA (2nd WH): today + 3 months (transfer/handling time)
+                              <br />
+                              4) On-Process: EDD + 3 months
+                            </Typography>
+                          </Box>
+                        )}
+                      >
+                        <IconButton size="small" aria-label="Estimated shipdate computation help">
+                          <HelpOutlineIcon fontSize="inherit" />
+                        </IconButton>
+                      </Tooltip>
+                    </Box>
+                  </Box>
                   {manualReservedRows.length ? (
                     <div style={{ height: 220, width: '100%' }}>
                       <DataGrid
@@ -2503,24 +2622,6 @@ export default function Orders() {
                     const cols: any[] = [
                       { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
                       { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
-                      {
-                        field: 'price',
-                        headerName: 'Price',
-                        width: 110,
-                        type: 'number',
-                        align: 'right',
-                        headerAlign: 'right',
-                        valueGetter: (p: any) => {
-                          const g = String(p?.row?.groupName || '').trim().toLowerCase();
-                          const v = Number(groupPriceByName?.[g]);
-                          return Number.isFinite(v) ? v : null;
-                        },
-                        renderCell: (p: any) => {
-                          const g = String(p?.row?.groupName || '').trim().toLowerCase();
-                          const v = Number(groupPriceByName?.[g]);
-                          return Number.isFinite(v) ? v.toFixed(2) : '';
-                        },
-                      },
                       { field: 'selectedWarehouseAvailable', headerName: `THIS - ${manualWarehouseName || 'Warehouse'}`, width: 170, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
                       {
                         field: 'onWaterPallets',
@@ -2863,24 +2964,6 @@ export default function Orders() {
                 const cols: any[] = [
                   { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
                   { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
-                  {
-                    field: 'price',
-                    headerName: 'Price',
-                    width: 110,
-                    type: 'number',
-                    align: 'right',
-                    headerAlign: 'right',
-                    valueGetter: (p: any) => {
-                      const g = String(p?.row?.groupName || '').trim().toLowerCase();
-                      const v = Number(groupPriceByName?.[g]);
-                      return Number.isFinite(v) ? v : null;
-                    },
-                    renderCell: (p: any) => {
-                      const g = String(p?.row?.groupName || '').trim().toLowerCase();
-                      const v = Number(groupPriceByName?.[g]);
-                      return Number.isFinite(v) ? v.toFixed(2) : '';
-                    },
-                  },
                   { field: 'selectedWarehouseAvailable', headerName: `THIS - ${selectedWarehouseName || 'Warehouse'}`, width: 170, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
                   { field: 'onWaterPallets', headerName: 'On-Water', width: 120, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.onWaterPallets ?? 0) },
                 ];
