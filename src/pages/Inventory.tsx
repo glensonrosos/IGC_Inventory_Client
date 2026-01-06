@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Container, Typography, Paper, Button, Stack, TextField, Dialog, DialogTitle, DialogContent, DialogActions, Chip, IconButton, MenuItem } from '@mui/material';
+import { formatDateTimeUS } from '../utils/datetime';
 import Autocomplete from '@mui/material/Autocomplete';
 import { DataGrid, GridColDef } from '@mui/x-data-grid';
 import api from '../api';
@@ -110,6 +111,17 @@ export default function Inventory() {
   useEffect(() => { loadItemGroups(); }, []);
   useEffect(() => { loadGroups(); }, [search]);
 
+  useEffect(() => {
+    if (!lossOpen) return;
+    if (lossWarehouse) return;
+    const list = Array.isArray(warehouses) ? warehouses : [];
+    if (!list.length) return;
+    const primary = list.find((w: any) => Boolean((w as any)?.isPrimary));
+    const fallback = list[0];
+    const next = String((primary?._id || fallback?._id) || '').trim();
+    if (next) setLossWarehouse(next);
+  }, [lossOpen, lossWarehouse, warehouses]);
+
   const columns: GridColDef[] = useMemo(() => {
     const cols: GridColDef[] = [
       { field: 'lineItem', headerName: 'Pallet ID', flex: 1, minWidth: 180 },
@@ -165,7 +177,10 @@ export default function Inventory() {
 
   const openLoss = async () => {
     setLossOpen(true);
-    setLossWarehouse('');
+    const list = Array.isArray(warehouses) ? warehouses : [];
+    const primary = list.find((w: any) => Boolean((w as any)?.isPrimary));
+    const fallback = list[0];
+    setLossWarehouse(String((primary?._id || fallback?._id) || '').trim());
     setLossReference('');
     setLossItems([{ group: null, qty: '' }]);
     try {
@@ -404,6 +419,8 @@ export default function Inventory() {
                     if (t.status === 'Adjustment') {
                       const rsn = String(t.reason || '').toLowerCase();
                       if (rsn === 'loss') statusLabel = 'adjustment | loss';
+                      else if (rsn === 'returned') statusLabel = 'adjustment | returned';
+                      else if (rsn === 'damage') statusLabel = 'adjustment | damage';
                       else if (rsn === 'order_fulfilled') statusLabel = 'adjustment | order_fulfilled';
                       else if (rsn === 'order_shipped') statusLabel = 'adjustment | order_shipped';
                       else if (rsn === 'order_shipped_second_warehouse') statusLabel = 'adjustment | order_shipped_second_warehouse';
@@ -418,7 +435,7 @@ export default function Inventory() {
                     }
                     return {
                       id: i,
-                      date: new Date(t.createdAt).toLocaleString(),
+                      date: formatDateTimeUS(t.createdAt),
                       poNumber: t.poNumber,
                       warehouse: warehouses.find(w => String(w._id) === String(t.warehouseId))?.name || '-',
                       type: (Number(t.palletsDelta) || 0) >= 0 ? 'IN' : 'OUT',

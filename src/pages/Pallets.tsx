@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Container, Typography, Paper, Stack, Button, TextField } from '@mui/material';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Container, Typography, Paper, Stack, Button, TextField, Dialog, DialogTitle, DialogContent, DialogActions, LinearProgress } from '@mui/material';
 import { DataGrid, GridColDef } from '@mui/x-data-grid';
 import * as XLSX from 'xlsx';
 import api from '../api';
@@ -21,6 +21,16 @@ export default function Pallets() {
   const [rows, setRows] = useState<SummaryRow[]>([]);
   const [palletIdByGroup, setPalletIdByGroup] = useState<Record<string, string>>({});
   const [q, setQ] = useState('');
+
+  const [onWaterOpen, setOnWaterOpen] = useState(false);
+  const [onWaterLoading, setOnWaterLoading] = useState(false);
+  const [onWaterGroupName, setOnWaterGroupName] = useState('');
+  const [onWaterRows, setOnWaterRows] = useState<any[]>([]);
+
+  const [onProcessOpen, setOnProcessOpen] = useState(false);
+  const [onProcessLoading, setOnProcessLoading] = useState(false);
+  const [onProcessGroupName, setOnProcessGroupName] = useState('');
+  const [onProcessRows, setOnProcessRows] = useState<any[]>([]);
 
   const load = async () => {
     setLoading(true);
@@ -51,6 +61,41 @@ export default function Pallets() {
   };
 
   useEffect(() => { load(); }, []);
+
+  const openOnWaterDetails = useCallback(async ({ warehouseId, groupName }: { warehouseId: string; groupName: string }) => {
+    const g = String(groupName || '').trim();
+    const w = String(warehouseId || '').trim();
+    if (!w || !g) return;
+    setOnWaterOpen(true);
+    setOnWaterGroupName(g);
+    setOnWaterRows([]);
+    setOnWaterLoading(true);
+    try {
+      const { data } = await api.get('/orders/pallet-picker/on-water', { params: { warehouseId: w, groupName: g } });
+      setOnWaterRows(Array.isArray((data as any)?.rows) ? (data as any).rows : []);
+    } catch {
+      setOnWaterRows([]);
+    } finally {
+      setOnWaterLoading(false);
+    }
+  }, []);
+
+  const openOnProcessDetails = useCallback(async ({ groupName }: { groupName: string }) => {
+    const g = String(groupName || '').trim();
+    if (!g) return;
+    setOnProcessOpen(true);
+    setOnProcessGroupName(g);
+    setOnProcessRows([]);
+    setOnProcessLoading(true);
+    try {
+      const { data } = await api.get('/orders/pallet-picker/on-process', { params: { groupName: g } });
+      setOnProcessRows(Array.isArray((data as any)?.rows) ? (data as any).rows : []);
+    } catch {
+      setOnProcessRows([]);
+    } finally {
+      setOnProcessLoading(false);
+    }
+  }, []);
 
   const filteredRows = useMemo(() => {
     const t = q.trim().toLowerCase();
@@ -93,13 +138,58 @@ export default function Pallets() {
       { field: 'palletId', headerName: 'Pallet ID', width: 160 },
       { field: 'itemGroup', headerName: 'Pallet Description', flex: 1, minWidth: 220 },
       ...primaryCols,
-      { field: 'onWaterQty', headerName: 'On-Water', width: 140, type: 'number' },
+      {
+        field: 'onWaterQty',
+        headerName: 'On-Water',
+        width: 140,
+        type: 'number',
+        align: 'right',
+        headerAlign: 'right',
+        renderCell: (p: any) => {
+          const qty = Number((p?.row as any)?.onWaterQty ?? 0);
+          if (!qty) return '0';
+          const groupName = String((p?.row as any)?.itemGroup || '').trim();
+          const wid = String((primaryWh as any)?._id || '').trim();
+          return (
+            <Button
+              variant="text"
+              size="small"
+              onClick={() => openOnWaterDetails({ warehouseId: wid, groupName })}
+              sx={{ minWidth: 0, p: 0, textDecoration: 'underline', fontSize: 16, fontWeight: 700 }}
+            >
+              {qty}
+            </Button>
+          );
+        },
+      },
       ...secondCols,
-      { field: 'onProcessQty', headerName: 'On-Process', width: 150, type: 'number' },
+      {
+        field: 'onProcessQty',
+        headerName: 'On-Process',
+        width: 150,
+        type: 'number',
+        align: 'right',
+        headerAlign: 'right',
+        renderCell: (p: any) => {
+          const qty = Number((p?.row as any)?.onProcessQty ?? 0);
+          if (!qty) return '0';
+          const groupName = String((p?.row as any)?.itemGroup || '').trim();
+          return (
+            <Button
+              variant="text"
+              size="small"
+              onClick={() => openOnProcessDetails({ groupName })}
+              sx={{ minWidth: 0, p: 0, textDecoration: 'underline', fontSize: 16, fontWeight: 700 }}
+            >
+              {qty}
+            </Button>
+          );
+        },
+      },
       ...otherWhCols,
       { field: 'totalQty', headerName: 'Total Qty', width: 140, type: 'number' },
     ];
-  }, [warehouses]);
+  }, [warehouses, openOnProcessDetails, openOnWaterDetails]);
 
   const gridRows = useMemo(() => (
     filteredRows.map((r) => {
@@ -179,6 +269,56 @@ export default function Pallets() {
           />
         </div>
       </Paper>
+
+      <Dialog open={onWaterOpen} onClose={()=> setOnWaterOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle>{`On-Water - ${onWaterGroupName || ''}`}</DialogTitle>
+        <DialogContent sx={{ pt: 2 }}>
+          {onWaterLoading ? <LinearProgress sx={{ mb: 2 }} /> : null}
+          <div style={{ height: 420, width: '100%' }}>
+            <DataGrid
+              rows={(onWaterRows || []).map((r: any, idx: number) => ({ id: r?.id || `${idx}`, ...r }))}
+              columns={([
+                { field: 'reference', headerName: 'Reference', flex: 1, minWidth: 180 },
+                { field: 'edd', headerName: 'EDD', width: 140 },
+                { field: 'qty', headerName: 'QTY', width: 120, type: 'number', align: 'right', headerAlign: 'right' },
+              ]) as GridColDef[]}
+              disableRowSelectionOnClick
+              density="compact"
+              pagination
+              pageSizeOptions={[5, 10, 20]}
+              initialState={{ pagination: { paginationModel: { page: 0, pageSize: 10 } } }}
+            />
+          </div>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={()=> setOnWaterOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={onProcessOpen} onClose={()=> setOnProcessOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle>{`On-Process - ${onProcessGroupName || ''}`}</DialogTitle>
+        <DialogContent sx={{ pt: 2 }}>
+          {onProcessLoading ? <LinearProgress sx={{ mb: 2 }} /> : null}
+          <div style={{ height: 420, width: '100%' }}>
+            <DataGrid
+              rows={(onProcessRows || []).map((r: any, idx: number) => ({ id: r?.id || `${idx}`, ...r }))}
+              columns={([
+                { field: 'reference', headerName: 'Reference', flex: 1, minWidth: 180 },
+                { field: 'edd', headerName: 'EDD', width: 140 },
+                { field: 'qty', headerName: 'QTY', width: 120, type: 'number', align: 'right', headerAlign: 'right' },
+              ]) as GridColDef[]}
+              disableRowSelectionOnClick
+              density="compact"
+              pagination
+              pageSizeOptions={[5, 10, 20]}
+              initialState={{ pagination: { paginationModel: { page: 0, pageSize: 10 } } }}
+            />
+          </div>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={()=> setOnProcessOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
     </Container>
   );
 }
