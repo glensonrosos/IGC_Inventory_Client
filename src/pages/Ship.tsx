@@ -25,6 +25,15 @@ interface Shipment {
 interface ItemGroupRow { name: string; lineItem?: string }
 
 export default function Ship() {
+  const isAdmin = (() => {
+    try {
+      const t = localStorage.getItem('token') || '';
+      const payload = t.split('.')[1];
+      if (!payload) return false;
+      const json = JSON.parse(atob(payload));
+      return String(json?.role || '') === 'admin';
+    } catch { return false; }
+  })();
   const [rows, setRows] = useState<Shipment[]>([]);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<'on_water' | 'delivered' | ''>('');
@@ -354,7 +363,7 @@ export default function Ship() {
         </ButtonGroup>
       );
     } },
-    { field: 'estDeliveryDate', headerName: 'Estimated Date Delivery', width: 300, renderCell: (params: GridRenderCellParams) => {
+    { field: 'estDeliveryDate', headerName: 'Estimated Arrival Date', width: 300, renderCell: (params: GridRenderCellParams) => {
       const row: any = params?.row || {};
       const id = row?._id as string;
       if (!id) return null;
@@ -378,6 +387,13 @@ export default function Ship() {
           </Stack>
         );
       }
+      if (!isAdmin) {
+        return (
+          <Stack direction="row" spacing={1} alignItems="center">
+            <TextField type="date" size="small" value={current} InputLabelProps={{ shrink: true }} InputProps={{ readOnly: true }} disabled />
+          </Stack>
+        );
+      }
       return (
         <Stack direction="row" spacing={1} alignItems="center">
           <TextField type="date" size="small" value={val} onChange={(e)=> setEddEdit(prev=>({ ...prev, [id]: e.target.value }))} InputLabelProps={{ shrink: true }} />
@@ -390,7 +406,7 @@ export default function Ship() {
       const edd = row?.estDeliveryDate ? String(row.estDeliveryDate).substring(0,10) : '';
       return (
         <Stack direction="column" spacing={0.5} sx={{ width: '100%' }}>
-          {row?.status === 'on_water' && row?._id ? (
+          {isAdmin && row?.status === 'on_water' && row?._id ? (
             <Button variant="contained" size="small" startIcon={<LocalShippingIcon />} disabled={!edd} onClick={()=>{
               if (!edd) { toast.error('Set EDD first'); return; }
               const d = new Date(`${edd}T00:00:00`);
@@ -452,7 +468,7 @@ export default function Ship() {
           <TextField
             type="date"
             size="small"
-            label="EDD From"
+            label="Delivery Date From"
             InputLabelProps={{ shrink: true }}
             value={eddFrom}
             onChange={(e)=> setEddFrom(e.target.value)}
@@ -461,7 +477,7 @@ export default function Ship() {
           <TextField
             type="date"
             size="small"
-            label="EDD To"
+            label="Delivery Date To"
             InputLabelProps={{ shrink: true }}
             value={eddTo}
             onChange={(e)=> setEddTo(e.target.value)}

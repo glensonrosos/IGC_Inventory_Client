@@ -13,6 +13,15 @@ interface OnProcBatch { _id: string; reference: string; poNumber: string; status
 interface ItemGroupRow { name: string; lineItem?: string }
 
 export default function OnProcess() {
+  const isAdmin = (() => {
+    try {
+      const t = localStorage.getItem('token') || '';
+      const payload = t.split('.')[1];
+      if (!payload) return false;
+      const json = JSON.parse(atob(payload));
+      return String(json?.role || '') === 'admin';
+    } catch { return false; }
+  })();
   const toast = useToast();
   const navigate = useNavigate();
   const todayYmd = useMemo(() => new Date().toISOString().slice(0, 10), []);
@@ -329,8 +338,12 @@ export default function OnProcess() {
 
       <Paper sx={{ p:2, mb:2 }}>
         <Stack direction={{ xs:'column', md:'row' }} spacing={2} alignItems="center">
-          <input key={fileInputKey} type="file" accept=".xlsx" onChange={(e)=> setFile(e.target.files?.[0] || null)} />
-          <Button variant="contained" onClick={importFile} disabled={!file}>Import (.xlsx)</Button>
+          {isAdmin && (
+            <>
+              <input key={fileInputKey} type="file" accept=".xlsx" onChange={(e)=> setFile(e.target.files?.[0] || null)} />
+              <Button variant="contained" onClick={importFile} disabled={!file}>Import (.xlsx)</Button>
+            </>
+          )}
           <Button variant="outlined" onClick={downloadTemplate}>Download Template</Button>
           <Button variant="outlined" onClick={refreshBatchesAndResetImport}>Refresh</Button>
         </Stack>
@@ -572,6 +585,7 @@ export default function OnProcess() {
           </DialogContent>
           <DialogActions>
             <Stack direction="row" spacing={2} sx={{ width: '100%', justifyContent: 'flex-start', pl: 1 }}>
+              {isAdmin && (
               <IconButton color="primary" onClick={async()=> {
                 setAddOpen(true);
                 setAddGroupName('');
@@ -584,6 +598,8 @@ export default function OnProcess() {
               }} aria-label="Add Pallet Description" title="Add Pallet Description">
                 <AddIcon />
               </IconButton>
+              )}
+              {isAdmin && (
               <Button variant="contained" onClick={async()=> {
                 try {
                   if (batchEst && String(batchEst) < todayYmd) {
@@ -599,12 +615,15 @@ export default function OnProcess() {
                   setDirty(false);
                 } catch (e:any) { toast.error(e?.response?.data?.message || 'Save failed'); }
               }}>SAVE CHANGES</Button>
+              )}
+              {isAdmin && (
               <Button variant="outlined" disabled={dirty || (rowSelection.length === 0)} onClick={()=> {
                 if (eligibleSelected.length === 0) { toast.warning('No selected rows have finished pallets to transfer.'); return; }
                 setTransferBulkOpen(true);
               }}>
                 Transfer Selected
               </Button>
+              )}
               <Button variant="outlined" onClick={()=> setSelectedBatch(null)}>CLOSE/CANCEL</Button>
             </Stack>
           </DialogActions>
@@ -634,16 +653,31 @@ export default function OnProcess() {
               </DialogContent>
               <DialogActions>
                 <Button onClick={()=> setAddOpen(false)}>Cancel</Button>
-                <Button variant="contained" disabled={!addGroupSelected || !(Number(addTotal) > 0)} onClick={async()=>{
-                  try {
-                    const batchId = selectedBatch?._id;
-                    if (!batchId) return;
-                    await api.post(`/on-process/batches/${batchId}/pallets`, { groupName: addGroupSelected?.name, totalPallet: Number(addTotal) });
-                    toast.success('Pallet description added');
-                    setAddOpen(false);
-                    setAddGroupName(''); setAddGroupSelected(null); setAddTotal('');
-                    await loadBatchItems(batchId);
-                  } catch (e:any) { toast.error(e?.response?.data?.message || 'Failed to add'); }
+                <Button variant="contained" disabled={!addGroupSelected || !(Number(addTotal) > 0)} onClick={()=>{
+                  const batchId = selectedBatch?._id;
+                  if (!batchId) return;
+                  // Add locally to draft; will be persisted on SAVE CHANGES
+                  const name = String(addGroupSelected?.name || '').trim();
+                  const total = Math.max(1, Number(addTotal) || 0);
+                  setBatchItems(prev => {
+                    const exists = (prev || []).some(it => String(it.groupName || '').trim().toLowerCase() === name.toLowerCase());
+                    if (exists) return prev;
+                    const next = [
+                      ...prev,
+                      {
+                        poNumber: String(selectedBatch?.poNumber || ''),
+                        groupName: name,
+                        totalPallet: total,
+                        finishedPallet: 0,
+                        status: 'in_progress',
+                      } as any,
+                    ];
+                    return next;
+                  });
+                  setDirty(true);
+                  toast.success('Added to draft. Click SAVE CHANGES to persist.');
+                  setAddOpen(false);
+                  setAddGroupName(''); setAddGroupSelected(null); setAddTotal('');
                 }}>Add</Button>
               </DialogActions>
             </Dialog>

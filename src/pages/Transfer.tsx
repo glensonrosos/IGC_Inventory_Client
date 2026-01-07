@@ -10,6 +10,15 @@ interface Warehouse { _id: string; name: string }
 interface TransferPallet { groupName: string; pallets: number }
 
 export default function Transfer() {
+  const isAdmin = (() => {
+    try {
+      const t = localStorage.getItem('token') || '';
+      const payload = t.split('.')[1];
+      if (!payload) return false;
+      const json = JSON.parse(atob(payload));
+      return String(json?.role || '') === 'admin';
+    } catch { return false; }
+  })();
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [sourceWarehouseId, setSourceWarehouseId] = useState('');
   const [warehouseId, setWarehouseId] = useState('');
@@ -100,7 +109,7 @@ export default function Transfer() {
     if (!sourceWarehouseId || !warehouseId) { toast.error('Select both source and destination warehouses'); return; }
     if (sourceWarehouseId === warehouseId) { toast.error('Source and destination must be different'); return; }
     if (!poNumber.trim()) { toast.error('PO# is required'); return; }
-    if (edd && String(edd) < todayYmd) { toast.error('Estimated Delivery cannot be earlier than today'); return; }
+    if (edd && String(edd) < todayYmd) { toast.error('Estimated Arrival cannot be earlier than today'); return; }
     const valid = items.filter(i => i.groupName && Number.isFinite(i.pallets) && i.pallets > 0);
     if (!valid.length) { toast.error('Import at least one valid pallet row (Pallet Description, Total Pallet)'); return; }
     // client-side availability check
@@ -182,7 +191,7 @@ export default function Transfer() {
           </TextField>
           <TextField
             type="date"
-            label="Estimated Delivery"
+            label="Estimated Arrival"
             size="small"
             sx={{ minWidth: 200 }}
             value={edd}
@@ -190,7 +199,7 @@ export default function Transfer() {
             onChange={(e)=> {
               const v = String(e.target.value || '');
               if (v && v < todayYmd) {
-                toast.error('Estimated Delivery cannot be earlier than today');
+                toast.error('Estimated Arrival cannot be earlier than today');
                 return;
               }
               setEdd(v);
@@ -205,8 +214,12 @@ export default function Transfer() {
           <TextField label="PO #" size="small" value={poNumber} onChange={(e)=>setPoNumber(e.target.value)} fullWidth />
         </Stack>
         <Stack direction={{ xs:'column', md:'row' }} spacing={2} alignItems="center" sx={{ mb:2 }}>
-          <input key={fileInputKey} type="file" accept=".xlsx" onChange={(e)=> setFile(e.target.files?.[0] || null)} />
-          <Button variant="outlined" onClick={importXlsx} disabled={!file}>Import .xlsx</Button>
+          {isAdmin && (
+            <>
+              <input key={fileInputKey} type="file" accept=".xlsx" onChange={(e)=> setFile(e.target.files?.[0] || null)} />
+              <Button variant="outlined" onClick={importXlsx} disabled={!file}>Import .xlsx</Button>
+            </>
+          )}
           <Button variant="text" onClick={downloadTemplate}>Download Template</Button>
         </Stack>
         <Paper variant="outlined" sx={{ p:2 }}>
@@ -241,7 +254,9 @@ export default function Transfer() {
         </Paper>
         <Stack direction="row" spacing={1} sx={{ mt:2 }}>
           <Button variant="outlined" onClick={()=>{ setItems([]); setFile(null); }}>Clear</Button>
-          <Button variant="contained" onClick={submit} disabled={submitting || !items.length || !poNumber.trim() || items.some(i=> (available[i.groupName]||0) < Number(i.pallets) || Number(i.pallets)<=0)}>Create Transfer</Button>
+          {isAdmin && (
+            <Button variant="contained" onClick={submit} disabled={submitting || !items.length || !poNumber.trim() || items.some(i=> (available[i.groupName]||0) < Number(i.pallets) || Number(i.pallets)<=0)}>Create Transfer</Button>
+          )}
         </Stack>
         <Typography variant="body2" sx={{ display: 'block', mt: 1, color: 'error.main' }}>
           Note: After you create a transfer, you can view the transfer request in the Ship page.

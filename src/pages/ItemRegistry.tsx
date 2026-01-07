@@ -1,3 +1,12 @@
+  const isAdmin = (() => {
+    try {
+      const t = localStorage.getItem('token') || '';
+      const payload = t.split('.')[1];
+      if (!payload) return false;
+      const json = JSON.parse(atob(payload));
+      return String(json?.role || '') === 'admin';
+    } catch { return false; }
+  })();
 import { useEffect, useState, useRef } from 'react';
 import { Container, Typography, Paper, Stack, TextField, Button, MenuItem, Dialog, DialogTitle, DialogContent, DialogActions, IconButton, Tooltip, Autocomplete, Menu, FormControlLabel, Checkbox, Chip, Divider, Grid } from '@mui/material';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
@@ -146,10 +155,10 @@ export default function ItemRegistry() {
         <IconButton size="small" onClick={handleOpen} aria-label="Actions"><MoreVertIcon fontSize="small" /></IconButton>
         <Menu anchorEl={anchorEl} open={open} onClose={handleClose} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }} transformOrigin={{ vertical: 'top', horizontal: 'right' }}>
           <MenuItem onClick={onManage} disabled={!row.active}>Manage Items</MenuItem>
-          <MenuItem onClick={onRenameGroup}>Rename Pallet Description</MenuItem>
-          <MenuItem onClick={onRenameLineItem}>Rename Pallet ID</MenuItem>
-          <MenuItem onClick={onToggle}>{row.active ? 'Deactivate' : 'Activate'}</MenuItem>
-          <MenuItem onClick={onDelete} disabled={row.itemCount > 0}>Delete</MenuItem>
+          {isAdmin && <MenuItem onClick={onRenameGroup}>Rename Pallet Description</MenuItem>}
+          {isAdmin && <MenuItem onClick={onRenameLineItem}>Rename Pallet ID</MenuItem>}
+          {isAdmin && <MenuItem onClick={onToggle}>{row.active ? 'Deactivate' : 'Activate'}</MenuItem>}
+          {isAdmin && <MenuItem onClick={onDelete} disabled={row.itemCount > 0}>Delete</MenuItem>}
         </Menu>
       </>
     );
@@ -493,14 +502,20 @@ export default function ItemRegistry() {
           <Grid item xs={12} md={6}>
             <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ xs:'stretch', sm:'center' }}>
               <TextField fullWidth label="Pallet Description" value={groupName} onChange={e=>setGroupName(e.target.value)} />
-              <Button variant="contained" onClick={createGroup} disabled={!groupName.trim()}>Add Pallet Description</Button>
+              {isAdmin && (
+                <Button variant="contained" onClick={createGroup} disabled={!groupName.trim()}>Add Pallet Description</Button>
+              )}
             </Stack>
           </Grid>
           <Grid item xs={12} md={6}>
             <Stack direction="row" spacing={2} alignItems="center" justifyContent={{ xs:'flex-start', md:'flex-end' }}>
               <input ref={groupFileInputRef} hidden type="file" accept=".xlsx" onChange={(e)=>setGroupFile(e.target.files?.[0] || null)} data-component-name="ItemGroups" />
-              <Button variant="outlined" onClick={()=> groupFileInputRef.current?.click()}>Select File</Button>
-              <Button variant="contained" onClick={importGroups} disabled={!groupFile}>Import (.xlsx)</Button>
+              {isAdmin && (
+                <>
+                  <Button variant="outlined" onClick={()=> groupFileInputRef.current?.click()}>Select File</Button>
+                  <Button variant="contained" onClick={importGroups} disabled={!groupFile}>Import (.xlsx)</Button>
+                </>
+              )}
               <Button variant="text" onClick={downloadGroupTemplate}>Groups Template</Button>
               <Button variant="outlined" onClick={exportGroupsExcel}>Groups Export</Button>
             </Stack>
@@ -580,18 +595,20 @@ export default function ItemRegistry() {
               </Grid>
               <Grid item xs={12}>
                 <Stack direction={{ xs:'column', sm:'row' }} spacing={2} justifyContent={{ xs:'stretch', sm:'flex-end' }} alignItems={{ xs:'stretch', sm:'center' }}>
-                  <Button variant="contained" onClick={async()=>{
-                    if (!gItemCode.trim() || !gDesc.trim() || !gColor.trim() || !Number.isFinite(Number(gPack)) || Number(gPack) < 0) { toast.error('Complete all fields'); return; }
-                    try {
-                      await api.post('/items', { itemCode: gItemCode.trim(), itemGroup: selectedGroup, description: gDesc.trim(), color: gColor.trim(), packSize: Number(gPack), enabled: true });
-                      toast.success('Item added');
-                      setGItemCode(''); setGDesc(''); setGColor(''); setGPack(0);
-                      await load();
-                    } catch (e:any) {
-                      const msg = e?.response?.data?.message || e?.message || 'Failed to add item';
-                      toast.error(msg);
-                    }
-                  }}>Add Item</Button>
+                  {isAdmin && (
+                    <Button variant="contained" onClick={async()=>{
+                      if (!gItemCode.trim() || !gDesc.trim() || !gColor.trim() || !Number.isFinite(Number(gPack)) || Number(gPack) < 0) { toast.error('Complete all fields'); return; }
+                      try {
+                        await api.post('/items', { itemCode: gItemCode.trim(), itemGroup: selectedGroup, description: gDesc.trim(), color: gColor.trim(), packSize: Number(gPack), enabled: true });
+                        toast.success('Item added');
+                        setGItemCode(''); setGDesc(''); setGColor(''); setGPack(0);
+                        await load();
+                      } catch (e:any) {
+                        const msg = e?.response?.data?.message || e?.message || 'Failed to add item';
+                        toast.error(msg);
+                      }
+                    }}>Add Item</Button>
+                  )}
                   <Button variant="text" onClick={()=> setSelectedGroup('')}>Close</Button>
                 </Stack>
               </Grid>
@@ -606,9 +623,9 @@ export default function ItemRegistry() {
                   { field: 'packSize', headerName: 'Pack Size', type: 'number', width: 140 },
                   { field: 'actions', headerName: 'Actions', width: 120, sortable: false, filterable: false, renderCell: (p: GridRenderCellParams) => {
                     const r = p.row as any;
-                    return (
+                    return isAdmin ? (
                       <Button size="small" color="error" variant="outlined" onClick={()=> deleteItem(r.itemCode, selectedGroup)}>Delete</Button>
-                    );
+                    ) : null;
                   } }
                 ]) as GridColDef[]}
                 loading={loading}

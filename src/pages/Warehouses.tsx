@@ -9,6 +9,15 @@ import { useToast } from '../components/ToastProvider';
 interface Warehouse { _id: string; name: string; address?: string; isPrimary?: boolean }
 
 export default function Warehouses() {
+  const isAdmin = (() => {
+    try {
+      const t = localStorage.getItem('token') || '';
+      const payload = t.split('.')[1];
+      if (!payload) return false;
+      const json = JSON.parse(atob(payload));
+      return String(json?.role || '') === 'admin';
+    } catch { return false; }
+  })();
   const [rows, setRows] = useState<Warehouse[]>([]);
   const [loading, setLoading] = useState(false);
   const [name, setName] = useState('');
@@ -128,9 +137,9 @@ export default function Warehouses() {
       <>
         <IconButton size="small" onClick={handleOpen} aria-label="Actions"><MoreVertIcon fontSize="small" /></IconButton>
         <Menu anchorEl={anchorEl} open={open} onClose={handleClose} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }} transformOrigin={{ vertical: 'top', horizontal: 'right' }}>
-          <MenuItem onClick={wrap(onSetPrimary)} disabled={Boolean((row as any)?.isPrimary)}>Set as Primary</MenuItem>
-          <MenuItem onClick={wrap(onEdit)}>Edit</MenuItem>
-          <MenuItem onClick={wrap(onDelete)} disabled={!!disabled}>Delete</MenuItem>
+          {isAdmin && <MenuItem onClick={wrap(onSetPrimary)} disabled={Boolean((row as any)?.isPrimary)}>Set as Primary</MenuItem>}
+          {isAdmin && <MenuItem onClick={wrap(onEdit)}>Edit</MenuItem>}
+          {isAdmin && <MenuItem onClick={wrap(onDelete)} disabled={!!disabled}>Delete</MenuItem>}
           <MenuItem onClick={wrap(onExport)} disabled={!!disabled}>Export Stock</MenuItem>
         </Menu>
       </>
@@ -187,7 +196,9 @@ export default function Warehouses() {
         <Stack direction={{ xs: 'column', md: 'row' }} spacing={2} alignItems="center">
           <TextField required label="Name" value={name} onChange={e=>setName(e.target.value)} sx={{ minWidth: 220 }} />
           <TextField label="Address" value={address} onChange={e=>setAddress(e.target.value)} sx={{ minWidth: 300, flex: 1 }} />
-          <Button variant="contained" onClick={addWarehouse} disabled={!name.trim()}>Add Warehouse</Button>
+          {isAdmin && (
+            <Button variant="contained" onClick={addWarehouse} disabled={!name.trim()}>Add Warehouse</Button>
+          )}
           <Stack direction="row" spacing={1} sx={{ ml: 'auto' }}>
             <Button variant="outlined" onClick={exportAllStocks} disabled={exportingAll || !rows.length}>{exportingAll ? 'Exporting…' : 'Export All Stocks'}</Button>
           </Stack>

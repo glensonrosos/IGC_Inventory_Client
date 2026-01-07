@@ -21,6 +21,15 @@ type GroupDetails = {
 type ItemGroupOption = { _id: string; name: string };
 
 export default function Inventory() {
+  const isAdmin = (() => {
+    try {
+      const t = localStorage.getItem('token') || '';
+      const payload = t.split('.')[1];
+      if (!payload) return false;
+      const json = JSON.parse(atob(payload));
+      return String(json?.role || '') === 'admin';
+    } catch { return false; }
+  })();
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [groups, setGroups] = useState<GroupOverview[]>([]);
   const [search, setSearch] = useState('');
@@ -261,7 +270,9 @@ export default function Inventory() {
           <Stack direction="row" spacing={1}>
             <Button variant="outlined" onClick={loadGroups}>Refresh</Button>
             <Button variant="outlined" color="error" onClick={openLoss}>Record Loss</Button>
-            <Button variant="contained" onClick={()=>setImportOpen(true)}>Import Existing Inventory</Button>
+            {isAdmin && (
+              <Button variant="contained" onClick={()=>setImportOpen(true)}>Import Existing Inventory</Button>
+            )}
           </Stack>
         </Stack>
       </Paper>
@@ -433,10 +444,17 @@ export default function Inventory() {
                       else if (t.committedBy === 'transfer') statusLabel = 'transfered | Delivered';
                       else statusLabel = t.wasOnWater ? 'On-Water | Delivered' : 'on_process | Delivered';
                     }
+                    let displayPo = t.poNumber;
+                    try {
+                      const rsn = String(t.reason || '').toLowerCase();
+                      if (String(t.status) === 'Adjustment' && rsn === 'loss' && t.committedBy) {
+                        displayPo = `${t.poNumber || ''}${t.poNumber ? ' — ' : ''}${t.committedBy}`;
+                      }
+                    } catch {}
                     return {
                       id: i,
                       date: formatDateTimeUS(t.createdAt),
-                      poNumber: t.poNumber,
+                      poNumber: displayPo,
                       warehouse: warehouses.find(w => String(w._id) === String(t.warehouseId))?.name || '-',
                       type: (Number(t.palletsDelta) || 0) >= 0 ? 'IN' : 'OUT',
                       status: statusLabel,

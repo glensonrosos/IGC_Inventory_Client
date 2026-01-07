@@ -37,6 +37,7 @@ type OrdersRow = {
   shippingAddress?: string;
   createdAtOrder?: string;
   originalPrice?: any;
+  shippingPercent?: any;
   discountPercent?: any;
   finalPrice?: any;
   estFulfillmentDate?: string;
@@ -72,7 +73,6 @@ export default function Orders() {
   const [manualEditRow, setManualEditRow] = useState<OrdersRow | null>(null);
   const [manualAllocations, setManualAllocations] = useState<Allocation[]>([]);
   const [manualReservedBreakdown, setManualReservedBreakdown] = useState<any[]>([]);
-  const [manualPostActions, setManualPostActions] = useState<any[]>([]);
   const [manualWarehouseId, setManualWarehouseId] = useState('');
   const [manualStatus, setManualStatus] = useState<OrderStatus>('processing');
   const [manualCustomerEmail, setManualCustomerEmail] = useState('');
@@ -86,6 +86,7 @@ export default function Orders() {
   const [manualShippingAddress, setManualShippingAddress] = useState('');
   const [manualNotes, setManualNotes] = useState('');
   const [manualOriginalPrice, setManualOriginalPrice] = useState('');
+  const [manualShippingPercent, setManualShippingPercent] = useState('');
   const [manualDiscountPercent, setManualDiscountPercent] = useState('');
   const [manualLineMode, setManualLineMode] = useState<'pallet_group' | 'line_item'>('pallet_group');
   const [manualPalletGroupOptions, setManualPalletGroupOptions] = useState<string[]>([]);
@@ -103,15 +104,6 @@ export default function Orders() {
   const [manualPickOpen, setManualPickOpen] = useState(false);
   const [manualPickSelected, setManualPickSelected] = useState<any>({ type: 'include', ids: new Set() });
   const [manualOrderGroups, setManualOrderGroups] = useState<string[]>([]);
-
-  const [postActionOpen, setPostActionOpen] = useState(false);
-  const [postActionKind, setPostActionKind] = useState<'returned' | 'damaged'>('returned');
-  const [postActionDate, setPostActionDate] = useState('');
-  const [postActionRemarks, setPostActionRemarks] = useState('');
-  const [postActionPickGroup, setPostActionPickGroup] = useState('');
-  const [postActionPickQty, setPostActionPickQty] = useState('');
-  const [postActionLines, setPostActionLines] = useState<Array<{ groupName: string; qty: string }>>([]);
-  const [postActionSaving, setPostActionSaving] = useState(false);
 
   const [onWaterOpen, setOnWaterOpen] = useState(false);
   const [onWaterLoading, setOnWaterLoading] = useState(false);
@@ -351,6 +343,7 @@ export default function Orders() {
     setManualShippingAddress(String(row?.shippingAddress || '').trim());
     setManualNotes(String((row as any)?.notes || '').trim());
     setManualOriginalPrice(String((row as any)?.originalPrice ?? '').trim());
+    setManualShippingPercent(String((row as any)?.shippingPercent ?? '').trim());
     setManualDiscountPercent(String((row as any)?.discountPercent ?? '').trim());
     setManualLineMode('pallet_group');
     setManualLines([{ lineItem: '', qty: '' }]);
@@ -363,7 +356,6 @@ export default function Orders() {
     setManualPickSelected({ type: 'include', ids: new Set() });
     setManualAllocations(Array.isArray((row as any)?.allocations) ? ((row as any).allocations as any) : []);
     setManualReservedBreakdown([]);
-    setManualPostActions([]);
 
     const baseLines = Array.isArray(row?.lines) ? row.lines : [];
     const groups: string[] = [];
@@ -399,14 +391,12 @@ export default function Orders() {
         const { data } = await api.get(`/orders/unfulfilled/${rawId}`);
         setManualAllocations(Array.isArray((data as any)?.allocations) ? (data as any).allocations : []);
         setManualReservedBreakdown(Array.isArray((data as any)?.reservedBreakdown) ? (data as any).reservedBreakdown : []);
-        setManualPostActions(Array.isArray((data as any)?.postActions) ? (data as any).postActions : []);
         setManualLastUpdatedAt(toLocalDateTime((data as any)?.updatedAt || (data as any)?.createdAt || ''));
         setManualLastUpdatedBy(String((data as any)?.lastUpdatedBy || '').trim());
       }
     } catch {
       setManualAllocations(Array.isArray((row as any)?.allocations) ? ((row as any).allocations as any) : []);
       setManualReservedBreakdown([]);
-      setManualPostActions([]);
       setManualLastUpdatedBy(String((row as any)?.lastUpdatedBy || '').trim());
     }
 
@@ -806,9 +796,11 @@ export default function Orders() {
     const exportFinalPrice = (() => {
       const op = Number(manualOriginalPrice);
       if (!Number.isFinite(op)) return '';
+      const sp = Number(manualShippingPercent);
       const dp = Number(manualDiscountPercent);
       const disc = Number.isFinite(dp) ? Math.min(100, Math.max(0, dp)) : 0;
-      const out = op * (1 - disc / 100);
+      const ship = Number.isFinite(sp) ? Math.min(100, Math.max(0, sp)) : 0;
+      const out = (op * (1 - disc / 100)) + (op * (ship / 100));
       if (!Number.isFinite(out)) return '';
       return out.toFixed(2);
     })();
@@ -830,8 +822,9 @@ export default function Orders() {
     addKV('Phone Number', manualCustomerPhone);
     addKV('Create Order Date', manualCreatedAt);
     addKV('Estimated Shipdate for Customer', manualEstFulfillment);
-    addKV('Estimated Order Delivered', manualEstDelivered);
+    addKV('Estimated Arrival Date', manualEstDelivered);
     addKV('Original Price', manualOriginalPrice);
+    addKV('Shipping Charges (%)', manualShippingPercent);
     addKV('Discount (%)', manualDiscountPercent);
     addKV('Final Price', exportFinalPrice);
     addKV('Shipping Address', manualShippingAddress);
@@ -912,6 +905,7 @@ export default function Orders() {
     manualNotes,
     manualLastUpdatedAt,
     manualOriginalPrice,
+    manualShippingPercent,
     manualDiscountPercent,
     manualReservedRows,
     manualOrderGroups,
@@ -971,12 +965,14 @@ export default function Orders() {
   const manualFinalPrice = useMemo(() => {
     const op = Number(manualOriginalPrice);
     if (!Number.isFinite(op)) return '';
+    const sp = Number(manualShippingPercent);
     const dp = Number(manualDiscountPercent);
     const disc = Number.isFinite(dp) ? Math.min(100, Math.max(0, dp)) : 0;
-    const out = op * (1 - disc / 100);
+    const ship = Number.isFinite(sp) ? Math.min(100, Math.max(0, sp)) : 0;
+    const out = (op * (1 - disc / 100)) + (op * (ship / 100));
     if (!Number.isFinite(out)) return '';
     return out.toFixed(2);
-  }, [manualOriginalPrice, manualDiscountPercent]);
+  }, [manualOriginalPrice, manualDiscountPercent, manualShippingPercent]);
 
   const getActiveManualOptions = () => (manualLineMode === 'pallet_group' ? manualPalletGroupOptions : manualLineItemOptions);
 
@@ -1283,191 +1279,26 @@ export default function Orders() {
     if (!id) {
       setManualAllocations([]);
       setManualReservedBreakdown([]);
-      setManualPostActions([]);
       return { allocations: [] as any[], reserved: [] as any[] };
     }
     try {
       const { data } = await api.get(`/orders/unfulfilled/${id}`, { params: { _ts: Date.now() } });
       const nextAllocs = Array.isArray((data as any)?.allocations) ? (data as any).allocations : [];
       const nextReserved = Array.isArray((data as any)?.reservedBreakdown) ? (data as any).reservedBreakdown : [];
-      const nextPostActions = Array.isArray((data as any)?.postActions) ? (data as any).postActions : [];
       setManualAllocations(nextAllocs);
       setManualReservedBreakdown(nextReserved);
-      setManualPostActions(nextPostActions);
       setManualEditRow((prev) => {
         if (!prev) return prev;
         return { ...(prev as any), allocations: nextAllocs } as any;
       });
-      return { allocations: nextAllocs, reserved: nextReserved, postActions: nextPostActions };
+      return { allocations: nextAllocs, reserved: nextReserved };
     } catch {
       // keep existing allocations if fetch fails
       return { allocations: Array.isArray(manualAllocations) ? manualAllocations : [], reserved: [] as any[] };
     }
   }, [manualAllocations, manualReservedBreakdown]);
 
-  const postActionSumsByGroup = useMemo(() => {
-    const rows = Array.isArray(manualPostActions) ? manualPostActions : [];
-    const by: Record<string, { returned: number; damaged: number; total: number }> = {};
-    for (const a of rows) {
-      const g = String(a?.groupName || '').trim();
-      if (!g) continue;
-      const kind = String(a?.kind || '').trim().toLowerCase();
-      const qty = Math.floor(Number(a?.qty || 0));
-      if (!Number.isFinite(qty) || qty <= 0) continue;
-      if (!by[g]) by[g] = { returned: 0, damaged: 0, total: 0 };
-      if (kind === 'returned') by[g].returned += qty;
-      else if (kind === 'damaged') by[g].damaged += qty;
-      by[g].total += qty;
-    }
-    return by;
-  }, [manualPostActions]);
-
-  const postActionGroupOptions = useMemo((): string[] => {
-    const lines = Array.isArray((manualEditRow as any)?.lines) ? (manualEditRow as any).lines : [];
-    const names: string[] = lines.map((l: any) => String(l?.groupName || '').trim()).filter((v: string) => v);
-    return Array.from(new Set(names)).sort((a: string, b: string) => a.localeCompare(b));
-  }, [manualEditRow]);
-
-  const postActionRemainingByGroup = useMemo(() => {
-    const out: Record<string, number> = {};
-    const lines = Array.isArray((manualEditRow as any)?.lines) ? (manualEditRow as any).lines : [];
-    for (const ln of lines) {
-      const g = String(ln?.groupName || '').trim();
-      const qty = Math.floor(Number(ln?.qty || 0));
-      if (!g || !Number.isFinite(qty) || qty <= 0) continue;
-      out[g] = (out[g] || 0) + qty;
-    }
-    for (const g of Object.keys(out)) {
-      const used = Number(postActionSumsByGroup?.[g]?.total || 0);
-      out[g] = Math.max(0, Math.floor(out[g] - used));
-    }
-    return out;
-  }, [manualEditRow, postActionSumsByGroup]);
-
-  const postActionLastUpdate = useMemo(() => {
-    const rows = Array.isArray(manualPostActions) ? manualPostActions : [];
-    const targetKind = postActionKind === 'returned' ? 'returned' : 'damaged';
-    let best: any = null;
-    let bestTs = -1;
-    for (const a of rows) {
-      const kind = String(a?.kind || '').toLowerCase();
-      if (kind !== targetKind) continue;
-      const dt = a?.committedAt ? new Date(a.committedAt) : null;
-      const ts = dt && !Number.isNaN(dt.getTime()) ? dt.getTime() : -1;
-      if (ts > bestTs) {
-        bestTs = ts;
-        best = a;
-      }
-    }
-    if (!best) return null;
-    const dt = best?.committedAt ? new Date(best.committedAt) : null;
-    const when = dt && !Number.isNaN(dt.getTime()) ? formatDateTimeUS(dt) : '';
-    const by = String(best?.committedBy || '').trim();
-    return { when, by };
-  }, [manualPostActions, postActionKind]);
-
-  const postActionAddedByGroup = useMemo(() => {
-    const lines = Array.isArray(postActionLines) ? postActionLines : [];
-    const out: Record<string, number> = {};
-    for (const ln of lines) {
-      const g = String(ln?.groupName || '').trim();
-      const q = Math.floor(Number(ln?.qty || 0));
-      if (!g || !Number.isFinite(q) || q <= 0) continue;
-      out[g] = (out[g] || 0) + q;
-    }
-    return out;
-  }, [postActionLines]);
-
-  const postActionPickRemaining = useMemo(() => {
-    const g = String(postActionPickGroup || '').trim();
-    if (!g) return 0;
-    const ordered = Math.floor(Number((postActionRemainingByGroup as any)?.[g] ?? 0));
-    const alreadyAdded = Math.floor(Number((postActionAddedByGroup as any)?.[g] ?? 0));
-    return Math.max(0, ordered - alreadyAdded);
-  }, [postActionPickGroup, postActionRemainingByGroup, postActionAddedByGroup]);
-
-  const openPostAction = (kind: 'returned' | 'damaged') => {
-    setPostActionKind(kind);
-    setPostActionDate(new Date().toISOString().slice(0, 10));
-    setPostActionRemarks('');
-    setPostActionPickGroup('');
-    setPostActionPickQty('');
-    setPostActionLines([]);
-    setPostActionOpen(true);
-  };
-
-  const submitPostAction = async () => {
-    if (manualMode !== 'edit' || !manualEditRow) return;
-    const rawId = String((manualEditRow as any)?.rawId || '').trim();
-    if (!rawId) return;
-
-    if (manualEstFulfillment && postActionDate && postActionDate < manualEstFulfillment) {
-      toast.error('Return/Damage date cannot be earlier than Estimated Shipdate for Customer');
-      return;
-    }
-
-    const actionLines = Array.isArray(postActionLines) ? postActionLines : [];
-    const parsed = actionLines
-      .map((ln) => ({
-        groupName: String(ln?.groupName || '').trim(),
-        qty: Math.floor(Number(ln?.qty || 0)),
-      }))
-      .filter((ln) => ln.groupName && Number.isFinite(ln.qty) && ln.qty > 0);
-
-    if (!parsed.length) {
-      toast.error('Please add at least 1 valid line (pallet + qty)');
-      return;
-    }
-
-    // Client-side guard: cumulative remaining per pallet group
-    const orderLines = Array.isArray((manualEditRow as any)?.lines) ? (manualEditRow as any).lines : [];
-    const orderedByGroup: Record<string, number> = {};
-    for (const l of orderLines) {
-      const g = String(l?.groupName || '').trim();
-      const q = Math.floor(Number(l?.qty || 0));
-      if (!g || !Number.isFinite(q) || q <= 0) continue;
-      orderedByGroup[g] = (orderedByGroup[g] || 0) + q;
-    }
-    const addByGroup: Record<string, number> = {};
-    for (const ln of parsed) {
-      addByGroup[ln.groupName] = (addByGroup[ln.groupName] || 0) + ln.qty;
-    }
-    for (const g of Object.keys(addByGroup)) {
-      const ordered = Number(orderedByGroup[g] || 0);
-      const used = Number(postActionSumsByGroup?.[g]?.total || 0);
-      const remaining = ordered - used;
-      if (!ordered) {
-        toast.error(`Invalid pallet group: ${g}`);
-        return;
-      }
-      if (addByGroup[g] > remaining) {
-        toast.error(`Qty exceeds remaining for ${g}. Ordered ${ordered}, already adjusted ${used}, remaining ${Math.max(0, remaining)}.`);
-        return;
-      }
-    }
-
-    setPostActionSaving(true);
-    try {
-      const path = postActionKind === 'returned'
-        ? `/orders/unfulfilled/${rawId}/return`
-        : `/orders/unfulfilled/${rawId}/damage`;
-      await api.post(path, {
-        committedAt: postActionDate || undefined,
-        actions: parsed.map((ln) => ({
-          groupName: ln.groupName,
-          qty: ln.qty,
-          notes: String(postActionRemarks || '').trim() || undefined,
-        })),
-      });
-      toast.success(postActionKind === 'returned' ? 'Return recorded' : 'Damage recorded');
-      setPostActionOpen(false);
-      await refreshManualAllocations(rawId);
-    } catch (e: any) {
-      toast.error(e?.response?.data?.message || 'Failed to save');
-    } finally {
-      setPostActionSaving(false);
-    }
-  };
+  // Return/Damage feature removed
 
   const getRowSupplySource = (row: any) => {
     const r = row || {};
@@ -1688,6 +1519,7 @@ export default function Orders() {
         shippingAddress: String(o?.shippingAddress || ''),
         createdAtOrder: normalizeDateValue(o?.createdAtOrder),
         originalPrice: o?.originalPrice,
+        shippingPercent: o?.shippingPercent,
         discountPercent: o?.discountPercent,
         finalPrice: o?.finalPrice,
         estFulfillmentDate: normalizeDateValue(o?.estFulfillmentDate),
@@ -1931,7 +1763,7 @@ export default function Orders() {
     },
     {
       field: 'estDeliveredDate',
-      headerName: 'Estimated Order Delivered',
+      headerName: 'Estimated Arrival Date',
       width: 190,
       renderCell: (p: any) => {
         const row = (p?.row as any) || {};
@@ -1957,6 +1789,18 @@ export default function Orders() {
             {label}
           </Box>
         );
+      },
+    },
+    {
+      field: 'shippingPercent',
+      headerName: 'Shipping Charges (%)',
+      width: 170,
+      type: 'number',
+      renderCell: (p: any) => {
+        const v = (p?.row as any)?.shippingPercent;
+        if (v === null || v === undefined || v === '') return '-';
+        const n = Number(v);
+        return Number.isFinite(n) ? `${n}%` : '-';
       },
     },
     {
@@ -2047,6 +1891,7 @@ export default function Orders() {
     setManualShippingAddress('');
     setManualNotes('');
     setManualOriginalPrice('');
+    setManualShippingPercent('');
     setManualDiscountPercent('');
     setManualLineMode('pallet_group');
     setManualLines([{ lineItem: '', qty: '' }]);
@@ -2165,14 +2010,21 @@ export default function Orders() {
       errs.push('Estimated Shipdate for Customer is required');
     }
     if (manualMode === 'edit' && manualStatus === 'shipped' && !manualEstDelivered) {
-      errs.push('Estimated Order Delivered is required when status is SHIPPED');
+      errs.push('Estimated Arrival Date is required when status is SHIPPED');
     }
     if (manualMode === 'edit' && manualStatus === 'shipped' && manualEstDelivered && manualEstFulfillment && manualEstDelivered < manualEstFulfillment) {
-      errs.push('Estimated Order Delivered cannot be earlier than Estimated Shipdate for Customer');
+      errs.push('Estimated Arrival Date cannot be earlier than Estimated Shipdate for Customer');
+    }
+    if (manualMode === 'edit' && manualStatus === 'shipped' && !String(manualShippingPercent || '').trim()) {
+      errs.push('Shipping Charges (%) is required when status is SHIPPED');
     }
     const dp = Number(manualDiscountPercent);
     if (manualDiscountPercent && (!Number.isFinite(dp) || dp < 0 || dp > 100)) {
       errs.push('Discount (%) must be between 0 and 100');
+    }
+    const sp = Number(manualShippingPercent);
+    if (manualShippingPercent && (!Number.isFinite(sp) || sp < 0 || sp > 100)) {
+      errs.push('Shipping Charges (%) must be between 0 and 100');
     }
     if (!String(manualShippingAddress || '').trim()) {
       errs.push('Shipping Address is required');
@@ -2262,6 +2114,7 @@ export default function Orders() {
             customerName: manualCustomerName.trim(),
             customerPhone: manualCustomerPhone.trim(),
             originalPrice: originalPriceRounded,
+            shippingPercent: manualShippingPercent ? Number(manualShippingPercent) : undefined,
             discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
             estFulfillmentDate: manualEstFulfillment || undefined,
             estDeliveredDate: manualEstDelivered || undefined,
@@ -2278,6 +2131,7 @@ export default function Orders() {
               customerName: manualCustomerName.trim(),
               customerPhone: manualCustomerPhone.trim(),
               originalPrice: originalPriceRounded,
+              shippingPercent: manualShippingPercent ? Number(manualShippingPercent) : undefined,
               discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
               estFulfillmentDate: manualEstFulfillment || undefined,
               estDeliveredDate: manualEstDelivered || undefined,
@@ -2307,6 +2161,7 @@ export default function Orders() {
               customerName: manualCustomerName.trim(),
               customerPhone: manualCustomerPhone.trim(),
               originalPrice: originalPriceRounded,
+              shippingPercent: manualShippingPercent ? Number(manualShippingPercent) : undefined,
               discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
               estFulfillmentDate: manualEstFulfillment || undefined,
               estDeliveredDate: manualEstDelivered || undefined,
@@ -2333,6 +2188,7 @@ export default function Orders() {
         customerPhone: manualCustomerPhone.trim(),
         createdAtOrder: manualCreatedAt || undefined,
         originalPrice: originalPriceRounded,
+        shippingPercent: manualShippingPercent ? Number(manualShippingPercent) : undefined,
         discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
         estFulfillmentDate: manualEstFulfillment || undefined,
         estDeliveredDate: manualEstDelivered || undefined,
@@ -2496,154 +2352,6 @@ export default function Orders() {
         </DialogActions>
       </Dialog>
 
-      <Dialog open={postActionOpen} onClose={() => setPostActionOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>{postActionKind === 'returned' ? 'Return Pallet' : 'Damage Pallet'}</DialogTitle>
-        <DialogContent sx={{ pt: 2 }}>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            Qty is limited by ordered qty minus previous returned/damaged qty.
-          </Typography>
-          {postActionLastUpdate?.when ? (
-            <Typography variant="caption" color="error" sx={{ display: 'block', mb: 2 }}>
-              Last {postActionKind === 'returned' ? 'Return' : 'Damage'} Update: {postActionLastUpdate.when}{postActionLastUpdate.by ? ` (by ${postActionLastUpdate.by})` : ''}
-            </Typography>
-          ) : null}
-          <TextField
-            type="date"
-            fullWidth
-            label="Date"
-            InputLabelProps={{ shrink: true }}
-            value={postActionDate}
-            onChange={(e) => setPostActionDate(String(e.target.value || ''))}
-            inputProps={{ min: manualEstFulfillment || undefined }}
-            sx={{ mb: 2 }}
-          />
-
-          <TextField
-            fullWidth
-            label="Remarks"
-            multiline
-            rows={3}
-            value={postActionRemarks}
-            onChange={(e) => setPostActionRemarks(String(e.target.value || ''))}
-            sx={{ mb: 2 }}
-          />
-
-          <Typography variant="subtitle2" sx={{ mb: 1 }}>
-            Add to list
-          </Typography>
-
-          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 140px auto' }, gap: 1.5, mb: 2 }}>
-            <TextField
-              select
-              fullWidth
-              label="Pallet Description"
-              value={postActionPickGroup}
-              onChange={(e) => setPostActionPickGroup(String(e.target.value || ''))}
-            >
-              <MenuItem value="">Select pallet description</MenuItem>
-              {postActionGroupOptions.map((g) => (
-                <MenuItem key={g} value={g}>{g}</MenuItem>
-              ))}
-            </TextField>
-            <TextField
-              fullWidth
-              type="number"
-              label="Qty"
-              value={postActionPickQty}
-              onChange={(e) => setPostActionPickQty(String(e.target.value || ''))}
-              inputProps={{ min: 0, max: postActionPickRemaining || undefined }}
-              helperText={postActionPickGroup ? `Remaining: ${postActionPickRemaining}` : ''}
-            />
-            <Button
-              variant="outlined"
-              disabled={postActionSaving}
-              onClick={() => {
-                const g = String(postActionPickGroup || '').trim();
-                const q = Math.floor(Number(postActionPickQty || 0));
-                if (!g || !Number.isFinite(q) || q <= 0) {
-                  toast.error('Please select a pallet and enter a qty');
-                  return;
-                }
-                const remaining = Math.floor(Number(postActionPickRemaining || 0));
-                if (remaining <= 0) {
-                  toast.error(`No remaining qty available for ${g}`);
-                  return;
-                }
-                if (q > remaining) {
-                  toast.error(`Qty exceeds remaining for ${g}. Remaining ${remaining}.`);
-                  return;
-                }
-                setPostActionLines((prev) => {
-                  const arr = Array.isArray(prev) ? [...prev] : [];
-                  arr.push({ groupName: g, qty: String(q) });
-                  return arr;
-                });
-                setPostActionPickGroup('');
-                setPostActionPickQty('');
-              }}
-            >
-              Add
-            </Button>
-          </Box>
-
-          
-
-          <Typography variant="subtitle2" sx={{ mb: 1 }}>
-            List
-          </Typography>
-          <div style={{ height: 200, width: '100%', marginBottom: 16 }}>
-            <DataGrid
-              rows={(Array.isArray(postActionLines) ? postActionLines : []).map((ln: any, i: number) => {
-                const g = String(ln?.groupName || '').trim();
-                const orderLines = Array.isArray((manualEditRow as any)?.lines) ? (manualEditRow as any).lines : [];
-                const found = g ? orderLines.find((ol: any) => String(ol?.groupName || '').trim() === g) : null;
-                const palletId = String((found as any)?.lineItem || '').trim();
-                return {
-                  id: i,
-                  palletId,
-                  pallet: g,
-                  qty: Math.floor(Number(ln?.qty || 0)),
-                };
-              })}
-              columns={([{
-                field: 'palletId', headerName: 'Pallet ID', width: 140,
-              }, {
-                field: 'pallet', headerName: 'Pallet', flex: 1, minWidth: 160,
-              }, {
-                field: 'qty', headerName: 'Qty', width: 90, type: 'number', align: 'right', headerAlign: 'right',
-              }, {
-                field: 'remove', headerName: '', width: 110, sortable: false, filterable: false,
-                renderCell: (params: any) => (
-                  <Button
-                    variant="text"
-                    color="error"
-                    disabled={postActionSaving}
-                    onClick={() => {
-                      const idx = Number(params?.row?.id);
-                      setPostActionLines((prev) => {
-                        const arr = Array.isArray(prev) ? [...prev] : [];
-                        if (Number.isFinite(idx) && idx >= 0 && idx < arr.length) arr.splice(idx, 1);
-                        return arr;
-                      });
-                    }}
-                  >
-                    Remove
-                  </Button>
-                ),
-              }] as any)}
-              density="compact"
-              disableRowSelectionOnClick
-              hideFooter
-            />
-          </div>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setPostActionOpen(false)} disabled={postActionSaving}>Cancel</Button>
-          <Button variant="contained" onClick={submitPostAction} disabled={postActionSaving}>
-            Save
-          </Button>
-        </DialogActions>
-      </Dialog>
 
       <Dialog open={manualOpen} onClose={()=>setManualOpen(false)} fullWidth maxWidth="xl">
         <DialogTitle>{manualMode === 'edit' ? `Edit Order${manualEditRow?.orderNumber ? ` - ${manualEditRow.orderNumber}` : ''}` : 'Add Order'}</DialogTitle>
@@ -2694,7 +2402,7 @@ export default function Orders() {
                         READY TO SHIP: all pallets are available in MPG (Primary WH). Inventory is not deducted yet.
                       </Typography>
                       <Typography variant="body2" sx={{ mt: 0.5 }}>
-                        SHIPPED: pallets are shipped and inventory is deducted. "Estimated Order Delivered" is required.
+                        SHIPPED: pallets are shipped and inventory is deducted. "Estimated Arrival Date" is required.
                       </Typography>
                       <Typography variant="body2" sx={{ mt: 0.5 }}>
                         COMPLETED: customer received the order and it is fully fulfilled.
@@ -2769,7 +2477,7 @@ export default function Orders() {
             </Box>
             <TextField
               type="date"
-              label="Estimated Order Delivered"
+              label="Estimated Arrival Date"
               InputLabelProps={{ shrink: true }}
               size="small"
               value={manualEstDelivered}
@@ -2796,6 +2504,13 @@ export default function Orders() {
               required
               error={!(Number.isFinite(Number(manualOriginalPrice)) && Number(manualOriginalPrice) > 0)}
               helperText={Number.isFinite(Number(manualOriginalPrice)) && Number(manualOriginalPrice) > 0 ? '' : 'Required'}
+              disabled={manualFieldsLocked}
+            />
+            <TextField
+              label="Shipping Charges (%)"
+              size="small"
+              value={manualShippingPercent}
+              onChange={(e)=> setManualShippingPercent(normalizeDiscountText(e.target.value))}
               disabled={manualFieldsLocked}
             />
             <TextField
@@ -2842,14 +2557,7 @@ export default function Orders() {
             disabled={manualFieldsLocked}
           />
 
-          {manualCanPostAction ? (
-            <Paper sx={{ p: 2, mb: 2, border: '1px solid', borderColor: 'divider' }}>
-              <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
-                <Button variant="outlined" onClick={() => openPostAction('returned')}>Return Pallet</Button>
-                <Button variant="outlined" color="error" onClick={() => openPostAction('damaged')}>Damage Pallet</Button>
-              </Stack>
-            </Paper>
-          ) : null}
+          {null}
 
           {manualMode === 'edit' ? (
             <Box sx={{ mb: 2 }}>
