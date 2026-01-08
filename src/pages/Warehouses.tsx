@@ -9,15 +9,30 @@ import { useToast } from '../components/ToastProvider';
 interface Warehouse { _id: string; name: string; address?: string; isPrimary?: boolean }
 
 export default function Warehouses() {
-  const isAdmin = (() => {
-    try {
-      const t = localStorage.getItem('token') || '';
-      const payload = t.split('.')[1];
-      if (!payload) return false;
-      const json = JSON.parse(atob(payload));
-      return String(json?.role || '') === 'admin';
-    } catch { return false; }
-  })();
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => {
+    const compute = () => {
+      try {
+        const t = localStorage.getItem('token') || '';
+        const payload = t.split('.')[1];
+        if (!payload) { setIsAdmin(false); return; }
+        const json = JSON.parse(atob(payload));
+        setIsAdmin(String(json?.role || '') === 'admin');
+      } catch { setIsAdmin(false); }
+    };
+    compute();
+    const onStorage = (e: StorageEvent) => { if (!e || e.key === 'token') compute(); };
+    const onFocus = () => compute();
+    const onAuthChanged = () => compute();
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('auth-changed', onAuthChanged as any);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('auth-changed', onAuthChanged as any);
+    };
+  }, []);
   const [rows, setRows] = useState<Warehouse[]>([]);
   const [loading, setLoading] = useState(false);
   const [name, setName] = useState('');

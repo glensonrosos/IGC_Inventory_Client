@@ -1,12 +1,3 @@
-  const isAdmin = (() => {
-    try {
-      const t = localStorage.getItem('token') || '';
-      const payload = t.split('.')[1];
-      if (!payload) return false;
-      const json = JSON.parse(atob(payload));
-      return String(json?.role || '') === 'admin';
-    } catch { return false; }
-  })();
 import { useEffect, useState, useRef } from 'react';
 import { Container, Typography, Paper, Stack, TextField, Button, MenuItem, Dialog, DialogTitle, DialogContent, DialogActions, IconButton, Tooltip, Autocomplete, Menu, FormControlLabel, Checkbox, Chip, Divider, Grid } from '@mui/material';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
@@ -19,6 +10,30 @@ interface ItemGroup { _id: string; name: string }
 interface Item { _id: string; itemCode: string; itemGroup: string; description: string; color: string; packSize?: number; enabled?: boolean }
 
 export default function ItemRegistry() {
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => {
+    const compute = () => {
+      try {
+        const t = localStorage.getItem('token') || '';
+        const payload = t.split('.')[1];
+        if (!payload) { setIsAdmin(false); return; }
+        const json = JSON.parse(atob(payload));
+        setIsAdmin(String(json?.role || '') === 'admin');
+      } catch { setIsAdmin(false); }
+    };
+    compute();
+    const onStorage = (e: StorageEvent) => { if (!e || e.key === 'token') compute(); };
+    const onFocus = () => compute();
+    const onAuthChanged = () => compute();
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('auth-changed', onAuthChanged as any);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('auth-changed', onAuthChanged as any);
+    };
+  }, []);
   const [groups, setGroups] = useState<ItemGroup[]>([]);
   const [items, setItems] = useState<Item[]>([]);
   const [loading, setLoading] = useState(false);

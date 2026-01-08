@@ -13,15 +13,30 @@ interface OnProcBatch { _id: string; reference: string; poNumber: string; status
 interface ItemGroupRow { name: string; lineItem?: string }
 
 export default function OnProcess() {
-  const isAdmin = (() => {
-    try {
-      const t = localStorage.getItem('token') || '';
-      const payload = t.split('.')[1];
-      if (!payload) return false;
-      const json = JSON.parse(atob(payload));
-      return String(json?.role || '') === 'admin';
-    } catch { return false; }
-  })();
+  const [isAdmin, setIsAdmin] = useState(false);
+  useEffect(() => {
+    const compute = () => {
+      try {
+        const t = localStorage.getItem('token') || '';
+        const payload = t.split('.')[1];
+        if (!payload) { setIsAdmin(false); return; }
+        const json = JSON.parse(atob(payload));
+        setIsAdmin(String(json?.role || '') === 'admin');
+      } catch { setIsAdmin(false); }
+    };
+    compute();
+    const onStorage = (e: StorageEvent) => { if (!e || e.key === 'token') compute(); };
+    const onFocus = () => compute();
+    const onAuthChanged = () => compute();
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('auth-changed', onAuthChanged as any);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('auth-changed', onAuthChanged as any);
+    };
+  }, []);
   const toast = useToast();
   const navigate = useNavigate();
   const todayYmd = useMemo(() => new Date().toISOString().slice(0, 10), []);
@@ -607,6 +622,12 @@ export default function OnProcess() {
                     return;
                   }
                   if (!selectedBatch?._id) return;
+                  // First persist any newly added rows (those without _id)
+                  const newOnes = (batchItems || []).filter((b:any) => !b._id);
+                  if (newOnes.length) {
+                    await Promise.all(newOnes.map((b:any) => api.post(`/on-process/batches/${selectedBatch._id}/pallets`, { groupName: b.groupName, totalPallet: b.totalPallet })));
+                  }
+                  // Then update batch meta and all pallets
                   await api.patch(`/on-process/batches/${selectedBatch._id}`, { status: batchStatus, estFinishDate: batchEst || null, notes: batchNotes });
                   await api.patch(`/on-process/batches/${selectedBatch._id}/pallets`, { pallets: batchItems.map(b => ({ groupName: b.groupName, totalPallet: b.totalPallet, finishedPallet: b.finishedPallet, status: b.status })) });
                   toast.success('Changes saved');

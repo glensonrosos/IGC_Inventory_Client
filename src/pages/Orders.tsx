@@ -2174,7 +2174,30 @@ export default function Orders() {
             estDeliveredDate: manualStatus === 'shipped' ? (manualEstDelivered || undefined) : undefined,
           });
         }
+        // Immediately recompute shipdate (client-side) to reflect new allocations/reservations
+        try {
+          const rawId = String(manualEditRow.rawId || '').trim();
+          const wid = String(manualWarehouseId || '').trim();
+          if (!manualShipdateTouched && rawId && wid) {
+            const picker = await refreshManualPicker(wid);
+            const { reserved } = await refreshManualAllocations(rawId);
+            const next = suggestShipdateForReservedBreakdown({ rows: picker?.rows, reserved });
+            if (next) {
+              setOrdersRows((prev) => {
+                const rows = Array.isArray(prev) ? prev : [];
+                return rows.map((r) => {
+                  const rRawId = String((r as any)?.rawId || '').trim();
+                  if (rRawId && rRawId === rawId) return { ...(r as any), estFulfillmentDate: next } as any;
+                  return r;
+                });
+              });
+              // Persist the recomputed date to the server to keep in sync
+              try { await api.put(`/orders/unfulfilled/${rawId}`, { estFulfillmentDate: next }); } catch {}
+            }
+          }
+        } catch {}
         toast.success('Order updated');
+        try { window.dispatchEvent(new CustomEvent('shipments-changed', { detail: { kind: 'order_updated', orderId: String(manualEditRow.rawId || '') } })); } catch {}
         setManualOpen(false);
         await loadOrders();
         return;
@@ -2197,6 +2220,9 @@ export default function Orders() {
         lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty })),
       });
       toast.success('Order created');
+      try {
+        window.dispatchEvent(new CustomEvent('shipments-changed', { detail: { kind: 'order_created' } }));
+      } catch {}
       setManualOpen(false);
       await loadOrders();
     } catch (e:any) {
