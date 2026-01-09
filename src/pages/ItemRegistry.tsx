@@ -125,6 +125,18 @@ export default function ItemRegistry() {
   const saveRenameLineItem = async () => {
     if (!renameLineItemGroupId) return;
     try {
+      const next = String(renameLineItemValue || '').trim();
+      if (next) {
+        const exists = (Array.isArray(groups) ? groups : []).some((g: any) => {
+          const sameId = String(g?._id || '') === String(renameLineItemGroupId);
+          const li = String((g as any)?.lineItem || '').trim().toLowerCase();
+          return !sameId && li && li === next.toLowerCase();
+        });
+        if (exists) {
+          toast.error('Pallet ID already exists');
+          return;
+        }
+      }
       await api.put(`/item-groups/${encodeURIComponent(renameLineItemGroupId)}`, { lineItem: renameLineItemValue });
       setGroups(prev => prev.map((g: any) => String(g._id) === String(renameLineItemGroupId) ? { ...g, lineItem: renameLineItemValue } : g));
       toast.success('Pallet ID updated');
@@ -144,6 +156,15 @@ export default function ItemRegistry() {
       return;
     }
     try {
+      const exists = (Array.isArray(groups) ? groups : []).some((g: any) => {
+        const sameId = String(g?._id || '') === String(renameGroupId);
+        const nm = String((g as any)?.name || '').trim().toLowerCase();
+        return !sameId && nm === next.toLowerCase();
+      });
+      if (exists) {
+        toast.error('Pallet Description already exists');
+        return;
+      }
       await api.put(`/item-groups/${encodeURIComponent(renameGroupId)}/rename`, { name: next });
       toast.success('Pallet Description renamed');
       setRenameGroupOpen(false);

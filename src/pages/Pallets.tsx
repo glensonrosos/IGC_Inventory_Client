@@ -100,8 +100,13 @@ export default function Pallets() {
   const filteredRows = useMemo(() => {
     const t = q.trim().toLowerCase();
     if (!t) return rows;
-    return rows.filter(r => String(r.itemGroup || '').toLowerCase().includes(t));
-  }, [rows, q]);
+    return rows.filter((r) => {
+      const groupName = String(r.itemGroup || '').trim();
+      const name = groupName.toLowerCase();
+      const pid = String(palletIdByGroup[groupName] || '').trim().toLowerCase();
+      return (name && name.includes(t)) || (pid && pid.includes(t));
+    });
+  }, [rows, q, palletIdByGroup]);
 
   const columns = useMemo<GridColDef[]>(() => {
     const primaryWh = warehouses.find((w) => Boolean((w as any)?.isPrimary)) || null;
@@ -252,7 +257,7 @@ export default function Pallets() {
       <Typography variant="h4" gutterBottom>Pallets Summary</Typography>
       <Paper sx={{ p:2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems="center" justifyContent="space-between" sx={{ mb: 2 }}>
-          <TextField size="small" label="Search Item Group" value={q} onChange={(e)=> setQ(e.target.value)} sx={{ minWidth: 260, flex: 1 }} />
+          <TextField size="small" label="Search Pallet ID or Description" value={q} onChange={(e)=> setQ(e.target.value)} sx={{ minWidth: 260, flex: 1 }} />
           <Stack direction="row" spacing={1}>
             <Button variant="outlined" onClick={load} disabled={loading}>Refresh</Button>
             <Button variant="contained" onClick={exportExcel} disabled={!gridRows.length}>Export List</Button>

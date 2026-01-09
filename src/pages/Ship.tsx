@@ -474,7 +474,7 @@ export default function Ship() {
           />
           <TextField
             size="small"
-            label="Search / Pallet Description"
+            label="Search / Pallet Description or Pallet ID"
             value={qPallet}
             onChange={(e)=> setQPallet(e.target.value)}
             onKeyDown={(e)=>{ if (e.key==='Enter') { setPage(0); load(); } }}

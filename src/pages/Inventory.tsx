@@ -104,10 +104,41 @@ export default function Inventory() {
   const loadGroups = async () => {
     setLoading(true);
     try {
+      const q = search.trim();
       const params = new URLSearchParams();
-      if (search.trim()) params.set('search', search.trim());
+      if (q) params.set('search', q);
       const { data } = await api.get<GroupOverview[]>(`/pallet-inventory/groups?${params.toString()}`);
-      setGroups(data || []);
+      let base = Array.isArray(data) ? data : [];
+
+      // If user is searching, also consider Pallet ID (lineItem) matches using local map
+      if (q) {
+        const qLower = q.toLowerCase();
+        const matchedGroupNames = Object.entries(groupLineItemByName)
+          .filter(([nameLower, lineItem]) => String(lineItem || '').toLowerCase().includes(qLower))
+          .map(([nameLower]) => nameLower);
+
+        // If Pallet ID search yields group names that aren't in the server-filtered result, fetch all and filter locally
+        const missingFromBase = new Set(
+          matchedGroupNames.filter((nameLower) => !base.some((g:any) => String(g?.groupName || '').trim().toLowerCase() === nameLower))
+        );
+        if (missingFromBase.size > 0) {
+          const { data: allData } = await api.get<GroupOverview[]>(`/pallet-inventory/groups`);
+          const all = Array.isArray(allData) ? allData : [];
+          const byPalletId = all.filter((g:any) => matchedGroupNames.includes(String(g?.groupName || '').trim().toLowerCase()));
+          // Merge unique by groupName
+          const seen = new Set<string>();
+          const merged: GroupOverview[] = [] as any;
+          for (const r of [...base, ...byPalletId]) {
+            const key = String((r as any)?.groupName || '').trim().toLowerCase();
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            merged.push(r as any);
+          }
+          base = merged;
+        }
+      }
+
+      setGroups(base || []);
     } catch (e:any) {
       toast.error(e?.response?.data?.message || 'Failed to load');
     } finally {
@@ -133,7 +164,7 @@ export default function Inventory() {
 
   useEffect(() => { loadWarehouses(); }, []);
   useEffect(() => { loadItemGroups(); }, []);
-  useEffect(() => { loadGroups(); }, [search]);
+  useEffect(() => { loadGroups(); }, [search, groupLineItemByName]);
 
   useEffect(() => {
     if (!lossOpen) return;

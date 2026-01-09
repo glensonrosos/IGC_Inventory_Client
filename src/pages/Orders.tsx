@@ -108,6 +108,27 @@ export default function Orders() {
   const [onWaterOpen, setOnWaterOpen] = useState(false);
   const [onWaterLoading, setOnWaterLoading] = useState(false);
   const [onWaterGroupName, setOnWaterGroupName] = useState('');
+
+  // Debounced auto-fetch for pallet picker when typing search while dialog is open
+  useEffect(() => {
+    if (!manualPickOpen) return;
+    const wid = String(manualWarehouseId || '').trim();
+    if (!wid) return;
+    const handle = setTimeout(async () => {
+      try {
+        setManualPickerLoading(true);
+        const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: wid, q: manualPickerQ.trim() || undefined } });
+        setManualPickerRows(Array.isArray((data as any)?.rows) ? (data as any).rows : []);
+        setManualPickerWarehouses(Array.isArray((data as any)?.warehouses) ? (data as any).warehouses : []);
+      } catch {
+        setManualPickerRows([]);
+        setManualPickerWarehouses([]);
+      } finally {
+        setManualPickerLoading(false);
+      }
+    }, 350);
+    return () => clearTimeout(handle);
+  }, [manualPickOpen, manualWarehouseId, manualPickerQ]);
   const [onWaterRows, setOnWaterRows] = useState<any[]>([]);
 
   const [onProcessOpen, setOnProcessOpen] = useState(false);
@@ -662,6 +683,47 @@ export default function Orders() {
       }
     });
 
+    // Deficit = max(0, OrderQty - MaxQtyOrder)
+    cols.push({
+      field: 'deficit',
+      headerName: 'Deficit',
+      width: 120,
+      type: 'number',
+      align: 'right',
+      headerAlign: 'right',
+      sortable: false,
+      filterable: false,
+      valueGetter: (...args: any[]) => {
+        const maybeParams = args?.[0];
+        const maybeRow = args?.[1];
+        const row = (maybeRow && typeof maybeRow === 'object') ? maybeRow : (maybeParams?.row || {});
+        const groupName = String(row?.groupName || '');
+        const primary = Number(row?.selectedWarehouseAvailable ?? 0);
+        const onWater = Number(row?.onWaterPallets ?? 0);
+        const onProcess = Number(row?.onProcessPallets ?? 0);
+        let second = 0;
+        if (secondWarehouse?._id) {
+          const per = row?.perWarehouse || {};
+          const wid = String(secondWarehouse._id);
+          second = Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0);
+        }
+        const maxAvail =
+          (Number.isFinite(primary) ? primary : 0) +
+          (Number.isFinite(onWater) ? onWater : 0) +
+          (Number.isFinite(second) ? second : 0) +
+          (Number.isFinite(onProcess) ? onProcess : 0);
+        const qty = Math.floor(Number(manualOrderQtyByGroup[groupName] ?? 0));
+        const deficit = Math.max(0, qty - Math.max(0, Math.floor(maxAvail)));
+        return deficit;
+      },
+      renderCell: (p: any) => {
+        const v = Number((p && typeof p === 'object' && 'value' in p) ? (p as any).value : 0);
+        const text = String(Number.isFinite(v) ? v : 0);
+        const deficit = Number.isFinite(v) ? v : 0;
+        return <span style={{ color: deficit > 0 ? '#d32f2f' : undefined, fontWeight: deficit > 0 ? 700 : 400 }}>{text}</span>;
+      },
+    });
+
     cols.push({
       field: 'remove',
       headerName: 'Remove',
@@ -800,7 +862,7 @@ export default function Orders() {
       const dp = Number(manualDiscountPercent);
       const disc = Number.isFinite(dp) ? Math.min(100, Math.max(0, dp)) : 0;
       const ship = Number.isFinite(sp) ? Math.min(100, Math.max(0, sp)) : 0;
-      const out = (op * (1 - disc / 100)) + (op * (ship / 100));
+      const out = op * (1 - disc / 100) * (1 + ship / 100);
       if (!Number.isFinite(out)) return '';
       return out.toFixed(2);
     })();
@@ -969,7 +1031,7 @@ export default function Orders() {
     const dp = Number(manualDiscountPercent);
     const disc = Number.isFinite(dp) ? Math.min(100, Math.max(0, dp)) : 0;
     const ship = Number.isFinite(sp) ? Math.min(100, Math.max(0, sp)) : 0;
-    const out = (op * (1 - disc / 100)) + (op * (ship / 100));
+    const out = op * (1 - disc / 100) * (1 + ship / 100);
     if (!Number.isFinite(out)) return '';
     return out.toFixed(2);
   }, [manualOriginalPrice, manualDiscountPercent, manualShippingPercent]);
@@ -2927,8 +2989,9 @@ export default function Orders() {
                       (Number.isFinite(onWater) ? onWater : 0) +
                       (Number.isFinite(onProcess) ? onProcess : 0) +
                       (Number.isFinite(secondQty) ? secondQty : 0);
+                    // Allow selecting even when availability is 0
                     const maxOrder = Math.max(0, Math.floor(total));
-                    return maxOrder > 0;
+                    return maxOrder >= 0;
                   }}
                   disableRowSelectionOnClick
                   density="compact"
@@ -2937,39 +3000,8 @@ export default function Orders() {
                   onRowSelectionModelChange={(m: any)=> {
                     const idsArr = m?.ids ? Array.from(m.ids) : [];
                     const idsStr = idsArr.map((x: any) => String(x));
-                    const byId = new Map(
-                      (Array.isArray(manualPickerRows) ? manualPickerRows : [])
-                        .map((r: any) => ({ id: String(r?.groupName || r?.lineItem || ''), row: r }))
-                        .filter((x: any) => x.id)
-                        .map((x: any) => [x.id, x.row])
-                    );
-
-                    const wid = String(manualWarehouseId || '').trim();
-                    const list = Array.isArray(manualPickerWarehouses) ? manualPickerWarehouses : [];
-                    const second = list.find((w: any) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
-                    const secondId = second ? String(second._id) : '';
-
-                    const allowed = new Set<string>();
-                    for (const id of idsStr) {
-                      const row = byId.get(id) || {};
-                      const primary = Number(row?.selectedWarehouseAvailable ?? 0);
-                      const onWater = Number(row?.onWaterPallets ?? 0);
-                      const onProcess = Number(row?.onProcessPallets ?? 0);
-                      let secondQty = 0;
-                      if (secondId) {
-                        const per = row?.perWarehouse || {};
-                        secondQty = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
-                      }
-                      const total =
-                        (Number.isFinite(primary) ? primary : 0) +
-                        (Number.isFinite(onWater) ? onWater : 0) +
-                        (Number.isFinite(onProcess) ? onProcess : 0) +
-                        (Number.isFinite(secondQty) ? secondQty : 0);
-                      const maxOrder = Math.max(0, Math.floor(total));
-                      if (maxOrder > 0) allowed.add(id);
-                    }
-
-                    setManualPickSelected({ type: 'include', ids: allowed });
+                    // Accept all selected ids; allow deficits
+                    setManualPickSelected({ type: 'include', ids: new Set(idsStr) });
                   }}
                   rowSelectionModel={manualPickSelected}
                   pagination
@@ -2993,24 +3025,6 @@ export default function Orders() {
                     row: r,
                   }))
                   .filter((x: any) => x.id && selected.has(x.id))
-                  .filter((x: any) => {
-                    const row = x.row || {};
-                    const primary = Number(row?.selectedWarehouseAvailable ?? 0);
-                    const onWater = Number(row?.onWaterPallets ?? 0);
-                    const onProcess = Number(row?.onProcessPallets ?? 0);
-                    let secondQty = 0;
-                    if (secondId) {
-                      const per = row?.perWarehouse || {};
-                      secondQty = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
-                    }
-                    const total =
-                      (Number.isFinite(primary) ? primary : 0) +
-                      (Number.isFinite(onWater) ? onWater : 0) +
-                      (Number.isFinite(onProcess) ? onProcess : 0) +
-                      (Number.isFinite(secondQty) ? secondQty : 0);
-                    const maxOrder = Math.max(0, Math.floor(total));
-                    return maxOrder > 0;
-                  })
                   .map((x: any) => x.id);
                 setManualOrderGroups((prev)=> {
                   const base = Array.isArray(prev) ? prev : [];
