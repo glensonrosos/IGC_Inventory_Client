@@ -491,13 +491,17 @@ export default function OnProcess() {
                   const remaining = Number((params.row as any)?.remainingPallet || 0);
                   const locked = Boolean((params.row as any)?.locked) && remaining === 0;
                   const st = String((params.row as any)?.status || '');
+                  const transferred = Number((params.row as any)?.transferredPallet || 0);
 
                   if (params.field === 'totalPallet') {
                     return st !== 'cancelled';
                   }
 
                   if (locked) return false;
-                  if (st === 'cancelled') return false;
+                  if (st === 'cancelled') {
+                    // Allow only status to be edited when cancelled, and only if nothing was transferred yet
+                    return params.field === 'status' && transferred === 0;
+                  }
 
                   return editableFields.has(params.field);
                 }}
@@ -630,6 +634,8 @@ export default function OnProcess() {
                   // Then update batch meta and all pallets
                   await api.patch(`/on-process/batches/${selectedBatch._id}`, { status: batchStatus, estFinishDate: batchEst || null, notes: batchNotes });
                   await api.patch(`/on-process/batches/${selectedBatch._id}/pallets`, { pallets: batchItems.map(b => ({ groupName: b.groupName, totalPallet: b.totalPallet, finishedPallet: b.finishedPallet, status: b.status })) });
+                  // Notify Orders page to refresh
+                  try { window.dispatchEvent(new Event('orders-changed')); } catch {}
                   toast.success('Changes saved');
                   await loadBatches();
                   await loadBatchItems(selectedBatch._id);
@@ -760,6 +766,7 @@ export default function OnProcess() {
                     if (!batchId) return;
                     const transferItems = eligibleSelected.map(b => ({ groupName: b.groupName, pallets: b.finishedPallet || 0 }));
                     await api.post(`/on-process/batches/${batchId}/pallets/transfer`, { mode: transferMode, warehouseId: transferWarehouse, estDeliveryDate: transferMode==='on_water' ? transferEDD : undefined, items: transferItems });
+                    try { window.dispatchEvent(new Event('orders-changed')); } catch {}
                     toast.success('Transfer created');
                     setTransferBulkOpen(false);
                     setTransferWarehouse('');

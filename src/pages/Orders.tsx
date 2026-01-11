@@ -57,6 +57,7 @@ export default function Orders() {
   const [groupPriceByName, setGroupPriceByName] = useState<Record<string, number>>({});
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [ordersRows, setOrdersRows] = useState<OrdersRow[]>([]);
+  const ordersRowsRef = useRef<OrdersRow[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersQ, setOrdersQ] = useState('');
   const [ordersStatusFilter, setOrdersStatusFilter] = useState<'all' | OrderStatus>('all');
@@ -94,6 +95,18 @@ export default function Orders() {
   const [manualLines, setManualLines] = useState<Array<{ lineItem: string; qty: string }>>([{ lineItem: '', qty: '' }]);
   const [manualAvailable, setManualAvailable] = useState<Record<string, number>>({});
   const [manualValidationErrors, setManualValidationErrors] = useState<string[]>([]);
+  const [manualRecalcTick, setManualRecalcTick] = useState(0);
+
+  // Guard to prevent repeated state updates causing render loops when enforcing deficit rules
+  const deficitEnforcedRef = useRef(false);
+
+  // Utility to clear focus before closing dialogs to avoid aria-hidden + focus conflicts
+  const blurActive = useCallback(() => {
+    try {
+      const el = (document?.activeElement as any) as HTMLElement | null;
+      if (el && typeof el.blur === 'function') el.blur();
+    } catch {}
+  }, []);
 
   const [manualPickerLoading, setManualPickerLoading] = useState(false);
   const [manualPickerQ, setManualPickerQ] = useState('');
@@ -414,6 +427,10 @@ export default function Orders() {
         setManualReservedBreakdown(Array.isArray((data as any)?.reservedBreakdown) ? (data as any).reservedBreakdown : []);
         setManualLastUpdatedAt(toLocalDateTime((data as any)?.updatedAt || (data as any)?.createdAt || ''));
         setManualLastUpdatedBy(String((data as any)?.lastUpdatedBy || '').trim());
+        // Reflect any server-side rebalancing result in the modal immediately
+        const nextStatus = (normalizeStatus((data as any)?.status || '') as any) || 'processing';
+        setManualStatus(nextStatus);
+        setManualEstFulfillment(toYmd((data as any)?.estFulfillmentDate));
       }
     } catch {
       setManualAllocations(Array.isArray((row as any)?.allocations) ? ((row as any).allocations as any) : []);
@@ -683,7 +700,7 @@ export default function Orders() {
       }
     });
 
-    // Deficit = max(0, OrderQty - MaxQtyOrder)
+    // Deficit = max(0, OrderQty - AvailableOrReserved)
     cols.push({
       field: 'deficit',
       headerName: 'Deficit',
@@ -698,20 +715,39 @@ export default function Orders() {
         const maybeRow = args?.[1];
         const row = (maybeRow && typeof maybeRow === 'object') ? maybeRow : (maybeParams?.row || {});
         const groupName = String(row?.groupName || '');
-        const primary = Number(row?.selectedWarehouseAvailable ?? 0);
-        const onWater = Number(row?.onWaterPallets ?? 0);
-        const onProcess = Number(row?.onProcessPallets ?? 0);
-        let second = 0;
-        if (secondWarehouse?._id) {
-          const per = row?.perWarehouse || {};
-          const wid = String(secondWarehouse._id);
-          second = Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0);
+        // If editing an existing order and we have a reserved breakdown for this order,
+        // use the reserved quantities instead of current global availability.
+        let maxAvail = 0;
+        if (manualMode === 'edit' && Array.isArray(manualReservedBreakdown) && manualReservedBreakdown.length) {
+          const rec = manualReservedBreakdown.find((r: any) => String(r?.groupName || r?.id || '') === groupName);
+          if (rec && typeof rec === 'object') {
+            const rPrimary = Number((rec as any).primary ?? 0);
+            const rOnWater = Number((rec as any).onWater ?? 0);
+            const rSecond = Number((rec as any).second ?? 0);
+            const rOnProcess = Number((rec as any).onProcess ?? 0);
+            maxAvail =
+              (Number.isFinite(rPrimary) ? rPrimary : 0) +
+              (Number.isFinite(rOnWater) ? rOnWater : 0) +
+              (Number.isFinite(rSecond) ? rSecond : 0) +
+              (Number.isFinite(rOnProcess) ? rOnProcess : 0);
+          }
         }
-        const maxAvail =
-          (Number.isFinite(primary) ? primary : 0) +
-          (Number.isFinite(onWater) ? onWater : 0) +
-          (Number.isFinite(second) ? second : 0) +
-          (Number.isFinite(onProcess) ? onProcess : 0);
+        if (!Number.isFinite(maxAvail) || maxAvail === 0) {
+          const primary = Number(row?.selectedWarehouseAvailable ?? 0);
+          const onWater = Number(row?.onWaterPallets ?? 0);
+          const onProcess = Number(row?.onProcessPallets ?? 0);
+          let second = 0;
+          if (secondWarehouse?._id) {
+            const per = row?.perWarehouse || {};
+            const wid = String(secondWarehouse._id);
+            second = Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0);
+          }
+          maxAvail =
+            (Number.isFinite(primary) ? primary : 0) +
+            (Number.isFinite(onWater) ? onWater : 0) +
+            (Number.isFinite(second) ? second : 0) +
+            (Number.isFinite(onProcess) ? onProcess : 0);
+        }
         const qty = Math.floor(Number(manualOrderQtyByGroup[groupName] ?? 0));
         const deficit = Math.max(0, qty - Math.max(0, Math.floor(maxAvail)));
         return deficit;
@@ -758,8 +794,11 @@ export default function Orders() {
     manualWarehouseName,
     manualWarehouseId,
     secondWarehouse,
+    manualMode,
+    manualReservedBreakdown,
     manualOrderQtyByGroup,
     manualFieldsLocked,
+    manualRecalcTick,
     openOnWaterDetails,
     openOnProcessDetails,
     groupPriceByName,
@@ -788,6 +827,66 @@ export default function Orders() {
       .map((r) => ({ id: r.groupName, ...r }))
       .sort((a, b) => String(a.groupName).localeCompare(String(b.groupName)));
   }, [manualAllocations]);
+
+  // Determine if any selected pallet has a deficit
+  const manualHasDeficit = useMemo(() => {
+    const groups = Array.isArray(manualOrderGroups) ? manualOrderGroups : [];
+    if (!groups.length) return false;
+
+    // Build availability from reserved breakdown in edit mode; otherwise from picker rows
+    const totalsByGroup = new Map<string, number>();
+    if (manualMode === 'edit' && Array.isArray(manualReservedBreakdown) && manualReservedBreakdown.length) {
+      for (const r of manualReservedBreakdown as any[]) {
+        const g = String((r as any)?.groupName || (r as any)?.id || '').trim();
+        if (!g) continue;
+        const primary = Math.max(0, Math.floor(Number((r as any)?.primary || 0)));
+        const onWater = Math.max(0, Math.floor(Number((r as any)?.onWater || 0)));
+        const second = Math.max(0, Math.floor(Number((r as any)?.second || 0)));
+        const onProcess = Math.max(0, Math.floor(Number((r as any)?.onProcess || 0)));
+        totalsByGroup.set(g, primary + onWater + second + onProcess);
+      }
+    } else {
+      const rows = Array.isArray(manualPickerRows) ? manualPickerRows : [] as any[];
+      for (const r of rows) {
+        const g = String(r?.groupName || '').trim();
+        if (!g) continue;
+        const primary = Math.max(0, Math.floor(Number(r?.selectedWarehouseAvailable ?? 0)));
+        const onWater = Math.max(0, Math.floor(Number(r?.onWaterPallets ?? 0)));
+        const onProcess = Math.max(0, Math.floor(Number(r?.onProcessPallets ?? 0)));
+        let second = 0;
+        if (secondWarehouse?._id) {
+          const per = r?.perWarehouse || {};
+          const wid = String(secondWarehouse._id);
+          second = Math.max(0, Math.floor(Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0)));
+        }
+        totalsByGroup.set(g, primary + onWater + second + onProcess);
+      }
+    }
+
+    for (const g of groups) {
+      const req = Math.max(0, Math.floor(Number((manualOrderQtyByGroup as any)?.[g] ?? 0)));
+      if (!req) continue;
+      const avail = Math.max(0, Math.floor(Number(totalsByGroup.get(g) ?? 0)));
+      if (req > avail) return true;
+    }
+    return false;
+  }, [manualMode, manualReservedBreakdown, manualPickerRows, manualOrderGroups, manualOrderQtyByGroup, secondWarehouse]);
+
+  // Enforce PROCESSING and clear estimated shipdate if there is a deficit (UI will show DEFICIT label)
+  useEffect(() => {
+    if (!manualOpen) return;
+    if (manualHasDeficit) {
+      // Prevent infinite update loop while enforcing
+      if (!deficitEnforcedRef.current) {
+        if (manualStatus !== 'processing') setManualStatus('processing');
+        if (manualEstFulfillment) setManualEstFulfillment('');
+        deficitEnforcedRef.current = true;
+      }
+    } else {
+      // Reset guard when deficits are cleared
+      deficitEnforcedRef.current = false;
+    }
+  }, [manualOpen, manualHasDeficit, manualStatus, manualEstFulfillment]);
 
   const manualReservedRows = useMemo(() => {
     const rows = Array.isArray(manualReservedBreakdown) ? manualReservedBreakdown : [];
@@ -1349,10 +1448,26 @@ export default function Orders() {
       const nextReserved = Array.isArray((data as any)?.reservedBreakdown) ? (data as any).reservedBreakdown : [];
       setManualAllocations(nextAllocs);
       setManualReservedBreakdown(nextReserved);
+      setManualRecalcTick((t) => t + 1);
       setManualEditRow((prev) => {
         if (!prev) return prev;
         return { ...(prev as any), allocations: nextAllocs } as any;
       });
+      // Also sync server-driven status and estFulfillmentDate to the modal and main list
+      try {
+        const nextStatus = normalizeStatus((data as any)?.status || '') as any;
+        const nextShip = String((data as any)?.estFulfillmentDate || '').slice(0, 10);
+        if (nextStatus) setManualStatus(nextStatus as any);
+        setManualEstFulfillment(nextShip || '');
+        setOrdersRows((prev) => {
+          const rows = Array.isArray(prev) ? prev : [];
+          return rows.map((r) => {
+            const rRawId = String((r as any)?.rawId || '').trim();
+            if (rRawId && rRawId === id) return { ...(r as any), status: nextStatus || (r as any).status, estFulfillmentDate: nextShip || (r as any).estFulfillmentDate } as any;
+            return r;
+          });
+        });
+      } catch {}
       return { allocations: nextAllocs, reserved: nextReserved };
     } catch {
       // keep existing allocations if fetch fails
@@ -1559,36 +1674,41 @@ export default function Orders() {
       const whList = Array.isArray(warehousesSnapshot) ? warehousesSnapshot : warehouses;
       const whNameById = new Map((whList || []).map((w) => [String(w._id), String(w.name)]));
 
-      const mappedUnfulfilled: OrdersRow[] = unfulfilled.map((o: any) => ({
-        id: `manual:${String(o?._id || o?.orderNumber || Math.random())}`,
-        rawId: String(o?._id || ''),
-        orderNumber: String(o?.orderNumber || ''),
-        type: 'manual',
-        status: normalizeStatus(o?.status || 'processing') || 'processing',
-        warehouseId: normalizeId(o?.warehouseId),
-        warehouseName: whNameById.get(normalizeId(o?.warehouseId)) || '',
-        createdAt: normalizeDateValue(o?.createdAt),
-        updatedAt: normalizeDateValue(o?.updatedAt),
-        dateCreated: normalizeDateValue(o?.createdAtOrder || o?.createdAt),
-        refDate: String(o?.createdAtOrder || o?.createdAt || ''),
-        lineCount: Array.isArray(o?.lines) ? o.lines.length : 0,
-        totalQty: Array.isArray(o?.lines) ? o.lines.reduce((s: number, l: any) => s + (Number(l?.qty) || 0), 0) : 0,
-        email: String(o?.customerEmail || ''),
-        lines: Array.isArray(o?.lines) ? o.lines : [],
-        allocations: Array.isArray(o?.allocations) ? o.allocations : [],
-        customerName: String(o?.customerName || ''),
-        customerPhone: String(o?.customerPhone || ''),
-        shippingAddress: String(o?.shippingAddress || ''),
-        createdAtOrder: normalizeDateValue(o?.createdAtOrder),
-        originalPrice: o?.originalPrice,
-        shippingPercent: o?.shippingPercent,
-        discountPercent: o?.discountPercent,
-        finalPrice: o?.finalPrice,
-        estFulfillmentDate: normalizeDateValue(o?.estFulfillmentDate),
-        estDeliveredDate: normalizeDateValue(o?.estDeliveredDate),
-        notes: String(o?.notes || ''),
-        source: 'manual',
-      }));
+      const mappedUnfulfilled: OrdersRow[] = unfulfilled.map((o: any) => {
+        const estShip = normalizeDateValue(o?.estFulfillmentDate);
+        const st = normalizeStatus(o?.status || 'processing') as any;
+        const safeStatus = st === 'ready_to_ship' && !String(estShip || '').trim() ? 'processing' : st;
+        return {
+          id: `manual:${String(o?._id || o?.orderNumber || Math.random())}`,
+          rawId: String(o?._id || ''),
+          orderNumber: String(o?.orderNumber || ''),
+          type: 'manual',
+          status: safeStatus,
+          warehouseId: normalizeId(o?.warehouseId),
+          warehouseName: whNameById.get(normalizeId(o?.warehouseId)) || '',
+          createdAt: normalizeDateValue(o?.createdAt),
+          updatedAt: normalizeDateValue(o?.updatedAt),
+          dateCreated: normalizeDateValue(o?.createdAtOrder || o?.createdAt),
+          refDate: String(o?.createdAtOrder || o?.createdAt || ''),
+          lineCount: Array.isArray(o?.lines) ? o.lines.length : 0,
+          totalQty: Array.isArray(o?.lines) ? o.lines.reduce((s: number, l: any) => s + (Number(l?.qty) || 0), 0) : 0,
+          email: String(o?.customerEmail || ''),
+          lines: Array.isArray(o?.lines) ? o.lines : [],
+          allocations: Array.isArray(o?.allocations) ? o.allocations : [],
+          customerName: String(o?.customerName || ''),
+          customerPhone: String(o?.customerPhone || ''),
+          shippingAddress: String(o?.shippingAddress || ''),
+          createdAtOrder: normalizeDateValue(o?.createdAtOrder),
+          originalPrice: o?.originalPrice,
+          shippingPercent: o?.shippingPercent,
+          discountPercent: o?.discountPercent,
+          finalPrice: o?.finalPrice,
+          estFulfillmentDate: estShip,
+          estDeliveredDate: normalizeDateValue(o?.estDeliveredDate),
+          notes: String(o?.notes || ''),
+          source: 'manual',
+        } as any;
+      });
 
       const mappedFulfilled: OrdersRow[] = fulfilled.map((o: any) => ({
         id: `import:${String(o?._id || o?.orderNumber || Math.random())}`,
@@ -1620,12 +1740,58 @@ export default function Orders() {
         return bd - ad;
       });
       setOrdersRows(merged);
+      ordersRowsRef.current = merged;
     } catch {
       setOrdersRows([]);
+      ordersRowsRef.current = [];
     } finally {
       setOrdersLoading(false);
     }
   }
+
+  const syncSomeOrdersFromServer = useCallback(async (max: number = 15) => {
+    try {
+      const list = Array.isArray(ordersRowsRef.current) ? ordersRowsRef.current : [];
+      // Prioritize rows that appear as DEFICIT in the grid (processing with empty shipdate)
+      const deficitLike = list.filter((r) => String(r.id || '').startsWith('manual:') && normalizeStatus(r.status) === 'processing' && !String(r?.estFulfillmentDate || '').trim());
+      const others = list.filter((r) => String(r.id || '').startsWith('manual:') && !(normalizeStatus(r.status) === 'processing' && !String(r?.estFulfillmentDate || '').trim()));
+      const ordered = [...deficitLike, ...others];
+      const candidates = ordered.slice(0, Math.max(1, Math.min(max, 50)));
+      if (!candidates.length) return;
+      const updates = await Promise.all(
+        candidates.map(async (r) => {
+          const rawId = String((r as any)?.rawId || '').trim();
+          if (!rawId) return null as any;
+          try {
+            const { data } = await api.get(`/orders/unfulfilled/${rawId}`, { params: { _ts: Date.now() } });
+            const nextStatus = String((data as any)?.status || '').trim();
+            const nextShip = String((data as any)?.estFulfillmentDate || '').slice(0, 10);
+            return { rawId, nextStatus, nextShip };
+          } catch {
+            return null as any;
+          }
+        })
+      );
+      const valid = (updates || []).filter(Boolean) as Array<{ rawId: string; nextStatus: string; nextShip: string }>
+      if (!valid.length) return;
+      setOrdersRows((prev) => {
+        const rows = Array.isArray(prev) ? prev : [];
+        const byId = new Map(valid.map((u) => [u.rawId, u]));
+        const next = rows.map((r) => {
+          const rawId = String((r as any)?.rawId || '').trim();
+          const upd = rawId ? byId.get(rawId) : undefined;
+          if (!upd) return r;
+          let ns = normalizeStatus(upd.nextStatus || (r as any).status);
+          const ship = upd.nextShip || (r as any).estFulfillmentDate;
+          // Guard: do not show READY TO SHIP without a shipdate; treat as processing until date exists.
+          if (ns === 'ready_to_ship' && !String(ship || '').trim()) ns = 'processing' as any;
+          return { ...(r as any), status: ns, estFulfillmentDate: ship } as any;
+        });
+        ordersRowsRef.current = next;
+        return next;
+      });
+    } catch {}
+  }, []);
 
   useEffect(() => {
     const handler = async () => {
@@ -1739,6 +1905,83 @@ export default function Orders() {
     };
   }, [ordersLoading]);
 
+  // Listen for cross-page signals that inventory tiers changed (e.g., On-Process updates/transfers)
+  // and refresh the main Orders list without requiring the user to open the order modal.
+  useEffect(() => {
+    let timer: any = null;
+    let trailing: any = null;
+    const handler = async () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(async () => {
+        try {
+          try { await api.post('/orders/unfulfilled/rebalance-processing', {}); } catch {}
+          // allow the server a brief moment to finish any downstream writes
+          try { await new Promise((r) => setTimeout(r, 180)); } catch {}
+          await loadOrders();
+          await syncSomeOrdersFromServer(50);
+          // trailing fetch to avoid race with server rebalance finishing just after first fetch
+          if (trailing) clearTimeout(trailing);
+          trailing = setTimeout(async () => {
+            try { await api.post('/orders/unfulfilled/rebalance-processing', {}); } catch {}
+            try { await new Promise((r) => setTimeout(r, 250)); } catch {}
+            await loadOrders();
+            await syncSomeOrdersFromServer(50);
+          }, 1200);
+        } catch {}
+      }, 400);
+    };
+    window.addEventListener('orders-changed', handler as any);
+    window.addEventListener('shipments-changed', handler as any);
+    return () => {
+      if (timer) clearTimeout(timer);
+      if (trailing) clearTimeout(trailing);
+      window.removeEventListener('orders-changed', handler as any);
+      window.removeEventListener('shipments-changed', handler as any);
+    };
+  }, [ordersLoading, syncSomeOrdersFromServer]);
+
+  // When the order modal is open, also refresh the reserved breakdown immediately
+  // after external change signals so the Deficit column recomputes without
+  // requiring the user to close/reopen the modal.
+  useEffect(() => {
+    if (!manualOpen || manualMode !== 'edit') return;
+    let timer: any = null;
+    let trailing: any = null;
+    const handler = async () => {
+      const rawId = String((manualEditRow as any)?.rawId || '').trim();
+      if (!rawId) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(async () => {
+        try {
+          // Proactively ask the server to rebalance before fetching allocations,
+          // so reservedBreakdown reflects the latest On-Process cancellations/deductions.
+          try { await api.post('/orders/unfulfilled/rebalance-processing', {}); } catch {}
+          const wid = String(manualWarehouseId || '').trim();
+          if (wid) {
+            try { await refreshManualPicker(wid); } catch {}
+            try { await refreshManualAvailable(wid); } catch {}
+          }
+          await refreshManualAllocations(rawId);
+          // Schedule a trailing refresh shortly after to catch any server-side
+          // rebalancing that completes just after the first fetch.
+          if (trailing) clearTimeout(trailing);
+          trailing = setTimeout(async () => {
+            try { await api.post('/orders/unfulfilled/rebalance-processing', {}); } catch {}
+            try { await refreshManualAllocations(rawId); } catch {}
+          }, 900);
+        } catch {}
+      }, 300);
+    };
+    window.addEventListener('orders-changed', handler as any);
+    window.addEventListener('shipments-changed', handler as any);
+    return () => {
+      if (timer) clearTimeout(timer);
+      if (trailing) clearTimeout(trailing);
+      window.removeEventListener('orders-changed', handler as any);
+      window.removeEventListener('shipments-changed', handler as any);
+    };
+  }, [manualOpen, manualMode, (manualEditRow as any)?.rawId, manualWarehouseId, refreshManualPicker, refreshManualAvailable, refreshManualAllocations]);
+
   useEffect(() => {
     const load = async () => {
       try {
@@ -1795,18 +2038,27 @@ export default function Orders() {
       headerName: 'Status',
       width: 140,
       renderCell: (p: any) => {
-        const s = normalizeStatus((p?.row as any)?.status || '');
-        const label = s === 'ready_to_ship' ? 'READY TO SHIP' : (s ? String(s).toUpperCase() : '-');
-        const color: any = s === 'completed'
-          ? 'success'
-          : s === 'canceled'
-            ? 'error'
-            : s === 'processing'
-              ? 'warning'
-              : s === 'ready_to_ship'
-                ? 'info'
-                : 'default';
-        const variant: any = s === 'processing' ? 'outlined' : 'filled';
+        const row = (p?.row as any) || {};
+        const s = normalizeStatus(row?.status || '');
+        // Determine DEFICIT strictly by missing shipdate while processing.
+        // Allocations can be stale and do not reliably mirror reservations in the list view.
+        const estEmpty = !String(row?.estFulfillmentDate || '').trim();
+        const hasDeficitLike = s === 'processing' && estEmpty;
+        const label = hasDeficitLike
+          ? 'DEFICIT'
+          : (s === 'ready_to_ship' ? 'READY TO SHIP' : (s ? String(s).toUpperCase() : '-'));
+        const color: any = hasDeficitLike
+          ? 'error'
+          : s === 'completed'
+            ? 'success'
+            : s === 'canceled'
+              ? 'error'
+              : s === 'processing'
+                ? 'warning'
+                : s === 'ready_to_ship'
+                  ? 'info'
+                  : 'default';
+        const variant: any = (s === 'processing' || hasDeficitLike) ? 'outlined' : 'filled';
         return <Chip size="small" label={label} color={color} variant={variant} />;
       },
     },
@@ -2068,7 +2320,7 @@ export default function Orders() {
     } else if (manualCreatedAt > todayYmd) {
       errs.push('Created Order Date cannot be an advance date');
     }
-    if (!manualEstFulfillment) {
+    if (!manualEstFulfillment && !manualHasDeficit) {
       errs.push('Estimated Shipdate for Customer is required');
     }
     if (manualMode === 'edit' && manualStatus === 'shipped' && !manualEstDelivered) {
@@ -2178,12 +2430,13 @@ export default function Orders() {
             originalPrice: originalPriceRounded,
             shippingPercent: manualShippingPercent ? Number(manualShippingPercent) : undefined,
             discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
-            estFulfillmentDate: manualEstFulfillment || undefined,
+            estFulfillmentDate: manualHasDeficit ? undefined : (manualEstFulfillment || undefined),
             estDeliveredDate: manualEstDelivered || undefined,
             shippingAddress: manualShippingAddress.trim(),
             notes: manualNotes.trim(),
             lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty })),
           });
+          try { window.dispatchEvent(new Event('orders-changed')); } catch {}
         } else {
           // Status changes are handled by a separate endpoint.
           // If shipping from READY TO SHIP, persist line edits first so allocations/inventory deduction use latest quantities.
@@ -2195,12 +2448,13 @@ export default function Orders() {
               originalPrice: originalPriceRounded,
               shippingPercent: manualShippingPercent ? Number(manualShippingPercent) : undefined,
               discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
-              estFulfillmentDate: manualEstFulfillment || undefined,
+              estFulfillmentDate: manualHasDeficit ? undefined : (manualEstFulfillment || undefined),
               estDeliveredDate: manualEstDelivered || undefined,
               shippingAddress: manualShippingAddress.trim(),
               notes: manualNotes.trim(),
               lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty })),
             });
+            try { window.dispatchEvent(new Event('orders-changed')); } catch {}
 
             const recomputedStatus = normalizeStatus(updated?.status || '');
             if (recomputedStatus !== 'ready_to_ship') {
@@ -2225,22 +2479,24 @@ export default function Orders() {
               originalPrice: originalPriceRounded,
               shippingPercent: manualShippingPercent ? Number(manualShippingPercent) : undefined,
               discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
-              estFulfillmentDate: manualEstFulfillment || undefined,
+              estFulfillmentDate: manualHasDeficit ? undefined : (manualEstFulfillment || undefined),
               estDeliveredDate: manualEstDelivered || undefined,
               shippingAddress: manualShippingAddress.trim(),
               notes: manualNotes.trim(),
             });
+            try { window.dispatchEvent(new Event('orders-changed')); } catch {}
           }
           await api.put(`/orders/unfulfilled/${manualEditRow.rawId}/status`, {
             status: manualStatus,
             estDeliveredDate: manualStatus === 'shipped' ? (manualEstDelivered || undefined) : undefined,
           });
+          try { window.dispatchEvent(new Event('orders-changed')); } catch {}
         }
         // Immediately recompute shipdate (client-side) to reflect new allocations/reservations
         try {
           const rawId = String(manualEditRow.rawId || '').trim();
           const wid = String(manualWarehouseId || '').trim();
-          if (!manualShipdateTouched && rawId && wid) {
+          if (!manualShipdateTouched && rawId && wid && !manualHasDeficit) {
             const picker = await refreshManualPicker(wid);
             const { reserved } = await refreshManualAllocations(rawId);
             const next = suggestShipdateForReservedBreakdown({ rows: picker?.rows, reserved });
@@ -2275,7 +2531,7 @@ export default function Orders() {
         originalPrice: originalPriceRounded,
         shippingPercent: manualShippingPercent ? Number(manualShippingPercent) : undefined,
         discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
-        estFulfillmentDate: manualEstFulfillment || undefined,
+        estFulfillmentDate: manualHasDeficit ? undefined : (manualEstFulfillment || undefined),
         estDeliveredDate: manualEstDelivered || undefined,
         shippingAddress: manualShippingAddress.trim(),
         notes: manualNotes.trim(),
@@ -2468,11 +2724,37 @@ export default function Orders() {
                   onChange={(e)=> setManualStatus(e.target.value as any)}
                   disabled={manualIsLocked}
                   sx={{ flex: 1, minWidth: 200 }}
+                  SelectProps={{
+                    renderValue: (value: any) => {
+                      if (manualHasDeficit) return 'DEFICIT';
+                      const v = String(value || '').toLowerCase();
+                      return v === 'ready_to_ship' ? 'READY TO SHIP' : (v ? v.toUpperCase() : '');
+                    }
+                  }}
                 >
+                  <MenuItem value="deficit" disabled>DEFICIT</MenuItem>
                   <MenuItem value="processing" disabled>PROCESSING</MenuItem>
                   <MenuItem value="ready_to_ship" disabled>READY TO SHIP</MenuItem>
-                  <MenuItem value="shipped" disabled={manualPrevStatus !== 'ready_to_ship'}>SHIPPED</MenuItem>
-                  <MenuItem value="completed" disabled={manualPrevStatus !== 'shipped'}>COMPLETED</MenuItem>
+                  <MenuItem
+                    value="shipped"
+                    disabled={
+                      manualHasDeficit ||
+                      manualStatus === 'processing' ||
+                      manualPrevStatus !== 'ready_to_ship'
+                    }
+                  >
+                    SHIPPED
+                  </MenuItem>
+                  <MenuItem
+                    value="completed"
+                    disabled={
+                      manualHasDeficit ||
+                      manualStatus === 'processing' ||
+                      manualPrevStatus !== 'shipped'
+                    }
+                  >
+                    COMPLETED
+                  </MenuItem>
                   <MenuItem value="canceled" disabled={manualPrevStatus === 'completed' || manualPrevStatus === 'canceled'}>CANCELED</MenuItem>
                 </TextField>
                 <Tooltip
@@ -2484,10 +2766,13 @@ export default function Orders() {
                         Order Status - Meaning
                       </Typography>
                       <Typography variant="body2" sx={{ mt: 0.5 }}>
-                        PROCESSING: pallets are not fully available in MPG (Primary WH) yet. Inventory is not deducted.
+                        DEFICIT (auto set): at least one pallet has deficit &gt; 0 for this order. Shipdate is empty. Status is shown as DEFICIT in the list.
                       </Typography>
                       <Typography variant="body2" sx={{ mt: 0.5 }}>
-                        READY TO SHIP: all pallets are available in MPG (Primary WH). Inventory is not deducted yet.
+                        PROCESSING (auto set): pallets are not fully available in MPG (Primary WH) yet. Inventory is not deducted.
+                      </Typography>
+                      <Typography variant="body2" sx={{ mt: 0.5 }}>
+                        READY TO SHIP (auto set): all pallets are available in MPG (Primary WH). Inventory is not deducted yet.
                       </Typography>
                       <Typography variant="body2" sx={{ mt: 0.5 }}>
                         SHIPPED: pallets are shipped and inventory is deducted. "Estimated Arrival Date" is required.
@@ -2529,10 +2814,10 @@ export default function Orders() {
                 label="Estimated Shipdate for Customer"
                 InputLabelProps={{ shrink: true }}
                 size="small"
-                value={manualEstFulfillment}
+                value={manualHasDeficit ? '' : manualEstFulfillment}
                 onChange={()=>{}}
-                error={!manualEstFulfillment}
-                helperText={!manualEstFulfillment ? 'Required' : ''}
+                error={!manualEstFulfillment && !manualHasDeficit}
+                helperText={!manualEstFulfillment ? (manualHasDeficit ? 'Will be computed when fully available' : 'Required') : ''}
                 fullWidth
               />
               <Tooltip
@@ -3057,7 +3342,7 @@ export default function Orders() {
               !String(manualCustomerPhone||'').trim() ||
               !manualCreatedAt ||
               manualCreatedAt > todayYmd ||
-              !manualEstFulfillment ||
+              (!manualEstFulfillment && !manualHasDeficit) ||
               !String(manualShippingAddress||'').trim() ||
               manualIsLocked ||
               (manualOrderGroups.length === 0) ||
