@@ -22,7 +22,7 @@ interface Shipment {
   createdAt: string;
 }
 
-interface ItemGroupRow { name: string; lineItem?: string }
+interface ItemGroupRow { name: string; lineItem?: string; palletName?: string }
 
 export default function Ship() {
   const [isAdmin, setIsAdmin] = useState(false);
@@ -56,6 +56,7 @@ export default function Ship() {
   const toast = useToast();
   const [warehouses, setWarehouses] = useState<any[]>([]);
   const [palletIdByGroup, setPalletIdByGroup] = useState<Record<string, string>>({});
+  const [palletNameByGroup, setPalletNameByGroup] = useState<Record<string, string>>({});
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(10);
   const [rowCount, setRowCount] = useState(0);
@@ -117,15 +118,19 @@ export default function Ship() {
       try {
         const { data } = await api.get<ItemGroupRow[]>('/item-groups');
         const groups = Array.isArray(data) ? data : [];
-        const map: Record<string, string> = {};
+        const idMap: Record<string, string> = {};
+        const nameMap: Record<string, string> = {};
         for (const g of groups) {
           const name = String((g as any)?.name || '').trim();
           if (!name) continue;
-          map[name] = String((g as any)?.lineItem || '').trim();
+          idMap[name] = String((g as any)?.lineItem || '').trim();
+          nameMap[name] = String((g as any)?.palletName || '').trim();
         }
-        setPalletIdByGroup(map);
+        setPalletIdByGroup(idMap);
+        setPalletNameByGroup(nameMap);
       } catch {
         setPalletIdByGroup({});
+        setPalletNameByGroup({});
       }
     })();
   }, []);
@@ -202,6 +207,7 @@ export default function Ship() {
         setViewPalletRows(
           palletSegs.map((p, idx) => ({
             id: `${p.groupName}-${idx}`,
+            palletName: String(palletNameByGroup[String(p.groupName || '').trim()] || ''),
             palletId: String(palletIdByGroup[String(p.groupName || '').trim()] || ''),
             ...p,
           }))
@@ -227,6 +233,7 @@ export default function Ship() {
         setViewPalletRows(
           Array.from(grouped.entries()).map(([groupName, pallets], idx) => ({
             id: `${groupName}-${idx}`,
+            palletName: String(palletNameByGroup[String(groupName || '').trim()] || ''),
             palletId: String(palletIdByGroup[String(groupName || '').trim()] || ''),
             groupName,
             pallets,
@@ -536,8 +543,9 @@ export default function Ship() {
                 <DataGrid
                   rows={viewPalletRows}
                   columns={([
-                    { field: 'palletId', headerName: 'Pallet ID', width: 160 },
+                    { field: 'palletName', headerName: 'Pallet Name', flex: 1, minWidth: 200 },
                     { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 240 },
+                    { field: 'palletId', headerName: 'Pallet ID', width: 160 },
                     { field: 'pallets', headerName: 'Qty', width: 120, type: 'number', align: 'right', headerAlign: 'right' },
                   ]) as GridColDef[]}
                   disableRowSelectionOnClick

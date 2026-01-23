@@ -13,13 +13,14 @@ type SummaryRow = {
 };
 type SummaryResponse = { warehouses: SummaryWarehouse[]; rows: SummaryRow[] };
 
-type ItemGroupRow = { name: string; lineItem?: string };
+type ItemGroupRow = { name: string; lineItem?: string; palletName?: string };
 
 export default function Pallets() {
   const [loading, setLoading] = useState(false);
   const [warehouses, setWarehouses] = useState<SummaryWarehouse[]>([]);
   const [rows, setRows] = useState<SummaryRow[]>([]);
   const [palletIdByGroup, setPalletIdByGroup] = useState<Record<string, string>>({});
+  const [palletNameByGroup, setPalletNameByGroup] = useState<Record<string, string>>({});
   const [q, setQ] = useState('');
 
   const [onWaterOpen, setOnWaterOpen] = useState(false);
@@ -44,17 +45,21 @@ export default function Pallets() {
       setRows(Array.isArray(data?.rows) ? data.rows : []);
 
       const groups = Array.isArray(groupsResp?.data) ? groupsResp.data : [];
-      const map: Record<string, string> = {};
+      const idMap: Record<string, string> = {};
+      const nameMap: Record<string, string> = {};
       for (const g of groups) {
         const name = String((g as any)?.name || '').trim();
         if (!name) continue;
-        map[name] = String((g as any)?.lineItem || '').trim();
+        idMap[name] = String((g as any)?.lineItem || '').trim();
+        nameMap[name] = String((g as any)?.palletName || '').trim();
       }
-      setPalletIdByGroup(map);
+      setPalletIdByGroup(idMap);
+      setPalletNameByGroup(nameMap);
     } catch {
       setWarehouses([]);
       setRows([]);
       setPalletIdByGroup({});
+      setPalletNameByGroup({});
     } finally {
       setLoading(false);
     }
@@ -104,9 +109,10 @@ export default function Pallets() {
       const groupName = String(r.itemGroup || '').trim();
       const name = groupName.toLowerCase();
       const pid = String(palletIdByGroup[groupName] || '').trim().toLowerCase();
-      return (name && name.includes(t)) || (pid && pid.includes(t));
+      const pn = String(palletNameByGroup[groupName] || '').trim().toLowerCase();
+      return (name && name.includes(t)) || (pid && pid.includes(t)) || (pn && pn.includes(t));
     });
-  }, [rows, q, palletIdByGroup]);
+  }, [rows, q, palletIdByGroup, palletNameByGroup]);
 
   const columns = useMemo<GridColDef[]>(() => {
     const primaryWh = warehouses.find((w) => Boolean((w as any)?.isPrimary)) || null;
@@ -140,8 +146,9 @@ export default function Pallets() {
         type: 'number',
       }));
     return [
-      { field: 'palletId', headerName: 'Pallet ID', width: 160 },
+      { field: 'palletName', headerName: 'Pallet Name', flex: 1, minWidth: 200 },
       { field: 'itemGroup', headerName: 'Pallet Description', flex: 1, minWidth: 220 },
+      { field: 'palletId', headerName: 'Pallet ID', width: 160 },
       ...primaryCols,
       {
         field: 'onWaterQty',
@@ -209,6 +216,7 @@ export default function Pallets() {
       return {
         id: r.itemGroup,
         palletId: String(palletIdByGroup[groupName] || ''),
+        palletName: String(palletNameByGroup[groupName] || ''),
         itemGroup: r.itemGroup,
         warehouses: wh,
         onProcessQty: Number(r.onProcessQty || 0),
@@ -217,15 +225,16 @@ export default function Pallets() {
         ...flat,
       };
     })
-  ), [filteredRows, warehouses, palletIdByGroup]);
+  ), [filteredRows, warehouses, palletIdByGroup, palletNameByGroup]);
 
   const exportExcel = () => {
     const primaryWh = warehouses.find((w) => Boolean((w as any)?.isPrimary)) || null;
     const secondWh = warehouses.find((w) => !Boolean((w as any)?.isPrimary)) || null;
     const otherWh = warehouses.filter((w) => String(w?._id) !== String(primaryWh?._id || '') && String(w?._id) !== String(secondWh?._id || ''));
     const header = [
-      'Pallet ID',
+      'Pallet Name',
       'Pallet Description',
+      'Pallet ID',
       ...(primaryWh ? [`${primaryWh.name}`] : []),
       'On-Water',
       ...(secondWh ? [`${secondWh.name}`] : []),
@@ -234,8 +243,9 @@ export default function Pallets() {
       'Total Qty',
     ];
     const aoa = gridRows.map((r:any) => [
-      String(r.palletId || ''),
+      String(r.palletName || ''),
       r.itemGroup,
+      String(r.palletId || ''),
       ...(primaryWh ? [Number(r.warehouses?.[String(primaryWh._id)] || 0)] : []),
       Number(r.onWaterQty || 0),
       ...(secondWh ? [Number(r.warehouses?.[String(secondWh._id)] || 0)] : []),
@@ -257,7 +267,7 @@ export default function Pallets() {
       <Typography variant="h4" gutterBottom>Pallets Summary</Typography>
       <Paper sx={{ p:2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems="center" justifyContent="space-between" sx={{ mb: 2 }}>
-          <TextField size="small" label="Search Pallet ID or Description" value={q} onChange={(e)=> setQ(e.target.value)} sx={{ minWidth: 260, flex: 1 }} />
+          <TextField size="small" label="Search Pallet Name / ID / Description" value={q} onChange={(e)=> setQ(e.target.value)} sx={{ minWidth: 260, flex: 1 }} />
           <Stack direction="row" spacing={1}>
             <Button variant="outlined" onClick={load} disabled={loading}>Refresh</Button>
             <Button variant="contained" onClick={exportExcel} disabled={!gridRows.length}>Export List</Button>

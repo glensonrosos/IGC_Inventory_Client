@@ -49,6 +49,11 @@ export default function ItemRegistry() {
   const [renameGroupPrevName, setRenameGroupPrevName] = useState('');
   const [renameGroupValue, setRenameGroupValue] = useState('');
 
+  const [renamePalletNameOpen, setRenamePalletNameOpen] = useState(false);
+  const [renamePalletNameGroupId, setRenamePalletNameGroupId] = useState('');
+  const [renamePalletNamePrev, setRenamePalletNamePrev] = useState('');
+  const [renamePalletNameValue, setRenamePalletNameValue] = useState('');
+
   const [groupSelection, setGroupSelection] = useState<GridRowSelectionModel>({ type: 'include', ids: new Set() } as any);
 
   // Group form
@@ -122,6 +127,13 @@ export default function ItemRegistry() {
     setRenameGroupOpen(true);
   };
 
+  const openRenamePalletName = (row: any) => {
+    setRenamePalletNameGroupId(String(row?.id || ''));
+    setRenamePalletNamePrev(String(row?.palletName || ''));
+    setRenamePalletNameValue(String(row?.palletName || ''));
+    setRenamePalletNameOpen(true);
+  };
+
   const saveRenameLineItem = async () => {
     if (!renameLineItemGroupId) return;
     try {
@@ -185,12 +197,14 @@ export default function ItemRegistry() {
     const onRenameLineItem = () => { openRenameLineItem(row); handleClose(); };
     const onRenameGroup = () => { openRenameGroup(row); handleClose(); };
     const onToggle = async () => { await toggleGroupActive(row.id, !row.active); handleClose(); };
+    const onRenamePalletName = () => { openRenamePalletName(row); handleClose(); };
     const onDelete = async () => { await deleteGroup(row.id, row.name); handleClose(); };
     return (
       <>
         <IconButton size="small" onClick={handleOpen} aria-label="Actions"><MoreVertIcon fontSize="small" /></IconButton>
         <Menu anchorEl={anchorEl} open={open} onClose={handleClose} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }} transformOrigin={{ vertical: 'top', horizontal: 'right' }}>
           <MenuItem onClick={onManage} disabled={!row.active}>Manage Items</MenuItem>
+          {isAdmin && <MenuItem onClick={onRenamePalletName}>Rename Pallet Name</MenuItem>}
           {isAdmin && <MenuItem onClick={onRenameGroup}>Rename Pallet Description</MenuItem>}
           {isAdmin && <MenuItem onClick={onRenameLineItem}>Rename Pallet ID</MenuItem>}
           {isAdmin && <MenuItem onClick={onToggle}>{row.active ? 'Deactivate' : 'Activate'}</MenuItem>}
@@ -220,8 +234,9 @@ export default function ItemRegistry() {
 
   const exportGroupsExcel = () => {
     // Export only active groups and enabled items, sorted
-    const header = ['Pallet Description','Pallet ID','Item Code','Item Description','Color','Pack Size'];
+    const header = ['Pallet Name','Pallet Description','Pallet ID','Item Code','Item Description','Color','Pack Size'];
     const lineItemByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).lineItem || '']));
+    const palletNameByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).palletName || '']));
     const activeSet = new Set(groups.filter(g => (g as any).active !== false).map(g => g.name));
     const sizeOrder = (d: string) => {
       const m = (d || '').match(/\b(XXL|XL|L|M|S)\b/i);
@@ -244,7 +259,7 @@ export default function ItemRegistry() {
         if (sd !== 0) return sd;
         return 0;
       })
-      .map(it => [it.itemGroup||'', lineItemByGroup.get(it.itemGroup||'') || '', it.itemCode, it.description||'', it.color||'', (it as any).packSize ?? 0]);
+      .map(it => [palletNameByGroup.get(it.itemGroup||'') || '', it.itemGroup||'', lineItemByGroup.get(it.itemGroup||'') || '', it.itemCode, it.description||'', it.color||'', (it as any).packSize ?? 0]);
     const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Groups + Items');
@@ -268,8 +283,9 @@ export default function ItemRegistry() {
 
 
   const exportItemsExcel = () => {
-    const header = ['Pallet Description','Pallet ID','Item Code','Item Description','Color','Pack Size'];
+    const header = ['Pallet Name','Pallet Description','Pallet ID','Item Code','Item Description','Color','Pack Size'];
     const lineItemByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).lineItem || '']));
+    const palletNameByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).palletName || '']));
     const activeSet = new Set(groups.filter(g => (g as any).active !== false).map(g => g.name));
     const sizeOrder = (d: string) => {
       const m = (d || '').match(/\b(XXL|XL|L|M|S)\b/i);
@@ -290,7 +306,7 @@ export default function ItemRegistry() {
         if (sd !== 0) return sd;
         return (a.color || '').localeCompare(b.color || '');
       })
-      .map(it => [it.itemGroup||'', lineItemByGroup.get(it.itemGroup||'') || '', it.itemCode, it.description||'', it.color||'', (it as any).packSize ?? 0]);
+      .map(it => [palletNameByGroup.get(it.itemGroup||'') || '', it.itemGroup||'', lineItemByGroup.get(it.itemGroup||'') || '', it.itemCode, it.description||'', it.color||'', (it as any).packSize ?? 0]);
     const data = [header, ...rows];
     const ws = XLSX.utils.aoa_to_sheet(data);
     const wb = XLSX.utils.book_new();
@@ -299,11 +315,11 @@ export default function ItemRegistry() {
   };
 
   const downloadTemplate = () => {
-    const header = ['Pallet Description','Pallet ID','Item Code','Item Description','Color','Pack Size'];
+    const header = ['Pallet Name','Pallet Description','Pallet ID','Item Code','Item Description','Color','Pack Size'];
     const example = [
       // Examples: last duplicate row per (Pallet Group + Item Code) overwrites values; identical duplicates are skipped
-      ['Inverted Planters Smooth (OW)','Tall + Short Rounded Bottom Planters Pallet - Volcanic Ash Brown/Cement','PC2014AFBR-OW','Smooth Finish Inverted Planter S - Oyster White - Fiber Finish','Oyster White',8],
-      ['Inverted Planters Mixed Smooth and VA (OW / MB / C / DAB)','32" Beaded Commercial Planter - Cement','MPC2032D-DAB','Volcanic Ash Texture Inverted Planter S - Dark Antique Bronze','Dark Antique Bronze',2]
+      ['','Inverted Planters Smooth (OW)','Tall + Short Rounded Bottom Planters Pallet - Volcanic Ash Brown/Cement','PC2014AFBR-OW','Smooth Finish Inverted Planter S - Oyster White - Fiber Finish','Oyster White',8],
+      ['','Inverted Planters Mixed Smooth and VA (OW / MB / C / DAB)','32" Beaded Commercial Planter - Cement','MPC2032D-DAB','Volcanic Ash Texture Inverted Planter S - Dark Antique Bronze','Dark Antique Bronze',2]
     ];
     const ws = XLSX.utils.aoa_to_sheet([header, ...example]);
     const wb = XLSX.utils.book_new();
@@ -385,10 +401,10 @@ export default function ItemRegistry() {
 
   const downloadGroupTemplate = () => {
     // Provide a template that includes items per pallet group, with Line Item column
-    const header = ['Pallet Description','Pallet ID','Item Code','Item Description','Color','Pack Size'];
+    const header = ['Pallet Name','Pallet Description','Pallet ID','Item Code','Item Description','Color','Pack Size'];
     const example = [
-      ['Inverted Planters Smooth (OW)','Tall + Short Rounded Bottom Planters Pallet - Volcanic Ash Brown/Cement','PC2014AFBR-OW','Smooth Finish Inverted Planter S - Oyster White - Fiber Finish','Oyster White',8],
-      ['Inverted Planters Mixed Smooth and VA (OW / MB / C / DAB)','32" Beaded Commercial Planter - Cement','PC2014AFBR-OW','Smooth Finish Inverted Planter S - Oyster White - Fiber Finish','Oyster White',2]
+      ['', 'Inverted Planters Smooth (OW)','Tall + Short Rounded Bottom Planters Pallet - Volcanic Ash Brown/Cement','PC2014AFBR-OW','Smooth Finish Inverted Planter S - Oyster White - Fiber Finish','Oyster White',8],
+      ['', 'Inverted Planters Mixed Smooth and VA (OW / MB / C / DAB)','32" Beaded Commercial Planter - Cement','PC2014AFBR-OW','Smooth Finish Inverted Planter S - Oyster White - Fiber Finish','Oyster White',2]
     ];
     const ws = XLSX.utils.aoa_to_sheet([header, ...example]);
     const wb = XLSX.utils.book_new();
@@ -532,6 +548,38 @@ export default function ItemRegistry() {
         </DialogActions>
       </Dialog>
 
+      <Dialog open={renamePalletNameOpen} onClose={()=> setRenamePalletNameOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Rename Pallet Name</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 1 }}>Current: <b>{renamePalletNamePrev || '-'}</b></Typography>
+          <TextField fullWidth label="Pallet Name" value={renamePalletNameValue} onChange={(e)=> setRenamePalletNameValue(e.target.value)} autoFocus />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={()=> setRenamePalletNameOpen(false)}>Cancel</Button>
+          <Button variant="contained" onClick={async()=>{
+            if (!renamePalletNameGroupId) return;
+            try {
+              const next = String(renamePalletNameValue || '').trim();
+              if (!next) { toast.error('Pallet Name is required'); return; }
+              const exists = (Array.isArray(groups) ? groups : []).some((g: any) => {
+                const sameId = String(g?._id || '') === String(renamePalletNameGroupId);
+                const pn = String((g as any)?.palletName || '').trim().toLowerCase();
+                return !sameId && pn && pn === next.toLowerCase();
+              });
+              if (exists) { toast.error('Pallet Name already exists'); return; }
+              await api.put(`/item-groups/${encodeURIComponent(renamePalletNameGroupId)}`, { palletName: next });
+              setGroups(prev => prev.map((g: any) => String(g._id) === String(renamePalletNameGroupId) ? { ...g, palletName: next } : g));
+              toast.success('Pallet Name updated');
+              setRenamePalletNameOpen(false);
+              load();
+            } catch (e:any) {
+              const msg = e?.response?.data?.message || e?.message || 'Failed to update Pallet Name';
+              toast.error(msg);
+            }
+          }}>Save</Button>
+        </DialogActions>
+      </Dialog>
+
       <Paper sx={{ p:2, mb:2 }}>
         <Typography variant="h6" gutterBottom>Pallet Descriptions</Typography>
         <Grid container spacing={2} alignItems="center" sx={{ mb: 2 }}>
@@ -567,13 +615,21 @@ export default function ItemRegistry() {
         <div style={{ height: 420, width: '100%' }}>
           <DataGrid
             rows={groups
-              .filter(g=>g.name.toLowerCase().includes(groupsQ.trim().toLowerCase()))
+              .filter(g=>{
+                const q = groupsQ.trim().toLowerCase();
+                if (!q) return true;
+                const name = String(g.name || '').toLowerCase();
+                const lineItem = String((g as any).lineItem || '').toLowerCase();
+                const palletName = String((g as any).palletName || '').toLowerCase();
+                return name.includes(q) || lineItem.includes(q) || palletName.includes(q);
+              })
               .map(g=>{
-                return ({ id: g._id, name: g.name, lineItem: (g as any).lineItem || '', active: (g as any).active !== false, itemCount: items.filter(it => (it.itemGroup||'') === g.name).length });
+                return ({ id: g._id, name: g.name, palletName: (g as any).palletName || '', lineItem: (g as any).lineItem || '', active: (g as any).active !== false, itemCount: items.filter(it => (it.itemGroup||'') === g.name).length });
               })}
             columns={([
-              { field: 'lineItem', headerName: 'Pallet ID', flex: 1, minWidth: 220 },
+              { field: 'palletName', headerName: 'Pallet Name', flex: 1, minWidth: 200 },
               { field: 'name', headerName: 'Pallet Description', flex: 1, minWidth: 220 },
+              { field: 'lineItem', headerName: 'Pallet ID', flex: 1, minWidth: 220 },
               { field: 'active', headerName: 'Active', width: 80, renderCell: (p: GridRenderCellParams) => (
                 <Chip size="small" label={p.value ? 'Yes' : 'No'} color={p.value ? 'success' : 'default'} />
               ) },

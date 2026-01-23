@@ -132,9 +132,28 @@ export default function NavBar() {
   return (
     <AppBar position="static">
       <Toolbar sx={{ display: 'flex', justifyContent: 'space-between' }}>
-        <Typography variant="h6">IGC Inventory</Typography>
+        <Typography
+          variant="h6"
+          component={Link}
+          to="/pallets"
+          onClick={(e) => {
+            if (loc.pathname === '/pallets') {
+              e.preventDefault();
+              window.location.reload();
+            }
+          }}
+          sx={{ color: '#fff', textDecoration: 'none', cursor: 'pointer' }}
+        >
+          IGC Inventory
+        </Typography>
         <Stack direction="row" spacing={1} alignItems="center">
-          {/* Reordered links */}
+          {/* Orders and Early Buy first */}
+          <Badge color="error" badgeContent={(ordersDueToday || 0) + (ordersDeliveredDue || 0)} max={99} overlap="circular">
+            <Button component={Link} to="/orders" color={loc.pathname === '/orders' ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: loc.pathname === '/orders' ? 1 : 0.85 }}>Orders</Button>
+          </Badge>
+          <LinkButton to="/early-buy" label="Early Buy" />
+          <Typography component="span" sx={{ color: 'rgba(255,255,255,0.7)', mx: 2, userSelect: 'none' }}>|</Typography>
+          {/* Remaining links */}
           <LinkButton to="/pallets" label="PALLETS SUMMARY" />
           <LinkButton to="/inventory" label="Inventory" />
           <Badge color="error" badgeContent={onProcessDue} max={99} overlap="circular">
@@ -144,9 +163,6 @@ export default function NavBar() {
           {/* Ship link with notifications badge */}
           <Badge color="error" badgeContent={due} max={99} overlap="circular">
             <Button component={Link} to="/ship" color={loc.pathname === '/ship' ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: loc.pathname === '/ship' ? 1 : 0.85 }}>Ship</Button>
-          </Badge>
-          <Badge color="error" badgeContent={(ordersDueToday || 0) + (ordersDeliveredDue || 0)} max={99} overlap="circular">
-            <Button component={Link} to="/orders" color={loc.pathname === '/orders' ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: loc.pathname === '/orders' ? 1 : 0.85 }}>Orders</Button>
           </Badge>
           <Typography component="span" sx={{ color: 'rgba(255,255,255,0.7)', mx: 2, userSelect: 'none' }}>|</Typography>
           <LinkButton to="/warehouses" label="Warehouses" />

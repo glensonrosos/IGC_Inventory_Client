@@ -6,6 +6,7 @@ import Pallets from './pages/Pallets';
 import Orders from './pages/Orders';
 import ItemDetail from './pages/ItemDetail';
 import NavBar from './components/NavBar';
+import EarlyBuy from './pages/EarlyBuy';
 import ItemRegistry from './pages/ItemRegistry';
 import Warehouses from './pages/Warehouses';
 import Ship from './pages/Ship';
@@ -35,6 +36,7 @@ export default function App() {
       <Route path="/items/:itemCode" element={<RequireAuth><ItemDetail /></RequireAuth>} />
       <Route path="/pallets" element={<RequireAuth><Pallets /></RequireAuth>} />
       <Route path="/orders" element={<RequireAuth><Orders /></RequireAuth>} />
+      <Route path="/early-buy" element={<RequireAuth><EarlyBuy /></RequireAuth>} />
       <Route path="/warehouses" element={<RequireAuth><Warehouses /></RequireAuth>} />
       <Route path="/on-process" element={<RequireAuth><OnProcess /></RequireAuth>} />
       <Route path="/ship" element={<RequireAuth><Ship /></RequireAuth>} />

@@ -10,7 +10,7 @@ import { useToast } from '../components/ToastProvider';
 
 interface OnProcPallet { _id?: string; poNumber: string; groupName: string; totalPallet: number; finishedPallet: number; transferredPallet?: number; status?: string; notes?: string; locked?: boolean; remainingPallet?: number; createdAt?: string }
 interface OnProcBatch { _id: string; reference: string; poNumber: string; status: 'in-progress'|'partial-done'|'completed'; estFinishDate?: string; notes?: string; itemCount?: number; createdAt?: string }
-interface ItemGroupRow { name: string; lineItem?: string }
+interface ItemGroupRow { name: string; lineItem?: string; palletName?: string }
 
 export default function OnProcess() {
   const [isAdmin, setIsAdmin] = useState(false);
@@ -47,6 +47,7 @@ export default function OnProcess() {
   }, []);
   const [items, setItems] = useState<OnProcPallet[]>([]);
   const [palletIdByGroup, setPalletIdByGroup] = useState<Record<string, string>>({});
+  const [palletNameByGroup, setPalletNameByGroup] = useState<Record<string, string>>({});
   const [q, setQ] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
@@ -120,15 +121,19 @@ export default function OnProcess() {
       try {
         const { data } = await api.get<ItemGroupRow[]>('/item-groups');
         const groups = Array.isArray(data) ? data : [];
-        const map: Record<string, string> = {};
+        const idMap: Record<string, string> = {};
+        const nameMap: Record<string, string> = {};
         for (const g of groups) {
           const name = String((g as any)?.name || '').trim();
           if (!name) continue;
-          map[name] = String((g as any)?.lineItem || '').trim();
+          idMap[name] = String((g as any)?.lineItem || '').trim();
+          nameMap[name] = String((g as any)?.palletName || '').trim();
         }
-        setPalletIdByGroup(map);
+        setPalletIdByGroup(idMap);
+        setPalletNameByGroup(nameMap);
       } catch {
         setPalletIdByGroup({});
+        setPalletNameByGroup({});
       }
     })();
   }, []);
@@ -136,8 +141,9 @@ export default function OnProcess() {
   // Stable columns for DataGrid to prevent width reset on re-render
   const itemColumns = useMemo<GridColDef[]>(() => ([
     { field: 'poNumber', headerName: 'PO #', width: 120 },
-    { field: 'palletId', headerName: 'Pallet ID', width: 140 },
+    { field: 'palletName', headerName: 'Pallet Name', width: 180 },
     { field: 'groupName', headerName: 'Pallet Description', flex: 2, minWidth: 220 },
+    { field: 'palletId', headerName: 'Pallet ID', width: 140 },
     { field: 'totalPallet', headerName: 'Total Pallet', type: 'number', width: 140, editable: true, cellClassName: 'cell-editable-total' },
     { field: 'finishedPallet', headerName: 'Finished', type: 'number', width: 120, editable: true, cellClassName: 'cell-editable' },
     { field: 'transferredPallet', headerName: 'Transferred', type: 'number', width: 130 },
@@ -158,12 +164,14 @@ export default function OnProcess() {
         if (!t) return true;
         const gn = String(r.groupName || '').toLowerCase();
         const pid = String(palletIdByGroup[String(r.groupName || '').trim()] || '').toLowerCase();
-        return gn.includes(t) || pid.includes(t);
+        const pn = String(palletNameByGroup[String(r.groupName || '').trim()] || '').toLowerCase();
+        return gn.includes(t) || pid.includes(t) || pn.includes(t);
       })
       .map(r => ({
         id: String((r as any)._id || `${selectedBatch?._id}:${r.groupName}`),
         poNumber: r.poNumber,
         palletId: String(palletIdByGroup[String(r.groupName || '').trim()] || ''),
+        palletName: String(palletNameByGroup[String(r.groupName || '').trim()] || ''),
         groupName: r.groupName,
         totalPallet: r.totalPallet,
         finishedPallet: r.finishedPallet ?? 0,
@@ -172,7 +180,7 @@ export default function OnProcess() {
         status: r.status || 'in_progress',
         locked: Boolean((r as any).locked) && (Math.max(0, (r.totalPallet || 0) - (((r as any).transferredPallet || 0) + (r.finishedPallet || 0)))) === 0,
       }))
-  ), [batchItems, itemsSearch, selectedBatch, palletIdByGroup]);
+  ), [batchItems, itemsSearch, selectedBatch, palletIdByGroup, palletNameByGroup]);
 
   const load = async () => {
     setLoading(true);
@@ -332,6 +340,11 @@ export default function OnProcess() {
       await load();
       await loadBatches();
       if (selectedBatch) await loadBatchItems(selectedBatch._id);
+      // After import, proactively rebalance orders and notify Orders page to refresh
+      try { await api.post('/orders/unfulfilled/rebalance-processing', {}); } catch {}
+      try { window.dispatchEvent(new Event('orders-changed')); } catch {}
+      try { await new Promise((r)=> setTimeout(r, 400)); } catch {}
+      try { window.dispatchEvent(new Event('orders-changed')); } catch {}
     } catch (e: any) {
       const msg = e?.response?.data?.message || e?.message || 'Import failed';
       toast.error(msg);
@@ -577,6 +590,24 @@ export default function OnProcess() {
                     setDirty(true);
                     return next;
                   });
+                  // Fire-and-forget: persist this single row to server and trigger order rebalance
+                  (async()=>{
+                    try {
+                      const bid = String(selectedBatch?._id || '');
+                      if (!bid) return;
+                      const payload = [
+                        {
+                          groupName: String(fieldVals.groupName || newRow.groupName || ''),
+                          totalPallet: Number(fieldVals.totalPallet),
+                          finishedPallet: Number(fieldVals.finishedPallet),
+                          status: String(fieldVals.status || ''),
+                        },
+                      ];
+                      await api.patch(`/on-process/batches/${bid}/pallets`, { pallets: payload });
+                      try { await api.post('/orders/unfulfilled/rebalance-processing', { groupNames: [String(fieldVals.groupName || newRow.groupName || '')] }); } catch {}
+                      try { window.dispatchEvent(new Event('orders-changed')); } catch {}
+                    } catch {}
+                  })();
                   return newRow;
                 }}
                 pageSizeOptions={[10,20,50,100]}
@@ -634,7 +665,12 @@ export default function OnProcess() {
                   // Then update batch meta and all pallets
                   await api.patch(`/on-process/batches/${selectedBatch._id}`, { status: batchStatus, estFinishDate: batchEst || null, notes: batchNotes });
                   await api.patch(`/on-process/batches/${selectedBatch._id}/pallets`, { pallets: batchItems.map(b => ({ groupName: b.groupName, totalPallet: b.totalPallet, finishedPallet: b.finishedPallet, status: b.status })) });
+                  // Proactively ask server to rebalance processing orders after changes
+                  try { await api.post('/orders/unfulfilled/rebalance-processing', {}); } catch {}
                   // Notify Orders page to refresh
+                  try { window.dispatchEvent(new Event('orders-changed')); } catch {}
+                  // Trailing event after a short delay to catch any late writes
+                  try { await new Promise((r)=> setTimeout(r, 400)); } catch {}
                   try { window.dispatchEvent(new Event('orders-changed')); } catch {}
                   toast.success('Changes saved');
                   await loadBatches();
@@ -655,27 +691,36 @@ export default function OnProcess() {
             </Stack>
           </DialogActions>
 
-          <Dialog open={addOpen} onClose={()=> setAddOpen(false)} maxWidth="xs" fullWidth>
+          <Dialog open={addOpen} onClose={()=> setAddOpen(false)} maxWidth="sm" fullWidth>
               <DialogTitle>Add Pallet Description</DialogTitle>
               <DialogContent sx={{ pt: 2 }}>
-                <Autocomplete
-                  options={addGroupSelectable}
-                  getOptionLabel={(o)=> o?.name || ''}
-                  value={addGroupSelected}
-                  onChange={(_, v)=> { setAddGroupSelected(v); setAddGroupName(v?.name || ''); }}
-                  filterOptions={(options, state) => {
-                    const q = String(state?.inputValue || '').trim().toLowerCase();
-                    if (!q) return options;
-                    return (Array.isArray(options) ? options : []).filter((o: any) => {
-                      const name = String(o?.name || '').trim().toLowerCase();
-                      const pid = String(palletIdByGroup[String(o?.name || '').trim()] || '').trim().toLowerCase();
-                      return (name && name.includes(q)) || (pid && pid.includes(q));
-                    });
-                  }}
-                  renderInput={(params)=> (
-                    <TextField {...params} label="Search Pallet Description" placeholder="Type to search" sx={{ mb: 2 }} />
-                  )}
-                />
+                <Stack direction="row" spacing={2} alignItems="flex-start" sx={{ mb: 2 }}>
+                  <TextField
+                    label="Pallet ID"
+                    value={String(palletIdByGroup[String(addGroupSelected?.name || '').trim()] || '')}
+                    disabled
+                    sx={{ maxWidth: 150 }}
+                  />
+                  <Autocomplete
+                    options={addGroupSelectable}
+                    sx={{ flex: 1 }}
+                    getOptionLabel={(o)=> o?.name || ''}
+                    value={addGroupSelected}
+                    onChange={(_, v)=> { setAddGroupSelected(v); setAddGroupName(v?.name || ''); }}
+                    filterOptions={(options, state) => {
+                      const q = String(state?.inputValue || '').trim().toLowerCase();
+                      if (!q) return options;
+                      return (Array.isArray(options) ? options : []).filter((o: any) => {
+                        const name = String(o?.name || '').trim().toLowerCase();
+                        const pid = String(palletIdByGroup[String(o?.name || '').trim()] || '').trim().toLowerCase();
+                        return (name && name.includes(q)) || (pid && pid.includes(q));
+                      });
+                    }}
+                    renderInput={(params)=> (
+                      <TextField {...params} fullWidth label="Search Pallet Description" placeholder="Type to search" />
+                    )}
+                  />
+                </Stack>
                 <TextField fullWidth type="number" label="Total Pallet" value={addTotal} onChange={(e)=> setAddTotal(e.target.value)} />
               </DialogContent>
               <DialogActions>

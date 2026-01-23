@@ -49,6 +49,7 @@ export default function Inventory() {
   const [groups, setGroups] = useState<GroupOverview[]>([]);
   const [search, setSearch] = useState('');
   const [groupLineItemByName, setGroupLineItemByName] = useState<Record<string, string>>({});
+  const [groupPalletNameByName, setGroupPalletNameByName] = useState<Record<string, string>>({});
   const [importOpen, setImportOpen] = useState(false);
   const [lossOpen, setLossOpen] = useState(false);
   const [lossWarehouse, setLossWarehouse] = useState('');
@@ -110,25 +111,29 @@ export default function Inventory() {
       const { data } = await api.get<GroupOverview[]>(`/pallet-inventory/groups?${params.toString()}`);
       let base = Array.isArray(data) ? data : [];
 
-      // If user is searching, also consider Pallet ID (lineItem) matches using local map
+      // If user is searching, also consider Pallet ID (lineItem) and Pallet Name matches using local map
       if (q) {
         const qLower = q.toLowerCase();
-        const matchedGroupNames = Object.entries(groupLineItemByName)
+        const matchedById = Object.entries(groupLineItemByName)
           .filter(([nameLower, lineItem]) => String(lineItem || '').toLowerCase().includes(qLower))
           .map(([nameLower]) => nameLower);
+        const matchedByPalletName = Object.entries(groupPalletNameByName)
+          .filter(([nameLower, pName]) => String(pName || '').toLowerCase().includes(qLower))
+          .map(([nameLower]) => nameLower);
+        const matchedGroupNames = Array.from(new Set([...matchedById, ...matchedByPalletName]));
 
-        // If Pallet ID search yields group names that aren't in the server-filtered result, fetch all and filter locally
+        // If Pallet ID or Pallet Name search yields group names that aren't in the server-filtered result, fetch all and filter locally
         const missingFromBase = new Set(
           matchedGroupNames.filter((nameLower) => !base.some((g:any) => String(g?.groupName || '').trim().toLowerCase() === nameLower))
         );
         if (missingFromBase.size > 0) {
           const { data: allData } = await api.get<GroupOverview[]>(`/pallet-inventory/groups`);
           const all = Array.isArray(allData) ? allData : [];
-          const byPalletId = all.filter((g:any) => matchedGroupNames.includes(String(g?.groupName || '').trim().toLowerCase()));
+          const byLocalMatch = all.filter((g:any) => matchedGroupNames.includes(String(g?.groupName || '').trim().toLowerCase()));
           // Merge unique by groupName
           const seen = new Set<string>();
           const merged: GroupOverview[] = [] as any;
-          for (const r of [...base, ...byPalletId]) {
+          for (const r of [...base, ...byLocalMatch]) {
             const key = String((r as any)?.groupName || '').trim().toLowerCase();
             if (!key || seen.has(key)) continue;
             seen.add(key);
@@ -149,22 +154,27 @@ export default function Inventory() {
   const loadItemGroups = async () => {
     try {
       const { data } = await api.get<any[]>('/item-groups');
-      const map: Record<string, string> = {};
+      const idMap: Record<string, string> = {};
+      const nameMap: Record<string, string> = {};
       for (const g of (Array.isArray(data) ? data : [])) {
         const name = String(g?.name || '').trim();
         if (!name) continue;
         const lineItem = String(g?.lineItem || '').trim();
-        map[name.toLowerCase()] = lineItem;
+        const palletName = String(g?.palletName || '').trim();
+        idMap[name.toLowerCase()] = lineItem;
+        nameMap[name.toLowerCase()] = palletName;
       }
-      setGroupLineItemByName(map);
+      setGroupLineItemByName(idMap);
+      setGroupPalletNameByName(nameMap);
     } catch {
       setGroupLineItemByName({});
+      setGroupPalletNameByName({});
     }
   };
 
   useEffect(() => { loadWarehouses(); }, []);
   useEffect(() => { loadItemGroups(); }, []);
-  useEffect(() => { loadGroups(); }, [search, groupLineItemByName]);
+  useEffect(() => { loadGroups(); }, [search, groupLineItemByName, groupPalletNameByName]);
 
   useEffect(() => {
     if (!lossOpen) return;
@@ -179,8 +189,9 @@ export default function Inventory() {
 
   const columns: GridColDef[] = useMemo(() => {
     const cols: GridColDef[] = [
-      { field: 'lineItem', headerName: 'Pallet ID', flex: 1, minWidth: 180 },
+      { field: 'palletName', headerName: 'Pallet Name', flex: 1, minWidth: 180 },
       { field: 'groupName', headerName: 'Pallet Description', flex: 2, minWidth: 240 },
+      { field: 'lineItem', headerName: 'Pallet ID', flex: 1, minWidth: 180 },
       { field: 'totalPallets', headerName: 'Total Pallets', type: 'number', align: 'right', headerAlign: 'right', width: 140 },
     ];
     for (const w of warehouses) {
@@ -207,6 +218,7 @@ export default function Inventory() {
       const row: any = {
         id: g.groupName,
         lineItem: groupLineItemByName[String(g.groupName || '').toLowerCase()] || '',
+        palletName: groupPalletNameByName[String(g.groupName || '').toLowerCase()] || '',
         groupName: g.groupName,
         totalPallets: g.totalPallets || 0
       };
@@ -216,7 +228,18 @@ export default function Inventory() {
       }
       return row;
     });
-  }, [groups, warehouses, groupLineItemByName]);
+  }, [groups, warehouses, groupLineItemByName, groupPalletNameByName]);
+
+  // After importing existing inventory, refresh list and trigger order rebalance
+  const handleImported = async () => {
+    try {
+      await loadGroups();
+      try { await api.post('/orders/unfulfilled/rebalance-processing', {}); } catch {}
+      try { window.dispatchEvent(new Event('orders-changed')); } catch {}
+      try { await new Promise((r)=> setTimeout(r, 400)); } catch {}
+      try { window.dispatchEvent(new Event('orders-changed')); } catch {}
+    } catch {}
+  };
 
   const onView = async (groupName: string) => {
     setSelectedGroup(groupName);
@@ -307,7 +330,7 @@ export default function Inventory() {
       <Paper sx={{ p:2, mb:2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems="center" justifyContent="space-between">
           <TextField
-            label="Search Pallet Description / Item / Color"
+            label="Search Pallet Name / Description / Item / Color"
             placeholder="Type to search..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -334,7 +357,7 @@ export default function Inventory() {
           density="compact"
         />
       </Paper>
-      <PalletImportModal open={importOpen} onClose={()=>setImportOpen(false)} onImported={loadGroups} />
+      <PalletImportModal open={importOpen} onClose={()=>setImportOpen(false)} onImported={handleImported} />
 
       <Dialog open={lossOpen} onClose={()=>setLossOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle sx={{ color: 'error.main' }}>Record Loss (Inventory Adjustment)</DialogTitle>
