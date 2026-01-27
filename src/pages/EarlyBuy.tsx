@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Container, Typography, Paper, Stack, TextField, Button, Dialog, DialogTitle, DialogContent, DialogActions, MenuItem, Box, IconButton, Chip } from '@mui/material';
+import { Container, Typography, Paper, Stack, TextField, Button, Dialog, DialogTitle, DialogContent, DialogActions, MenuItem, Box, IconButton, Chip, LinearProgress } from '@mui/material';
 import { DataGrid, GridColDef, GridToolbar } from '@mui/x-data-grid';
 import DeleteIcon from '@mui/icons-material/Delete';
 import DownloadIcon from '@mui/icons-material/Download';
@@ -18,6 +18,8 @@ type EarlyOrder = {
   createdAt: string; // YYYY-MM-DD
   estFulfillment: string; // YYYY-MM-DD
   estDelivered: string; // YYYY-MM-DD
+  updatedAt?: string;
+  updatedBy?: string;
   customerEmail: string;
   customerName: string;
   customerPhone: string;
@@ -54,11 +56,44 @@ export default function EarlyBuy() {
   const [estFulfillment, setEstFulfillment] = useState('');
   const [estDelivered, setEstDelivered] = useState('');
   const [shippingAddress, setShippingAddress] = useState('');
+  const [lastUpdatedAt, setLastUpdatedAt] = useState('');
+  const [lastUpdatedBy, setLastUpdatedBy] = useState('');
 
   const isEditable = useMemo(() => {
     // Editable when creating (no editingOrder) OR when status is processing/ready_to_ship
     return !editingOrder || status === 'processing' || status === 'ready_to_ship';
   }, [editingOrder, status]);
+
+  const isArrivalDateEditable = useMemo(() => {
+    // Allow editing arrival date even when status is shipped
+    return !editingOrder || status === 'processing' || status === 'ready_to_ship' || status === 'shipped';
+  }, [editingOrder, status]);
+
+  const isStatusEditable = useMemo(() => {
+    // Once an existing order is COMPLETED, it becomes view-only
+    return !editingOrder || (status !== 'completed' && status !== 'canceled');
+  }, [editingOrder, status]);
+
+  const handleStatusChange = useCallback((nextRaw: any) => {
+    const next = String(nextRaw || '').trim() as EarlyOrder['status'];
+    if (next === 'completed') {
+      if (!String(estDelivered || '').trim()) {
+        toast?.error?.('Estimated Arrival Date is required before setting status to COMPLETED');
+        return;
+      }
+      const ok = window.confirm(
+        'Are you sure you want to change the status to COMPLETED?\n\nThis cannot be undone and you can no longer edit the order.'
+      );
+      if (!ok) return;
+    }
+    if (next === 'canceled') {
+      const ok = window.confirm(
+        'Are you sure you want to change the status to CANCELED?\n\nThis cannot be undone and you can no longer edit the order.'
+      );
+      if (!ok) return;
+    }
+    setStatus(next);
+  }, [estDelivered, toast]);
   const [originalPrice, setOriginalPrice] = useState('');
   const [shippingPercent, setShippingPercent] = useState('');
   const [discountPercent, setDiscountPercent] = useState('');
@@ -103,6 +138,28 @@ export default function EarlyBuy() {
 
   // MUI DataGrid compatibility shim (v5 vs v6 selection APIs)
   const DG: any = DataGrid as any;
+
+  const [palletItemsOpen, setPalletItemsOpen] = useState(false);
+  const [palletItemsLoading, setPalletItemsLoading] = useState(false);
+  const [palletItemsGroupName, setPalletItemsGroupName] = useState('');
+  const [palletItemsRows, setPalletItemsRows] = useState<any[]>([]);
+
+  const openPalletItems = useCallback(async ({ groupName }: { groupName: string }) => {
+    const g = String(groupName || '').trim();
+    if (!g) return;
+    setPalletItemsOpen(true);
+    setPalletItemsGroupName(g);
+    setPalletItemsRows([]);
+    setPalletItemsLoading(true);
+    try {
+      const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
+      setPalletItemsRows(Array.isArray((data as any)?.items) ? (data as any).items : []);
+    } catch {
+      setPalletItemsRows([]);
+    } finally {
+      setPalletItemsLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     if (!pickerOpen) return;
@@ -433,6 +490,8 @@ export default function EarlyBuy() {
         createdAt: String(d?.createdAtYmd || d?.createdAt || '').slice(0,10),
         estFulfillment: String(d?.estFulfillment || ''),
         estDelivered: String(d?.estDelivered || ''),
+        updatedAt: String(d?.updatedAt || ''),
+        updatedBy: String(d?.updatedBy || ''),
         customerEmail: String(d?.customerEmail || ''),
         customerName: String(d?.customerName || ''),
         customerPhone: String(d?.customerPhone || ''),
@@ -553,12 +612,16 @@ export default function EarlyBuy() {
         ({ data } = await api.post('/early-buy', payload));
         toast.success(`Early Buy order ${String(data?.id || '')} saved`);
       }
+      const doc = data as any;
+      setLastUpdatedAt(String(doc?.updatedAt || ''));
+      setLastUpdatedBy(String(doc?.updatedBy || ''));
       await refreshOrders();
     } catch (e: any) {
       const msg = e?.response?.data?.message || 'Failed to save Early Buy order';
       toast.error(msg);
       return;
     }
+
     setOpen(false);
     setEditingOrder(null);
     // reset form
@@ -566,6 +629,8 @@ export default function EarlyBuy() {
     setCustomerEmail(''); setCustomerName(''); setCustomerPhone(''); setShippingAddress('');
     setCreatedAt(new Date().toISOString().slice(0,10)); setEstFulfillment(''); setEstDelivered('');
     setOriginalPrice(''); setShippingPercent(''); setDiscountPercent(''); setNotes('');
+    setLastUpdatedAt('');
+    setLastUpdatedBy('');
     setLines([]);
   };
 
@@ -599,12 +664,31 @@ export default function EarlyBuy() {
     XLSX.writeFile(wb, `${row.id}.xlsx`);
   };
 
+  const resetEarlyBuyForm = useCallback(() => {
+    setEditingOrder(null);
+    setStatus('processing');
+    setCustomerEmail('');
+    setCustomerName('');
+    setCustomerPhone('');
+    setShippingAddress('');
+    setCreatedAt(new Date().toISOString().slice(0,10));
+    setEstFulfillment('');
+    setEstDelivered('');
+    setOriginalPrice('');
+    setShippingPercent('');
+    setDiscountPercent('');
+    setNotes('');
+    setLastUpdatedAt('');
+    setLastUpdatedBy('');
+    setLines([]);
+  }, []);
+
   return (
     <Container maxWidth="lg" sx={{ mt: 2, mb: 4 }}>
       <Typography variant="h5" sx={{ mb: 2, fontWeight: 700 }}>EARLY BUY</Typography>
       <Paper sx={{ p: 2, mb: 2 }}>
         <Stack direction="row" spacing={1} alignItems="center">
-          <Button variant="contained" onClick={() => setOpen(true)}>Add Order</Button>
+          <Button variant="contained" onClick={() => { resetEarlyBuyForm(); setOpen(true); }}>Add Order</Button>
         </Stack>
       </Paper>
 
@@ -646,8 +730,8 @@ export default function EarlyBuy() {
                 alignItems: 'center',
               },
             }}
-            onRowDoubleClick={(p) => {
-              const row = orders.find(o => o.id === p.row.id);
+            onRowDoubleClick={(p: any) => {
+              const row = p?.row as any;
               if (!row) return;
               // populate form for view-only
               setEditingOrder(row);
@@ -659,25 +743,27 @@ export default function EarlyBuy() {
               setCreatedAt(row.createdAt);
               setEstFulfillment(row.estFulfillment);
               setEstDelivered(row.estDelivered);
-              setOriginalPrice(String(row.originalPrice||''));
-              setShippingPercent(String(row.shippingPercent||''));
-              setDiscountPercent(String(row.discountPercent||''));
-              setNotes(String(row.notes||''));
-              setLines(Array.isArray(row.lines) ? row.lines.map(l => ({ ...l })) : []);
+              setOriginalPrice(row.originalPrice || '');
+              setShippingPercent(row.shippingPercent || '');
+              setDiscountPercent(row.discountPercent || '');
+              setNotes(row.notes || '');
+              setLastUpdatedAt(String(row.updatedAt || ''));
+              setLastUpdatedBy(String(row.updatedBy || ''));
+              setLines(Array.isArray(row.lines) ? row.lines : []);
               setOpen(true);
             }}
           />
         </div>
       </Paper>
 
-      <Dialog open={open} onClose={() => { setOpen(false); setEditingOrder(null); }} fullWidth maxWidth="lg">
-        <DialogTitle>{editingOrder ? `View Early Buy Order ${editingOrder.id}` : 'New Early Buy Order'}</DialogTitle>
+      <Dialog open={open} onClose={() => { setOpen(false); resetEarlyBuyForm(); }} fullWidth maxWidth="lg">
+        <DialogTitle>{editingOrder ? `Edit Order - ${editingOrder.id}` : 'New Early Buy Order'}</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
             <Stack direction={{ xs:'column', sm:'row' }} spacing={2}>
               <TextField size="small" label="Warehouse" value="MPG" disabled fullWidth />
               {/* Status is always editable */}
-              <TextField size="small" select label="Status" value={status} onChange={(e)=> setStatus(e.target.value as any)} fullWidth>
+              <TextField size="small" select label="Status" value={status} onChange={(e)=> handleStatusChange(e.target.value)} fullWidth disabled={!isStatusEditable}>
                 {STATUS_OPTIONS.map(op => (<MenuItem key={op.value} value={op.value}>{op.label}</MenuItem>))}
               </TextField>
             </Stack>
@@ -702,7 +788,7 @@ export default function EarlyBuy() {
             <Stack direction={{ xs:'column', sm:'row' }} spacing={2}>
               <TextField size="small" required type="date" label="Created Order Date" value={createdAt} onChange={(e)=> setCreatedAt(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isEditable} />
               <TextField size="small" required type="date" label="Estimated ShipDate for Customer" value={estFulfillment} onChange={(e)=> setEstFulfillment(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isEditable} />
-              <TextField size="small" type="date" label="Estimated Arrival Date" value={estDelivered} onChange={(e)=> setEstDelivered(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isEditable} />
+              <TextField size="small" type="date" label="Estimated Arrival Date" value={estDelivered} onChange={(e)=> setEstDelivered(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isArrivalDateEditable} />
             </Stack>
             <Stack direction={{ xs:'column', md:'row' }} spacing={2}>
               <TextField size="small" label="Original Price" value={originalPrice} onChange={(e)=> setOriginalPrice(e.target.value)} fullWidth disabled={!isEditable} />
@@ -711,6 +797,19 @@ export default function EarlyBuy() {
               <TextField size="small" label="Final Price" value={computedFinalPrice} fullWidth disabled />
             </Stack>
             <TextField size="small" label="Remarks/Notes" value={notes} onChange={(e)=> setNotes(e.target.value)} fullWidth multiline minRows={3} disabled={!isEditable} />
+            <Typography variant="caption" color="error" sx={{ mt: -1 }}>
+              {(() => {
+                const at = String(lastUpdatedAt || '').trim();
+                const by = String(lastUpdatedBy || '').trim();
+                if (!at && !by) return '';
+                let labelAt = at;
+                try {
+                  labelAt = at ? new Date(at).toLocaleString() : '';
+                } catch {}
+                const who = by ? ` (by ${by})` : '';
+                return `Last Updated: ${labelAt || '-'}${who}`;
+              })()}
+            </Typography>
 
             <Stack direction="row" spacing={1} alignItems="center">
               <Button variant="outlined" onClick={()=> setPickerOpen(true)} disabled={!isEditable}>Add to List</Button>
@@ -724,6 +823,10 @@ export default function EarlyBuy() {
                   if (!isEditable) return <span>{Number(lines[Math.max(0, Number(p?.id)-1)]?.qty || 0)}</span>;
                   return (c as any).renderCell(p);
                 } } : c))}
+                onRowDoubleClick={(p: any) => {
+                  const g = String(p?.row?.groupName || '').trim();
+                  if (g) openPalletItems({ groupName: g });
+                }}
                 disableRowSelectionOnClick
                 density="compact"
               />
@@ -731,7 +834,7 @@ export default function EarlyBuy() {
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={()=> setOpen(false)}>Cancel</Button>
+          <Button onClick={()=> { setOpen(false); resetEarlyBuyForm(); }}>Cancel</Button>
           <Button variant="contained" onClick={saveNewOrder}>Save</Button>
         </DialogActions>
       </Dialog>
@@ -761,6 +864,10 @@ export default function EarlyBuy() {
                 { field: 'lineItem', headerName: 'Pallet ID', width: 160, sortable: true },
               ]) as GridColDef[]}
               checkboxSelection
+              onRowDoubleClick={(p: any) => {
+                const g = String(p?.row?.groupName || '').trim();
+                if (g) openPalletItems({ groupName: g });
+              }}
               onRowSelectionModelChange={(sel: any, _details?: any) => {
                 let arr: string[] = [];
                 if (Array.isArray(sel)) {
@@ -789,6 +896,32 @@ export default function EarlyBuy() {
         <DialogActions>
           <Button onClick={()=> setPickerOpen(false)}>Cancel</Button>
           <Button variant="contained" onClick={addSelectedToLines} disabled={selectedGroups.length === 0}>Add</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={palletItemsOpen} onClose={()=> setPalletItemsOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle>{`Pallet Items - ${palletItemsGroupName || ''}`}</DialogTitle>
+        <DialogContent sx={{ pt: 2 }}>
+          {palletItemsLoading ? <LinearProgress sx={{ mb: 2 }} /> : null}
+          <div style={{ height: 420, width: '100%' }}>
+            <DataGrid
+              rows={(Array.isArray(palletItemsRows) ? palletItemsRows : []).map((r: any, idx: number) => ({ id: String(r?.itemCode || idx), ...r }))}
+              columns={([
+                { field: 'itemCode', headerName: 'Item Code', width: 160 },
+                { field: 'description', headerName: 'Description', flex: 1, minWidth: 220 },
+                { field: 'color', headerName: 'Color', width: 140 },
+                { field: 'packSize', headerName: 'Pack Size', width: 110, type: 'number', align: 'right', headerAlign: 'right' },
+              ]) as GridColDef[]}
+              disableRowSelectionOnClick
+              density="compact"
+              pagination
+              pageSizeOptions={[5, 10, 20, 50]}
+              initialState={{ pagination: { paginationModel: { page: 0, pageSize: 10 } } }}
+            />
+          </div>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={()=> setPalletItemsOpen(false)}>Close</Button>
         </DialogActions>
       </Dialog>
     </Container>

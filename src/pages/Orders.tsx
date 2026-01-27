@@ -109,6 +109,23 @@ export default function Orders() {
     } catch {}
   }, []);
 
+  const openOrderableGroupItems = useCallback(async ({ groupName }: { groupName: string }) => {
+    const g = String(groupName || '').trim();
+    if (!g) return;
+    setOrderableGroupOpen(true);
+    setOrderableGroupName(g);
+    setOrderableGroupItems([]);
+    setOrderableGroupLoading(true);
+    try {
+      const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
+      setOrderableGroupItems(Array.isArray((data as any)?.items) ? (data as any).items : []);
+    } catch {
+      setOrderableGroupItems([]);
+    } finally {
+      setOrderableGroupLoading(false);
+    }
+  }, []);
+
   const [manualPickerLoading, setManualPickerLoading] = useState(false);
   const [manualPickerQ, setManualPickerQ] = useState('');
   const [manualPickerEddFrom, setManualPickerEddFrom] = useState('');
@@ -162,6 +179,11 @@ export default function Orders() {
   const [viewOrderableLoading, setViewOrderableLoading] = useState(false);
   const [viewOrderableExporting, setViewOrderableExporting] = useState(false);
   const [palletNameByGroup, setPalletNameByGroup] = useState<Record<string, string>>({});
+
+  const [orderableGroupOpen, setOrderableGroupOpen] = useState(false);
+  const [orderableGroupLoading, setOrderableGroupLoading] = useState(false);
+  const [orderableGroupName, setOrderableGroupName] = useState('');
+  const [orderableGroupItems, setOrderableGroupItems] = useState<any[]>([]);
 
   const [reportOpen, setReportOpen] = useState(false);
   const [reportFrom, setReportFrom] = useState(() => {
@@ -3532,6 +3554,10 @@ export default function Orders() {
             <DataGrid
               rows={manualOrderRows}
               columns={manualOrderColumns as any}
+              onRowDoubleClick={(p: any) => {
+                const g = String(p?.row?.groupName || '').trim();
+                if (g) openOrderableGroupItems({ groupName: g });
+              }}
               sx={{
                 '& .availableQty--cell': {
                   backgroundColor: '#fff8b3',
@@ -3596,6 +3622,11 @@ export default function Orders() {
                   columns={manualPickerColumns}
                   loading={manualPickerLoading}
                   columnHeaderHeight={90}
+                  rowHeight={55}
+                  onRowDoubleClick={(p: any) => {
+                    const g = String(p?.row?.groupName || '').trim();
+                    if (g) openOrderableGroupItems({ groupName: g });
+                  }}
                   getRowClassName={(params: any) => {
                     const row = (params as any)?.row || {};
                     const primary = Number(row?.selectedWarehouseAvailable ?? 0);
@@ -3944,7 +3975,7 @@ export default function Orders() {
 
                 return cols;
               })()}
-              rowHeight={44}
+              rowHeight={55}
               columnHeaderHeight={90}
               loading={viewOrderableLoading}
               getRowClassName={(params: any) => {
@@ -3995,11 +4026,41 @@ export default function Orders() {
               pagination
               pageSizeOptions={[10, 20, 50, 100]}
               initialState={{ pagination: { paginationModel: { page: 0, pageSize: 20 } } }}
+              onRowDoubleClick={(p: any) => {
+                const g = String(p?.row?.groupName || '').trim();
+                if (g) openOrderableGroupItems({ groupName: g });
+              }}
             />
           </div>
         </DialogContent>
         <DialogActions>
           <Button onClick={()=> setViewOrderableOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={orderableGroupOpen} onClose={()=> setOrderableGroupOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle>{`Pallet Items - ${orderableGroupName || ''}`}</DialogTitle>
+        <DialogContent sx={{ pt: 2 }}>
+          {orderableGroupLoading ? <LinearProgress sx={{ mb: 2 }} /> : null}
+          <div style={{ height: 420, width: '100%' }}>
+            <DataGrid
+              rows={(Array.isArray(orderableGroupItems) ? orderableGroupItems : []).map((r: any, idx: number) => ({ id: String(r?.itemCode || idx), ...r }))}
+              columns={([ 
+                { field: 'itemCode', headerName: 'Item Code', width: 160 },
+                { field: 'description', headerName: 'Description', flex: 1, minWidth: 220 },
+                { field: 'color', headerName: 'Color', width: 140 },
+                { field: 'packSize', headerName: 'Pack Size', width: 110, type: 'number', align: 'right', headerAlign: 'right' },
+              ]) as GridColDef[]}
+              disableRowSelectionOnClick
+              density="compact"
+              pagination
+              pageSizeOptions={[5, 10, 20, 50]}
+              initialState={{ pagination: { paginationModel: { page: 0, pageSize: 10 } } }}
+            />
+          </div>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={()=> setOrderableGroupOpen(false)}>Close</Button>
         </DialogActions>
       </Dialog>
 
