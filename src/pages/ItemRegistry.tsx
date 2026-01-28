@@ -6,7 +6,7 @@ import api from '../api';
 import { useToast } from '../components/ToastProvider';
 import * as XLSX from 'xlsx';
 
-interface ItemGroup { _id: string; name: string }
+interface ItemGroup { _id: string; name: string; palletName?: string; lineItem?: string; palletDescription?: string; active?: boolean; price?: number }
 interface Item { _id: string; itemCode: string; itemGroup: string; description: string; color: string; packSize?: number; enabled?: boolean }
 
 export default function ItemRegistry() {
@@ -57,7 +57,9 @@ export default function ItemRegistry() {
   const [groupSelection, setGroupSelection] = useState<GridRowSelectionModel>({ type: 'include', ids: new Set() } as any);
 
   // Group form
-  const [groupName, setGroupName] = useState('');
+  const [groupPalletName, setGroupPalletName] = useState('');
+  const [groupPalletId, setGroupPalletId] = useState('');
+  const [groupPalletDesc, setGroupPalletDesc] = useState('');
   const [groupFile, setGroupFile] = useState<File | null>(null);
   const [groupImportResult, setGroupImportResult] = useState<any>(null);
   const groupFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -71,6 +73,7 @@ export default function ItemRegistry() {
   const [enabled, setEnabled] = useState<boolean>(true);
   // Group detail (per-pallet-group items management)
   const [selectedGroup, setSelectedGroup] = useState<string>('');
+  const [groupModalOpen, setGroupModalOpen] = useState(false);
   const [gItemCode, setGItemCode] = useState('');
   const [gDesc, setGDesc] = useState('');
   const [gColor, setGColor] = useState('');
@@ -111,6 +114,16 @@ export default function ItemRegistry() {
     setGDesc('');
     setGColor('');
     setGPack(0);
+    setGroupModalOpen(true);
+  };
+
+  const closeGroupModal = () => {
+    setGroupModalOpen(false);
+    setSelectedGroup('');
+    setGItemCode('');
+    setGDesc('');
+    setGColor('');
+    setGPack(0);
   };
 
   const openRenameLineItem = (row: any) => {
@@ -122,8 +135,8 @@ export default function ItemRegistry() {
 
   const openRenameGroup = (row: any) => {
     setRenameGroupId(String(row?.id || ''));
-    setRenameGroupPrevName(String(row?.name || ''));
-    setRenameGroupValue(String(row?.name || ''));
+    setRenameGroupPrevName(String(row?.palletDescription || ''));
+    setRenameGroupValue(String(row?.palletDescription || ''));
     setRenameGroupOpen(true);
   };
 
@@ -138,17 +151,6 @@ export default function ItemRegistry() {
     if (!renameLineItemGroupId) return;
     try {
       const next = String(renameLineItemValue || '').trim();
-      if (next) {
-        const exists = (Array.isArray(groups) ? groups : []).some((g: any) => {
-          const sameId = String(g?._id || '') === String(renameLineItemGroupId);
-          const li = String((g as any)?.lineItem || '').trim().toLowerCase();
-          return !sameId && li && li === next.toLowerCase();
-        });
-        if (exists) {
-          toast.error('Pallet ID already exists');
-          return;
-        }
-      }
       await api.put(`/item-groups/${encodeURIComponent(renameLineItemGroupId)}`, { lineItem: renameLineItemValue });
       setGroups(prev => prev.map((g: any) => String(g._id) === String(renameLineItemGroupId) ? { ...g, lineItem: renameLineItemValue } : g));
       toast.success('Pallet ID updated');
@@ -168,19 +170,9 @@ export default function ItemRegistry() {
       return;
     }
     try {
-      const exists = (Array.isArray(groups) ? groups : []).some((g: any) => {
-        const sameId = String(g?._id || '') === String(renameGroupId);
-        const nm = String((g as any)?.name || '').trim().toLowerCase();
-        return !sameId && nm === next.toLowerCase();
-      });
-      if (exists) {
-        toast.error('Pallet Description already exists');
-        return;
-      }
       await api.put(`/item-groups/${encodeURIComponent(renameGroupId)}/rename`, { name: next });
       toast.success('Pallet Description renamed');
       setRenameGroupOpen(false);
-      setSelectedGroup((prev) => (String(prev || '') === String(renameGroupPrevName || '') ? next : prev));
       load();
     } catch (e: any) {
       const msg = e?.response?.data?.message || e?.message || 'Failed to rename Pallet Description';
@@ -237,6 +229,7 @@ export default function ItemRegistry() {
     const header = ['Pallet Name','Pallet Description','Pallet ID','Item Code','Item Description','Color','Pack Size'];
     const lineItemByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).lineItem || '']));
     const palletNameByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).palletName || '']));
+    const palletDescByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).palletDescription || '']));
     const activeSet = new Set(groups.filter(g => (g as any).active !== false).map(g => g.name));
     const sizeOrder = (d: string) => {
       const m = (d || '').match(/\b(XXL|XL|L|M|S)\b/i);
@@ -259,7 +252,7 @@ export default function ItemRegistry() {
         if (sd !== 0) return sd;
         return 0;
       })
-      .map(it => [palletNameByGroup.get(it.itemGroup||'') || '', it.itemGroup||'', lineItemByGroup.get(it.itemGroup||'') || '', it.itemCode, it.description||'', it.color||'', (it as any).packSize ?? 0]);
+      .map(it => [palletNameByGroup.get(it.itemGroup||'') || '', palletDescByGroup.get(it.itemGroup||'') || '', lineItemByGroup.get(it.itemGroup||'') || '', it.itemCode, it.description||'', it.color||'', (it as any).packSize ?? 0]);
     const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Groups + Items');
@@ -286,6 +279,7 @@ export default function ItemRegistry() {
     const header = ['Pallet Name','Pallet Description','Pallet ID','Item Code','Item Description','Color','Pack Size'];
     const lineItemByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).lineItem || '']));
     const palletNameByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).palletName || '']));
+    const palletDescByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).palletDescription || '']));
     const activeSet = new Set(groups.filter(g => (g as any).active !== false).map(g => g.name));
     const sizeOrder = (d: string) => {
       const m = (d || '').match(/\b(XXL|XL|L|M|S)\b/i);
@@ -306,7 +300,7 @@ export default function ItemRegistry() {
         if (sd !== 0) return sd;
         return (a.color || '').localeCompare(b.color || '');
       })
-      .map(it => [palletNameByGroup.get(it.itemGroup||'') || '', it.itemGroup||'', lineItemByGroup.get(it.itemGroup||'') || '', it.itemCode, it.description||'', it.color||'', (it as any).packSize ?? 0]);
+      .map(it => [palletNameByGroup.get(it.itemGroup||'') || '', palletDescByGroup.get(it.itemGroup||'') || '', lineItemByGroup.get(it.itemGroup||'') || '', it.itemCode, it.description||'', it.color||'', (it as any).packSize ?? 0]);
     const data = [header, ...rows];
     const ws = XLSX.utils.aoa_to_sheet(data);
     const wb = XLSX.utils.book_new();
@@ -387,11 +381,21 @@ export default function ItemRegistry() {
   };
 
   const createGroup = async () => {
-    if (!groupName.trim()) { toast.error('Pallet Description is required'); return; }
+    if (!groupPalletName.trim()) { toast.error('Pallet Name is required'); return; }
+    if (!groupPalletId.trim()) { toast.error('Pallet ID is required'); return; }
+    if (!groupPalletDesc.trim()) { toast.error('Pallet Description is required'); return; }
+    const pnLower = groupPalletName.trim().toLowerCase();
+    const liLower = groupPalletId.trim().toLowerCase();
+    const existsPN = (Array.isArray(groups) ? groups : []).some((g: any) => String((g as any)?.palletName || '').trim().toLowerCase() === pnLower);
+    if (existsPN) { toast.error('Pallet Name already exists'); return; }
+    const existsLI = (Array.isArray(groups) ? groups : []).some((g: any) => String((g as any)?.lineItem || '').trim().toLowerCase() === liLower);
+    if (existsLI) { toast.error('Pallet ID already exists'); return; }
     try {
-      await api.post('/item-groups', { name: groupName.trim() });
-      toast.success('Pallet Description added');
-      setGroupName('');
+      await api.post('/item-groups', { palletName: groupPalletName.trim(), lineItem: groupPalletId.trim(), palletDescription: groupPalletDesc.trim() });
+      toast.success('Pallet Group added');
+      setGroupPalletName('');
+      setGroupPalletId('');
+      setGroupPalletDesc('');
       await load();
     } catch (e: any) {
       const msg = e?.response?.data?.message || e?.message || 'Failed to add group';
@@ -524,6 +528,81 @@ export default function ItemRegistry() {
     <Container sx={{ mt: 4 }}>
       <Typography variant="h4" gutterBottom>Pallet Registry</Typography>
 
+      <Dialog open={groupModalOpen && Boolean(selectedGroup)} onClose={closeGroupModal} fullWidth maxWidth="lg">
+        <DialogTitle>Pallet Group Items</DialogTitle>
+        <DialogContent>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 2, flexWrap: 'wrap' }}>
+            <Typography variant="h6">Pallet Group</Typography>
+            <Chip label={selectedGroup} color="success" size="medium" />
+            {(() => {
+              const gi = groups.find(g=>g.name===selectedGroup) as any;
+              const desc = gi?.palletDescription || '';
+              return desc ? <Chip label={desc} size="small" /> : null;
+            })()}
+          </Stack>
+
+          <Grid container spacing={2} alignItems="center" sx={{ mb: 2 }}>
+            <Grid item xs={12} md={3} sx={{mt:3}}>
+              <TextField fullWidth required label="Item Code" value={gItemCode} onChange={e=>setGItemCode(e.target.value)} onKeyDown={handleGItemCodeKeyDown} helperText="Press Enter to check and auto-fill" />
+            </Grid>
+            <Grid item xs={12} md={5}>
+              <TextField fullWidth required label="Item Description" value={gDesc} onChange={e=>setGDesc(e.target.value)} />
+            </Grid>
+            <Grid item xs={12} md={2}>
+              <TextField fullWidth required label="Color" value={gColor} onChange={e=>setGColor(e.target.value)} />
+            </Grid>
+            <Grid item xs={12} md={2}>
+              <TextField fullWidth required type="number" label="Pack Size" value={gPack} onChange={e=>setGPack(e.target.value === '' ? 0 : Number(e.target.value))} />
+            </Grid>
+            <Grid item xs={12}>
+              <Stack direction={{ xs:'column', sm:'row' }} spacing={2} justifyContent={{ xs:'stretch', sm:'flex-end' }} alignItems={{ xs:'stretch', sm:'center' }}>
+                {isAdmin && (
+                  <Button variant="contained" onClick={async()=>{
+                    if (!selectedGroup) return;
+                    if (!gItemCode.trim() || !gDesc.trim() || !gColor.trim() || !Number.isFinite(Number(gPack)) || Number(gPack) < 0) { toast.error('Complete all fields'); return; }
+                    try {
+                      await api.post('/items', { itemCode: gItemCode.trim(), itemGroup: selectedGroup, description: gDesc.trim(), color: gColor.trim(), packSize: Number(gPack), enabled: true });
+                      toast.success('Item added');
+                      setGItemCode(''); setGDesc(''); setGColor(''); setGPack(0);
+                      await load();
+                    } catch (e:any) {
+                      const msg = e?.response?.data?.message || e?.message || 'Failed to add item';
+                      toast.error(msg);
+                    }
+                  }}>Add Item</Button>
+                )}
+              </Stack>
+            </Grid>
+          </Grid>
+
+          <div style={{ height: 460, width: '100%' }}>
+            <DataGrid
+              rows={items.filter(it=> (it.itemGroup||'') === selectedGroup).map(it=>({ id: it._id, itemCode: it.itemCode, description: it.description, color: it.color, packSize: (it as any).packSize ?? 0 }))}
+              columns={([
+                { field: 'itemCode', headerName: 'Item Code', flex: 1, minWidth: 160 },
+                { field: 'description', headerName: 'Description', flex: 2, minWidth: 240 },
+                { field: 'color', headerName: 'Color', width: 140 },
+                { field: 'packSize', headerName: 'Pack Size', type: 'number', width: 140 },
+                { field: 'actions', headerName: 'Actions', width: 120, sortable: false, filterable: false, renderCell: (p: GridRenderCellParams) => {
+                  const r = p.row as any;
+                  return isAdmin ? (
+                    <Button size="small" color="error" variant="outlined" onClick={()=> deleteItem(r.itemCode, selectedGroup)}>Delete</Button>
+                  ) : null;
+                } }
+              ]) as GridColDef[]}
+              loading={loading}
+              disableRowSelectionOnClick
+              density="compact"
+              initialState={{ pagination: { paginationModel: { pageSize: 10, page: 0 } } }}
+              pageSizeOptions={[10,20,50]}
+            />
+          </div>
+        </DialogContent>
+        <DialogActions>
+          <Button variant="text" onClick={closeGroupModal}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={renameGroupOpen} onClose={()=> setRenameGroupOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Rename Pallet Description</DialogTitle>
         <DialogContent>
@@ -539,7 +618,7 @@ export default function ItemRegistry() {
       <Dialog open={renameLineItemOpen} onClose={()=> setRenameLineItemOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Rename Pallet ID</DialogTitle>
         <DialogContent>
-          <Typography variant="body2" sx={{ mb: 1 }}>Pallet Description: <b>{renameLineItemGroupName || '-'}</b></Typography>
+          <Typography variant="body2" sx={{ mb: 1 }}>Pallet Group: <b>{renameLineItemGroupName || '-'}</b></Typography>
           <TextField fullWidth label="Pallet ID" value={renameLineItemValue} onChange={(e)=> setRenameLineItemValue(e.target.value)} autoFocus />
         </DialogContent>
         <DialogActions>
@@ -561,12 +640,6 @@ export default function ItemRegistry() {
             try {
               const next = String(renamePalletNameValue || '').trim();
               if (!next) { toast.error('Pallet Name is required'); return; }
-              const exists = (Array.isArray(groups) ? groups : []).some((g: any) => {
-                const sameId = String(g?._id || '') === String(renamePalletNameGroupId);
-                const pn = String((g as any)?.palletName || '').trim().toLowerCase();
-                return !sameId && pn && pn === next.toLowerCase();
-              });
-              if (exists) { toast.error('Pallet Name already exists'); return; }
               await api.put(`/item-groups/${encodeURIComponent(renamePalletNameGroupId)}`, { palletName: next });
               setGroups(prev => prev.map((g: any) => String(g._id) === String(renamePalletNameGroupId) ? { ...g, palletName: next } : g));
               toast.success('Pallet Name updated');
@@ -581,13 +654,15 @@ export default function ItemRegistry() {
       </Dialog>
 
       <Paper sx={{ p:2, mb:2 }}>
-        <Typography variant="h6" gutterBottom>Pallet Descriptions</Typography>
+        <Typography variant="h6" gutterBottom>Pallet Groups</Typography>
         <Grid container spacing={2} alignItems="center" sx={{ mb: 2 }}>
           <Grid item xs={12} md={6}>
             <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems={{ xs:'stretch', sm:'center' }}>
-              <TextField fullWidth label="Pallet Description" value={groupName} onChange={e=>setGroupName(e.target.value)} />
+              <TextField fullWidth label="Pallet Name" value={groupPalletName} onChange={e=>setGroupPalletName(e.target.value)} />
+              <TextField fullWidth label="Pallet ID" value={groupPalletId} onChange={e=>setGroupPalletId(e.target.value)} />
+              <TextField fullWidth label="Pallet Description" value={groupPalletDesc} onChange={e=>setGroupPalletDesc(e.target.value)} />
               {isAdmin && (
-                <Button variant="contained" onClick={createGroup} disabled={!groupName.trim()}>Add Pallet Description</Button>
+                <Button variant="contained" onClick={createGroup} disabled={!groupPalletName.trim() || !groupPalletId.trim() || !groupPalletDesc.trim()}>Add Pallet Group</Button>
               )}
             </Stack>
           </Grid>
@@ -609,8 +684,8 @@ export default function ItemRegistry() {
           </Grid>
         </Grid>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
-          <Typography variant="subtitle2">Pallet Descriptions: {groups.length}</Typography>
-          <TextField size="small" label="Search pallet descriptions" value={groupsQ} onChange={(e)=>setGroupsQ(e.target.value)} sx={{ minWidth: 240 }} />
+          <Typography variant="subtitle2">Pallet Groups: {groups.length}</Typography>
+          <TextField size="small" label="Search pallet groups" value={groupsQ} onChange={(e)=>setGroupsQ(e.target.value)} sx={{ minWidth: 240 }} />
         </Stack>
         <div style={{ height: 420, width: '100%' }}>
           <DataGrid
@@ -621,15 +696,16 @@ export default function ItemRegistry() {
                 const name = String(g.name || '').toLowerCase();
                 const lineItem = String((g as any).lineItem || '').toLowerCase();
                 const palletName = String((g as any).palletName || '').toLowerCase();
-                return name.includes(q) || lineItem.includes(q) || palletName.includes(q);
+                const palletDesc = String((g as any).palletDescription || '').toLowerCase();
+                return name.includes(q) || lineItem.includes(q) || palletName.includes(q) || palletDesc.includes(q);
               })
               .map(g=>{
-                return ({ id: g._id, name: g.name, palletName: (g as any).palletName || '', lineItem: (g as any).lineItem || '', active: (g as any).active !== false, itemCount: items.filter(it => (it.itemGroup||'') === g.name).length });
+                return ({ id: g._id, name: g.name, palletName: (g as any).palletName || '', palletDescription: (g as any).palletDescription || '', lineItem: (g as any).lineItem || '', active: (g as any).active !== false, itemCount: items.filter(it => (it.itemGroup||'') === g.name).length });
               })}
             columns={([
               { field: 'palletName', headerName: 'Pallet Name', flex: 1, minWidth: 200 },
-              { field: 'name', headerName: 'Pallet Description', flex: 1, minWidth: 220 },
               { field: 'lineItem', headerName: 'Pallet ID', flex: 1, minWidth: 220 },
+              { field: 'palletDescription', headerName: 'Pallet Description', flex: 1, minWidth: 220 },
               { field: 'active', headerName: 'Active', width: 80, renderCell: (p: GridRenderCellParams) => (
                 <Chip size="small" label={p.value ? 'Yes' : 'No'} color={p.value ? 'success' : 'default'} />
               ) },
@@ -664,71 +740,6 @@ export default function ItemRegistry() {
             }}
           />
         </div>
-        {Boolean(selectedGroup) && (
-          <Paper variant="outlined" sx={{ p:2, mt:2 }}>
-            <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
-              <Typography variant="h6">Pallet Description</Typography>
-              <Chip label={selectedGroup} color="success" size="medium" />
-              <Typography variant="h6">— Items</Typography>
-              {(() => { const gi = groups.find(g=>g.name===selectedGroup) as any; const li = gi?.lineItem || ''; return li ? <Chip label={li} size="small" sx={{ ml: 1 }} /> : null; })()}
-            </Stack>
-            <Grid container spacing={2} alignItems="center" sx={{ mb: 2 }}>
-              <Grid item xs={12} md={3} sx={{mt:3}}>
-                <TextField fullWidth required label="Item Code" value={gItemCode} onChange={e=>setGItemCode(e.target.value)} onKeyDown={handleGItemCodeKeyDown} helperText="Press Enter to check and auto-fill" />
-              </Grid>
-              <Grid item xs={12} md={5}>
-                <TextField fullWidth required label="Item Description" value={gDesc} onChange={e=>setGDesc(e.target.value)} />
-              </Grid>
-              <Grid item xs={12} md={2}>
-                <TextField fullWidth required label="Color" value={gColor} onChange={e=>setGColor(e.target.value)} />
-              </Grid>
-              <Grid item xs={12} md={2}>
-                <TextField fullWidth required type="number" label="Pack Size" value={gPack} onChange={e=>setGPack(e.target.value === '' ? 0 : Number(e.target.value))} />
-              </Grid>
-              <Grid item xs={12}>
-                <Stack direction={{ xs:'column', sm:'row' }} spacing={2} justifyContent={{ xs:'stretch', sm:'flex-end' }} alignItems={{ xs:'stretch', sm:'center' }}>
-                  {isAdmin && (
-                    <Button variant="contained" onClick={async()=>{
-                      if (!gItemCode.trim() || !gDesc.trim() || !gColor.trim() || !Number.isFinite(Number(gPack)) || Number(gPack) < 0) { toast.error('Complete all fields'); return; }
-                      try {
-                        await api.post('/items', { itemCode: gItemCode.trim(), itemGroup: selectedGroup, description: gDesc.trim(), color: gColor.trim(), packSize: Number(gPack), enabled: true });
-                        toast.success('Item added');
-                        setGItemCode(''); setGDesc(''); setGColor(''); setGPack(0);
-                        await load();
-                      } catch (e:any) {
-                        const msg = e?.response?.data?.message || e?.message || 'Failed to add item';
-                        toast.error(msg);
-                      }
-                    }}>Add Item</Button>
-                  )}
-                  <Button variant="text" onClick={()=> setSelectedGroup('')}>Close</Button>
-                </Stack>
-              </Grid>
-            </Grid>
-            <div style={{ height: 360, width: '100%' }}>
-              <DataGrid
-                rows={items.filter(it=> (it.itemGroup||'') === selectedGroup).map(it=>({ id: it._id, itemCode: it.itemCode, description: it.description, color: it.color, packSize: (it as any).packSize ?? 0 }))}
-                columns={([
-                  { field: 'itemCode', headerName: 'Item Code', flex: 1, minWidth: 160 },
-                  { field: 'description', headerName: 'Description', flex: 2, minWidth: 240 },
-                  { field: 'color', headerName: 'Color', width: 140 },
-                  { field: 'packSize', headerName: 'Pack Size', type: 'number', width: 140 },
-                  { field: 'actions', headerName: 'Actions', width: 120, sortable: false, filterable: false, renderCell: (p: GridRenderCellParams) => {
-                    const r = p.row as any;
-                    return isAdmin ? (
-                      <Button size="small" color="error" variant="outlined" onClick={()=> deleteItem(r.itemCode, selectedGroup)}>Delete</Button>
-                    ) : null;
-                  } }
-                ]) as GridColDef[]}
-                loading={loading}
-                disableRowSelectionOnClick
-                density="compact"
-                initialState={{ pagination: { paginationModel: { pageSize: 10, page: 0 } } }}
-                pageSizeOptions={[10,20,50]}
-              />
-            </div>
-          </Paper>
-        )}
         {groupImportResult && (
           <Paper variant="outlined" sx={{ p:2, mt:2, bgcolor:'#fafafa' }}>
             <Typography variant="subtitle2" gutterBottom>Group Import Summary</Typography>
