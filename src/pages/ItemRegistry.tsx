@@ -704,8 +704,8 @@ export default function ItemRegistry() {
               })}
             columns={([
               { field: 'palletName', headerName: 'Pallet Name', flex: 1, minWidth: 200 },
-              { field: 'lineItem', headerName: 'Pallet ID', flex: 1, minWidth: 220 },
               { field: 'palletDescription', headerName: 'Pallet Description', flex: 1, minWidth: 220 },
+              { field: 'lineItem', headerName: 'Pallet ID', flex: 1, minWidth: 220 },
               { field: 'active', headerName: 'Active', width: 80, renderCell: (p: GridRenderCellParams) => (
                 <Chip size="small" label={p.value ? 'Yes' : 'No'} color={p.value ? 'success' : 'default'} />
               ) },
