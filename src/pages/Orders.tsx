@@ -150,7 +150,7 @@ export default function Orders() {
     const handle = setTimeout(async () => {
       try {
         setManualPickerLoading(true);
-        const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: wid, q: manualPickerQ.trim() || undefined } });
+        const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: wid } });
         setManualPickerRows(Array.isArray((data as any)?.rows) ? (data as any).rows : []);
         setManualPickerWarehouses(Array.isArray((data as any)?.warehouses) ? (data as any).warehouses : []);
       } catch {
@@ -161,7 +161,7 @@ export default function Orders() {
       }
     }, 350);
     return () => clearTimeout(handle);
-  }, [manualPickOpen, manualWarehouseId, manualPickerQ]);
+  }, [manualPickOpen, manualWarehouseId]);
   const [onWaterRows, setOnWaterRows] = useState<any[]>([]);
 
   const [onProcessOpen, setOnProcessOpen] = useState(false);
@@ -179,6 +179,7 @@ export default function Orders() {
   const [viewOrderableLoading, setViewOrderableLoading] = useState(false);
   const [viewOrderableExporting, setViewOrderableExporting] = useState(false);
   const [palletNameByGroup, setPalletNameByGroup] = useState<Record<string, string>>({});
+  const [palletDescByGroup, setPalletDescByGroup] = useState<Record<string, string>>({});
 
   const [orderableGroupOpen, setOrderableGroupOpen] = useState(false);
   const [orderableGroupLoading, setOrderableGroupLoading] = useState(false);
@@ -204,7 +205,8 @@ export default function Orders() {
           const gname = String(r?.groupName || '');
           const gLower = gname.toLowerCase();
           const pLower = String(palletNameByGroup?.[gLower] || '').toLowerCase();
-          const hay = `${String(r?.lineItem || '')} ${gLower} ${pLower}`.toLowerCase();
+          const dLower = String(palletDescByGroup?.[gLower] || '').toLowerCase();
+          const hay = `${String(r?.lineItem || '')} ${gLower} ${pLower} ${dLower}`.toLowerCase();
           return hay.includes(q);
         });
 
@@ -249,7 +251,7 @@ export default function Orders() {
       if (!(Math.max(0, Math.floor(total)) > 0)) return false;
       return matchesEddRange(row);
     });
-  }, [viewOrderableQ, viewOrderableRows, viewOrderableWarehouseId, viewOrderableWarehouses, viewOrderableEddFrom, viewOrderableEddTo, palletNameByGroup]);
+  }, [viewOrderableQ, viewOrderableRows, viewOrderableWarehouseId, viewOrderableWarehouses, viewOrderableEddFrom, viewOrderableEddTo, palletNameByGroup, palletDescByGroup]);
 
   useEffect(() => {
     let stopped = false;
@@ -324,6 +326,8 @@ export default function Orders() {
         const primary = Number(r?.selectedWarehouseAvailable ?? 0);
         const onWater = Number(r?.onWaterPallets ?? 0);
         const onProcess = Number(r?.onProcessPallets ?? 0);
+        const groupName = String(r?.groupName || '').trim();
+        const gLower = groupName.toLowerCase();
         let secondQty = 0;
         if (secondId) {
           const per = r?.perWarehouse || {};
@@ -337,7 +341,7 @@ export default function Orders() {
 
         const out: any = {
           'Pallet Name': String(r?.palletName || ''),
-          'Pallet Description': String(r?.groupName || ''),
+          'Pallet Description': String(palletDescByGroup?.[gLower] || ''),
           'Pallet ID': String(r?.lineItem || ''),
           'MPG': Math.max(0, Math.floor(Number.isFinite(primary) ? primary : 0)),
         };
@@ -415,10 +419,11 @@ export default function Orders() {
       rows.push(['Pallet ID', 'Pallet Name', 'Pallet Description', 'Pallets Sold']);
       const topSelling = Array.isArray(data?.topSelling) ? data.topSelling : [];
       for (const r of topSelling) {
+        const gLower = String(r?.groupName || '').trim().toLowerCase();
         rows.push([
           String(r?.palletId || ''),
-          String(palletNameByGroup?.[String(r?.groupName || '').trim().toLowerCase()] || ''),
-          String(r?.groupName || ''),
+          String(palletNameByGroup?.[gLower] || ''),
+          String(palletDescByGroup?.[gLower] || ''),
           Number(r?.soldPallets || 0),
         ]);
       }
@@ -431,10 +436,11 @@ export default function Orders() {
       rows.push(['Pallet ID', 'Pallet Name', 'Pallet Description', 'Pallets Sold', 'Reason']);
       const nonPerforming = Array.isArray(data?.nonPerforming) ? data.nonPerforming : [];
       for (const r of nonPerforming) {
+        const gLower = String(r?.groupName || '').trim().toLowerCase();
         rows.push([
           String(r?.palletId || ''),
-          String(palletNameByGroup?.[String(r?.groupName || '').trim().toLowerCase()] || ''),
-          String(r?.groupName || ''),
+          String(palletNameByGroup?.[gLower] || ''),
+          String(palletDescByGroup?.[gLower] || ''),
           Number(r?.soldPallets || 0),
           String(r?.reason || ''),
         ]);
@@ -453,7 +459,7 @@ export default function Orders() {
     } finally {
       setReportExporting(false);
     }
-  }, [reportFrom, reportTo, toast, palletNameByGroup]);
+  }, [reportFrom, reportTo, toast, palletNameByGroup, palletDescByGroup]);
 
   const openManualEdit = async (row: OrdersRow) => {
     const toYmd = (v: any) => {
@@ -620,20 +626,35 @@ export default function Orders() {
       }
     } catch {}
 
+    try {
+      const cached = localStorage.getItem('palletDescByGroup');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          setPalletDescByGroup(parsed as Record<string, string>);
+        }
+      }
+    } catch {}
+
     (async () => {
       try {
         const { data } = await api.get<any[]>('/item-groups');
         if (canceled) return;
         const map: Record<string, string> = {};
+        const descMap: Record<string, string> = {};
         for (const g of (Array.isArray(data) ? data : [])) {
           const name = String((g as any)?.name || '').trim();
           if (!name) continue;
           map[name.toLowerCase()] = String((g as any)?.palletName || '').trim();
+          descMap[name.toLowerCase()] = String((g as any)?.palletDescription || '').trim();
         }
         setPalletNameByGroup(map);
         try { localStorage.setItem('palletNameByGroup', JSON.stringify(map)); } catch {}
+        setPalletDescByGroup(descMap);
+        try { localStorage.setItem('palletDescByGroup', JSON.stringify(descMap)); } catch {}
       } catch {
         if (!canceled) setPalletNameByGroup((m) => (m && Object.keys(m).length ? m : {}));
+        if (!canceled) setPalletDescByGroup((m) => (m && Object.keys(m).length ? m : {}));
       }
     })();
 
@@ -697,7 +718,8 @@ export default function Orders() {
           const gid = String(r?.lineItem || '').trim().toLowerCase();
           const gnameLower = String(r?.groupName || '').trim().toLowerCase();
           const pname = String(r?.palletName || '').trim().toLowerCase();
-          return gid.includes(q) || gnameLower.includes(q) || pname.includes(q);
+          const pdesc = String(palletDescByGroup?.[gnameLower] || '').trim().toLowerCase();
+          return gid.includes(q) || gnameLower.includes(q) || pname.includes(q) || pdesc.includes(q);
         });
 
     // EDD date range filter: Only include rows having any On-Water or On-Process EDD within [from, to]
@@ -737,7 +759,7 @@ export default function Orders() {
       if (!(Math.max(0, Math.floor(total)) > 0)) return false;
       return matchesEddRange(row);
     });
-  }, [manualPickerRowsWithName, manualPickerQDebounced, manualWarehouseId, manualPickerWarehouses, manualPickerEddFrom, manualPickerEddTo]);
+  }, [manualPickerRowsWithName, manualPickerQDebounced, manualWarehouseId, manualPickerWarehouses, manualPickerEddFrom, manualPickerEddTo, palletDescByGroup]);
 
   // Ensure Pallet Name map is available quickly when opening the manual picker dialog
   useEffect(() => {
@@ -804,7 +826,10 @@ export default function Orders() {
         const g = String(p?.row?.groupName || '').trim().toLowerCase();
         return String(palletNameByGroup?.[g] || '');
       } },
-      { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
+      { field: 'palletDescription', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => {
+        const g = String(p?.row?.groupName || '').trim().toLowerCase();
+        return String(palletDescByGroup?.[g] || '');
+      } },
       { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
       { field: 'selectedWarehouseAvailable', headerName: `${cleanedPrimaryName}`, width: 90, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
     ];
@@ -941,7 +966,7 @@ export default function Orders() {
     });
 
     return cols;
-  }, [manualWarehouseName, manualPickerEddLists, manualPickerWarehouses, manualWarehouseId, palletNameByGroup]);
+  }, [manualWarehouseName, manualPickerEddLists, manualPickerWarehouses, manualWarehouseId, palletNameByGroup, palletDescByGroup]);
 
   // Map the original order's lines to quickly lookup Pallet ID by Pallet Description
   const manualLineItemByGroup = useMemo(() => {
@@ -974,7 +999,10 @@ export default function Orders() {
         const g = String(p?.row?.groupName || '').trim().toLowerCase();
         return String(palletNameByGroup?.[g] || '');
       } },
-      { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
+      { field: 'palletDescription', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => {
+        const g = String(p?.row?.groupName || '').trim().toLowerCase();
+        return String(palletDescByGroup?.[g] || '');
+      } },
       { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
       { field: 'selectedWarehouseAvailable', headerName: `${String(manualWarehouseName || 'Warehouse').replace(/^THIS\s*-\s*/i, '')}`, width: 90, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
       {
@@ -3421,7 +3449,11 @@ export default function Orders() {
                             const gLower = String(row?.groupName || '').trim().toLowerCase();
                             return String(palletNameByGroup?.[gLower] || '');
                           } },
-                          { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 240 },
+                          { field: 'palletDescription', headerName: 'Pallet Description', flex: 1, minWidth: 240, renderCell: (p: any) => {
+                            const row: any = p?.row || {};
+                            const gLower = String(row?.groupName || '').trim().toLowerCase();
+                            return String(palletDescByGroup?.[gLower] || '');
+                          } },
                           { field: 'palletId', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => {
                             const row: any = p?.row || {};
                             const groupName = String(row?.groupName || '');
@@ -3848,7 +3880,10 @@ export default function Orders() {
                     const g = String(p?.row?.groupName || '').trim().toLowerCase();
                     return String(palletNameByGroup[g] || '');
                   } },
-                  { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => String(p?.row?.groupName || '-') },
+                  { field: 'palletDescription', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => {
+                    const g = String(p?.row?.groupName || '').trim().toLowerCase();
+                    return String(palletDescByGroup?.[g] || '');
+                  } },
                   { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
                   { field: 'selectedWarehouseAvailable', headerName: `${cleanedPrimaryName || 'Warehouse'}`, width: 80, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
                 ];

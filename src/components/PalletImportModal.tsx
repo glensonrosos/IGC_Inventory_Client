@@ -38,7 +38,7 @@ export default function PalletImportModal({ open, onClose, onImported }: Props) 
   }, [open]);
 
   const downloadTemplate = () => {
-    const header = ['PO #','Pallet Description','Total Pallet'];
+    const header = ['PO #','Pallet Name','Total Pallet'];
     const ws = XLSX.utils.aoa_to_sheet([header]);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Template');

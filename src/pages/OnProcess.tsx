@@ -10,7 +10,7 @@ import { useToast } from '../components/ToastProvider';
 
 interface OnProcPallet { _id?: string; poNumber: string; groupName: string; totalPallet: number; finishedPallet: number; transferredPallet?: number; status?: string; notes?: string; locked?: boolean; remainingPallet?: number; createdAt?: string }
 interface OnProcBatch { _id: string; reference: string; poNumber: string; status: 'in-progress'|'partial-done'|'completed'; estFinishDate?: string; notes?: string; itemCount?: number; createdAt?: string }
-interface ItemGroupRow { name: string; lineItem?: string; palletName?: string }
+interface ItemGroupRow { name: string; lineItem?: string; palletName?: string; palletDescription?: string }
 
 export default function OnProcess() {
   const [isAdmin, setIsAdmin] = useState(false);
@@ -48,6 +48,7 @@ export default function OnProcess() {
   const [items, setItems] = useState<OnProcPallet[]>([]);
   const [palletIdByGroup, setPalletIdByGroup] = useState<Record<string, string>>({});
   const [palletNameByGroup, setPalletNameByGroup] = useState<Record<string, string>>({});
+  const [palletDescByGroup, setPalletDescByGroup] = useState<Record<string, string>>({});
   const [q, setQ] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
@@ -89,7 +90,9 @@ export default function OnProcess() {
     return batchItems.filter(it => {
       const id = String((it as any)._id || `${selectedBatch?._id}:${it.groupName}`);
       const remaining = Math.max(0, (Number(it.totalPallet || 0)) - ((Number((it as any).transferredPallet || 0)) + (Number(it.finishedPallet || 0))));
-      const effectiveLocked = Boolean((it as any).locked) && remaining === 0;
+      const total = Math.max(0, Number(it.totalPallet || 0));
+      const transferred = Math.max(0, Number((it as any).transferredPallet || 0));
+      const effectiveLocked = total > 0 && transferred >= total;
       return ids.has(id) && !effectiveLocked && (Number(it.finishedPallet) > 0);
     });
   }, [rowSelection, batchItems, selectedBatch]);
@@ -123,17 +126,21 @@ export default function OnProcess() {
         const groups = Array.isArray(data) ? data : [];
         const idMap: Record<string, string> = {};
         const nameMap: Record<string, string> = {};
+        const descMap: Record<string, string> = {};
         for (const g of groups) {
           const name = String((g as any)?.name || '').trim();
           if (!name) continue;
           idMap[name] = String((g as any)?.lineItem || '').trim();
           nameMap[name] = String((g as any)?.palletName || '').trim();
+          descMap[name] = String((g as any)?.palletDescription || '').trim();
         }
         setPalletIdByGroup(idMap);
         setPalletNameByGroup(nameMap);
+        setPalletDescByGroup(descMap);
       } catch {
         setPalletIdByGroup({});
         setPalletNameByGroup({});
+        setPalletDescByGroup({});
       }
     })();
   }, []);
@@ -142,7 +149,7 @@ export default function OnProcess() {
   const itemColumns = useMemo<GridColDef[]>(() => ([
     { field: 'poNumber', headerName: 'PO #', width: 120 },
     { field: 'palletName', headerName: 'Pallet Name', width: 180 },
-    { field: 'groupName', headerName: 'Pallet Description', flex: 2, minWidth: 220 },
+    { field: 'palletDescription', headerName: 'Pallet Description', flex: 2, minWidth: 220 },
     { field: 'palletId', headerName: 'Pallet ID', width: 140 },
     { field: 'totalPallet', headerName: 'Total Pallet', type: 'number', width: 140, editable: true, cellClassName: 'cell-editable-total' },
     { field: 'finishedPallet', headerName: 'Finished', type: 'number', width: 120, editable: true, cellClassName: 'cell-editable' },
@@ -165,22 +172,24 @@ export default function OnProcess() {
         const gn = String(r.groupName || '').toLowerCase();
         const pid = String(palletIdByGroup[String(r.groupName || '').trim()] || '').toLowerCase();
         const pn = String(palletNameByGroup[String(r.groupName || '').trim()] || '').toLowerCase();
-        return gn.includes(t) || pid.includes(t) || pn.includes(t);
+        const pd = String(palletDescByGroup[String(r.groupName || '').trim()] || '').toLowerCase();
+        return gn.includes(t) || pid.includes(t) || pn.includes(t) || pd.includes(t);
       })
       .map(r => ({
         id: String((r as any)._id || `${selectedBatch?._id}:${r.groupName}`),
         poNumber: r.poNumber,
         palletId: String(palletIdByGroup[String(r.groupName || '').trim()] || ''),
         palletName: String(palletNameByGroup[String(r.groupName || '').trim()] || ''),
+        palletDescription: String(palletDescByGroup[String(r.groupName || '').trim()] || ''),
         groupName: r.groupName,
         totalPallet: r.totalPallet,
         finishedPallet: r.finishedPallet ?? 0,
         transferredPallet: (r as any).transferredPallet ?? 0,
         remainingPallet: Math.max(0, (r.totalPallet || 0) - (((r as any).transferredPallet || 0) + (r.finishedPallet || 0))),
         status: r.status || 'in_progress',
-        locked: Boolean((r as any).locked) && (Math.max(0, (r.totalPallet || 0) - (((r as any).transferredPallet || 0) + (r.finishedPallet || 0)))) === 0,
+        locked: (Number((r as any).transferredPallet || 0) >= Number(r.totalPallet || 0)) && Number(r.totalPallet || 0) > 0,
       }))
-  ), [batchItems, itemsSearch, selectedBatch, palletIdByGroup, palletNameByGroup]);
+  ), [batchItems, itemsSearch, selectedBatch, palletIdByGroup, palletNameByGroup, palletDescByGroup]);
 
   const load = async () => {
     setLoading(true);
@@ -229,9 +238,6 @@ export default function OnProcess() {
       const allZero = rows.length > 0 && rows.every((r:any)=> Number(r.finishedPallet||0) === 0 && Number((r as any).transferredPallet||0) === 0);
       if (allDoneOrCancelled) {
         setBatchStatus('completed');
-        const today = new Date();
-        const ymd = today.toISOString().slice(0,10);
-        setBatchEst(ymd);
       } else if (allZero) {
         setBatchStatus('in-progress');
       } else {
@@ -316,7 +322,7 @@ export default function OnProcess() {
   };
 
   const downloadTemplate = () => {
-    const header = ['PO #','Pallet Description','Total Pallet'];
+    const header = ['PO #','Pallet Name','Total Pallet'];
     const ws = XLSX.utils.aoa_to_sheet([header]);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Template');
@@ -388,7 +394,7 @@ export default function OnProcess() {
                     <tr>
                       <th align="left">Row</th>
                       <th align="left">PO #</th>
-                      <th align="left">Pallet Description</th>
+                      <th align="left">Pallet Name</th>
                       <th align="left">Reason</th>
                     </tr>
                   </thead>
@@ -397,7 +403,7 @@ export default function OnProcess() {
                       <tr key={i} style={{ borderTop:'1px solid #eee' }}>
                         <td>{er.rowNum ?? '-'}</td>
                         <td>{er.poNumber ?? '-'}</td>
-                        <td>{er.groupName ?? '-'}</td>
+                        <td>{er.palletName ?? er.groupName ?? '-'}</td>
                         <td>{Array.isArray(er.errors) ? er.errors.join(', ') : String(er.errors || '')}</td>
                       </tr>
                     ))}
@@ -450,7 +456,7 @@ export default function OnProcess() {
               </Button>
             </Stack>
             <Stack direction={{ xs:'column', sm:'row' }} spacing={2} alignItems={{ xs:'stretch', sm:'center' }} justifyContent="space-between" sx={{ mb: 1 }}>
-              <TextField size="small" label="Search pallet description" value={itemsSearch} onChange={(e)=> setItemsSearch(e.target.value)} sx={{ minWidth: 260, flex: 1 }} />
+              <TextField size="small" label="Search pallet name" value={itemsSearch} onChange={(e)=> setItemsSearch(e.target.value)} sx={{ minWidth: 260, flex: 1 }} />
               <Stack direction={{ xs:'column', sm:'row' }} spacing={2} sx={{ mt: { xs: 1, sm: 0 } }}>
                 <TextField size="small" select label="Set status (PO)" value={batchStatus} onChange={(e)=> setBatchStatus(e.target.value as any)} sx={{ minWidth: 200 }}>
                   <MenuItem value="in-progress">in-progress</MenuItem>
@@ -487,24 +493,28 @@ export default function OnProcess() {
                 getRowClassName={(params:any)=> {
                   const st = String(params?.row?.status || '');
                   const remaining = Number(params?.row?.remainingPallet || 0);
-                  const locked = Boolean(params?.row?.locked) && remaining === 0;
+                  const total = Number(params?.row?.totalPallet || 0);
+                  const transferred = Number(params?.row?.transferredPallet || 0);
+                  const locked = Boolean(total > 0 && transferred >= total);
                   return `${st === 'completed' ? 'row-completed' : ''} ${st === 'cancelled' ? 'row-cancelled' : ''} ${locked ? 'row-locked' : ''}`.trim();
                 }}
                 checkboxSelection
                 density="compact"
                 disableRowSelectionOnClick
                 isRowSelectable={(params:any)=> {
-                  const remaining = Number((params.row as any)?.remainingPallet || 0);
-                  const locked = Boolean((params.row as any)?.locked) && remaining === 0;
+                  const total = Number((params.row as any)?.totalPallet || 0);
+                  const transferred = Number((params.row as any)?.transferredPallet || 0);
+                  const locked = Boolean(total > 0 && transferred >= total);
                   const finished = Number((params.row as any)?.finishedPallet || 0);
                   return !locked && finished > 0;
                 }}
                 isCellEditable={(params:any)=>{
                   const editableFields = new Set(['totalPallet','finishedPallet','status']);
-                  const remaining = Number((params.row as any)?.remainingPallet || 0);
-                  const locked = Boolean((params.row as any)?.locked) && remaining === 0;
-                  const st = String((params.row as any)?.status || '');
+                  const total = Number((params.row as any)?.totalPallet || 0);
                   const transferred = Number((params.row as any)?.transferredPallet || 0);
+                  const locked = Boolean(total > 0 && transferred >= total);
+                  const st = String((params.row as any)?.status || '');
+                  const transferredLocal = Number((params.row as any)?.transferredPallet || 0);
 
                   if (params.field === 'totalPallet') {
                     return st !== 'cancelled';
@@ -513,7 +523,7 @@ export default function OnProcess() {
                   if (locked) return false;
                   if (st === 'cancelled') {
                     // Allow only status to be edited when cancelled, and only if nothing was transferred yet
-                    return params.field === 'status' && transferred === 0;
+                    return params.field === 'status' && transferredLocal === 0;
                   }
 
                   return editableFields.has(params.field);
@@ -533,55 +543,79 @@ export default function OnProcess() {
                 processRowUpdate={(newRow:any)=>{
                   const id = String(newRow.id);
                   const fieldVals = newRow;
+
+                  const existingRow = (batchItems || []).find((it:any) => {
+                    const iid = String((it as any)._id || `${selectedBatch?._id}:${it.groupName}`);
+                    return iid === id;
+                  }) as any;
+
+                  // Normalize values for persistence: total must be >= (finished + transferred)
+                  const normalizeRowForPersist = () => {
+                    const wasLocked = Boolean(existingRow?.locked);
+                    const prevStatus = String(existingRow?.status || 'in_progress');
+                    const prevTotal = Number(existingRow?.totalPallet || 0);
+                    const totalChanged = fieldVals.totalPallet !== undefined && Number.isFinite(Number(fieldVals.totalPallet)) && Number(fieldVals.totalPallet) !== Number(existingRow?.totalPallet || 0);
+                    let total = Number(fieldVals.totalPallet);
+                    if (!Number.isFinite(total)) total = Number(existingRow?.totalPallet || 0);
+                    let finished = Number(fieldVals.finishedPallet);
+                    if (!Number.isFinite(finished) || finished < 0) finished = Number(existingRow?.finishedPallet || 0);
+                    const transferred = Math.max(0, Number(existingRow?.transferredPallet || fieldVals.transferredPallet || 0));
+                    let status = String(fieldVals.status || existingRow?.status || 'in_process');
+                    if (!['in_progress','partial','completed','cancelled'].includes(status)) status = String(existingRow?.status || 'in_progress');
+
+                    if (status === 'cancelled') {
+                      if (transferred > 0) {
+                        status = String(existingRow?.status || 'in_progress');
+                      } else {
+                        total = 0;
+                        finished = 0;
+                      }
+                    }
+
+                    if (wasLocked || prevStatus === 'completed') {
+                      total = Math.max(prevTotal, total || 0);
+                    }
+
+                    if (status !== 'cancelled') {
+                      total = Math.max(1, transferred, (total || 0));
+                      // If user is lowering Total, keep Finished and auto-increase Total to satisfy transferred+finished.
+                      if (totalChanged) {
+                        total = Math.max(total, transferred + finished);
+                      }
+                    } else {
+                      total = Math.max((total || 0), transferred);
+                    }
+
+                    // Finished must not exceed (total - transferred)
+                    const maxFinished = Math.max(0, total - transferred);
+                    if (finished > maxFinished) {
+                      finished = maxFinished;
+                      try { toast.error('Finished cannot be greater than Total Pallet'); } catch {}
+                    }
+
+                    const remaining = Math.max(0, total - (transferred + finished));
+                    if (status !== 'cancelled') {
+                      status = remaining === 0 ? 'completed' : (finished > 0 ? 'partial' : 'in_progress');
+                    }
+
+                    const locked = total > 0 && transferred >= total;
+                    return { total, finished, status, locked };
+                  };
+
+                  const normalized = normalizeRowForPersist();
+
                   setBatchItems(prev => {
                     const next = prev.map(it => {
                       const iid = String((it as any)._id || `${selectedBatch?._id}:${it.groupName}`);
                       if (iid !== id) return it;
-                      const wasLocked = Boolean((it as any)?.locked);
-                      const prevStatus = String((it as any)?.status || 'in_progress');
-                      const prevTotal = Number((it as any)?.totalPallet || 0);
-                      let total = Number(fieldVals.totalPallet);
-                      if (!Number.isFinite(total)) total = it.totalPallet || 0;
-                      let finished = Number(fieldVals.finishedPallet);
-                      if (!Number.isFinite(finished) || finished < 0) finished = it.finishedPallet || 0;
+
                       const transferred = Number((it as any).transferredPallet || 0);
-                      let status = String(fieldVals.status || it.status || 'in_progress');
-                      if (!['in_progress','partial','completed','cancelled'].includes(status)) status = it.status || 'in_progress';
-                      if (status === 'cancelled') {
-                        if (transferred > 0) {
-                          status = it.status || 'in_progress';
-                        } else {
-                          total = 0;
-                          finished = 0;
-                        }
-                      }
-
-                      if (wasLocked || prevStatus === 'completed') {
-                        total = Math.max(prevTotal, total || 0);
-                      }
-
-                      if (status !== 'cancelled') {
-                        total = Math.max(1, transferred, total || 0);
-                      } else {
-                        total = Math.max(total, transferred);
-                      }
-                      const maxFinish = Math.max(0, total - transferred);
-                      finished = Math.min(finished, maxFinish);
-                      const remaining = Math.max(0, total - (transferred + finished));
-                      if (status !== 'cancelled') {
-                        status = remaining === 0 ? 'completed' : (finished > 0 ? 'partial' : 'in_progress');
-                      }
-
-                      const nextLocked = wasLocked && total > prevTotal ? false : (it as any).locked;
-                      return { ...it, totalPallet: total, finishedPallet: finished, status, locked: nextLocked } as any;
+                      return { ...it, totalPallet: normalized.total, finishedPallet: normalized.finished, status: normalized.status, locked: normalized.locked } as any;
                     });
                     const allDoneOrCancelled = next.length > 0 && next.every((r:any)=> ['completed','cancelled'].includes(String(r.status || '')));
                     const allZero = next.length > 0 && next.every((r:any)=> Number(r.finishedPallet||0) === 0 && Number((r as any).transferredPallet||0) === 0);
                     if (allDoneOrCancelled) {
                       setBatchStatus('completed');
-                      const today = new Date();
-                      const ymd = today.toISOString().slice(0,10);
-                      setBatchEst(ymd);
                     } else if (allZero) {
                       setBatchStatus('in-progress');
                     } else {
@@ -598,9 +632,9 @@ export default function OnProcess() {
                       const payload = [
                         {
                           groupName: String(fieldVals.groupName || newRow.groupName || ''),
-                          totalPallet: Number(fieldVals.totalPallet),
-                          finishedPallet: Number(fieldVals.finishedPallet),
-                          status: String(fieldVals.status || ''),
+                          totalPallet: Number(normalized.total),
+                          finishedPallet: Number(normalized.finished),
+                          status: String(normalized.status || ''),
                         },
                       ];
                       await api.patch(`/on-process/batches/${bid}/pallets`, { pallets: payload });
@@ -608,7 +642,7 @@ export default function OnProcess() {
                       try { window.dispatchEvent(new Event('orders-changed')); } catch {}
                     } catch {}
                   })();
-                  return newRow;
+                  return { ...newRow, totalPallet: normalized.total, finishedPallet: normalized.finished, status: normalized.status, locked: normalized.locked };
                 }}
                 pageSizeOptions={[10,20,50,100]}
                 sx={{
@@ -645,7 +679,7 @@ export default function OnProcess() {
                   const { data } = await api.get<Array<{ _id: string; name: string }>>('/item-groups');
                   setAddGroupOptions(Array.isArray(data) ? data : []);
                 } catch {}
-              }} aria-label="Add Pallet Description" title="Add Pallet Description">
+              }} aria-label="Add Pallet Name" title="Add Pallet Name">
                 <AddIcon />
               </IconButton>
               )}
@@ -692,7 +726,7 @@ export default function OnProcess() {
           </DialogActions>
 
           <Dialog open={addOpen} onClose={()=> setAddOpen(false)} maxWidth="sm" fullWidth>
-              <DialogTitle>Add Pallet Description</DialogTitle>
+              <DialogTitle>Add Pallet Name</DialogTitle>
               <DialogContent sx={{ pt: 2 }}>
                 <Stack direction="row" spacing={2} alignItems="flex-start" sx={{ mb: 2 }}>
                   <TextField
@@ -704,7 +738,7 @@ export default function OnProcess() {
                   <Autocomplete
                     options={addGroupSelectable}
                     sx={{ flex: 1 }}
-                    getOptionLabel={(o)=> o?.name || ''}
+                    getOptionLabel={(o)=> String(palletNameByGroup[String(o?.name || '').trim()] || o?.name || '')}
                     value={addGroupSelected}
                     onChange={(_, v)=> { setAddGroupSelected(v); setAddGroupName(v?.name || ''); }}
                     filterOptions={(options, state) => {
@@ -713,11 +747,12 @@ export default function OnProcess() {
                       return (Array.isArray(options) ? options : []).filter((o: any) => {
                         const name = String(o?.name || '').trim().toLowerCase();
                         const pid = String(palletIdByGroup[String(o?.name || '').trim()] || '').trim().toLowerCase();
-                        return (name && name.includes(q)) || (pid && pid.includes(q));
+                        const pn = String(palletNameByGroup[String(o?.name || '').trim()] || '').trim().toLowerCase();
+                        return (name && name.includes(q)) || (pid && pid.includes(q)) || (pn && pn.includes(q));
                       });
                     }}
                     renderInput={(params)=> (
-                      <TextField {...params} fullWidth label="Search Pallet Description" placeholder="Type to search" />
+                      <TextField {...params} fullWidth label="Search Pallet Name" placeholder="Type to search" />
                     )}
                   />
                 </Stack>

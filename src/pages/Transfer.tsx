@@ -50,6 +50,7 @@ export default function Transfer() {
   const toast = useToast();
   const navigate = useNavigate();
   const [available, setAvailable] = useState<Record<string, number>>({});
+  const [groupByPalletName, setGroupByPalletName] = useState<Record<string, string>>({});
   const [file, setFile] = useState<File | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
   const todayYmd = useMemo(() => new Date().toISOString().slice(0, 10), []);
@@ -60,6 +61,22 @@ export default function Transfer() {
       setWarehouses(data || []);
     } catch {
       setWarehouses([]);
+    }
+  };
+
+  const loadPalletNameLookup = async () => {
+    try {
+      const { data } = await api.get('/item-groups');
+      const map: Record<string, string> = {};
+      (Array.isArray(data) ? data : []).forEach((g: any) => {
+        const groupName = String(g?.name || '').trim();
+        const palletName = String(g?.palletName || '').trim();
+        if (!groupName || !palletName) return;
+        map[palletName.toLowerCase()] = groupName;
+      });
+      setGroupByPalletName(map);
+    } catch {
+      setGroupByPalletName({});
     }
   };
 
@@ -103,6 +120,7 @@ export default function Transfer() {
     try {
       resetImport();
       await loadWarehouses();
+      await loadPalletNameLookup();
       await loadStock(sourceWarehouseId);
     } finally {
       setRefreshing(false);
@@ -126,7 +144,7 @@ export default function Transfer() {
     if (!poNumber.trim()) { toast.error('PO# is required'); return; }
     if (edd && String(edd) < todayYmd) { toast.error('Estimated Arrival cannot be earlier than today'); return; }
     const valid = items.filter(i => i.groupName && Number.isFinite(i.pallets) && i.pallets > 0);
-    if (!valid.length) { toast.error('Import at least one valid pallet row (Pallet Description, Total Pallet)'); return; }
+    if (!valid.length) { toast.error('Import at least one valid pallet row (Pallet Name, Total Pallet)'); return; }
     // client-side availability check
     const insufficient = valid.filter(i => (available[i.groupName] || 0) < i.pallets);
     if (insufficient.length) { toast.error(`Insufficient pallet stock for: ${insufficient.map(i=>i.groupName).join(', ')}`); return; }
@@ -158,7 +176,7 @@ export default function Transfer() {
       const ws = wb.Sheets[wb.SheetNames[0]];
       const rawRows: any[] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
       if (!rawRows.length) { toast.error('Empty worksheet'); return; }
-      const expectedHeader = ['Pallet Description', 'Total Pallet'];
+      const expectedHeader = ['Pallet Name', 'Total Pallet'];
       const normHeader = (h: any) => String(h || '').trim().toLowerCase();
       const receivedHeader = Array.isArray(rawRows[0]) ? rawRows[0].map(normHeader) : [];
       const expectedHeaderNorm = expectedHeader.map(normHeader);
@@ -172,12 +190,14 @@ export default function Transfer() {
       const rows: any[] = XLSX.utils.sheet_to_json(ws, { defval: '' });
       const parsed: TransferPallet[] = [];
       for (const r of rows) {
-        const groupName = String(r['Pallet Description'] ?? r['pallet description'] ?? r['Pallet Group'] ?? r['pallet group'] ?? r.groupName ?? r.GroupName ?? '').trim();
+        const palletName = String(r['Pallet Name'] ?? r['pallet name'] ?? r.palletName ?? r.PalletName ?? '').trim();
         const pallets = Number(r['Total Pallet'] ?? r['total pallet'] ?? r.pallets ?? r.Pallets ?? 0);
-        if (!groupName || !Number.isFinite(pallets) || pallets <= 0) continue;
-        parsed.push({ groupName, pallets });
+        if (!palletName || !Number.isFinite(pallets) || pallets <= 0) continue;
+        const resolved = String(groupByPalletName?.[palletName.toLowerCase()] || '').trim();
+        if (!resolved) continue;
+        parsed.push({ groupName: resolved, pallets });
       }
-      if (!parsed.length) { toast.error('No valid rows found (need Pallet Description, Total Pallet)'); return; }
+      if (!parsed.length) { toast.error('No valid rows found (need Pallet Name, Total Pallet)'); return; }
       setItems(parsed);
       toast.success(`Loaded ${parsed.length} items from file`);
     } catch (e:any) {
@@ -186,8 +206,8 @@ export default function Transfer() {
   };
 
   const downloadTemplate = () => {
-    const header = ['Pallet Description','Total Pallet'];
-    const ws = XLSX.utils.aoa_to_sheet([header, ['Inverted Planters Mixed Smooth and VA (OW / MB / C / DAB)', 1]]);
+    const header = ['Pallet Name','Total Pallet'];
+    const ws = XLSX.utils.aoa_to_sheet([header, ['IPMSVA', 1]]);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Template');
     XLSX.writeFile(wb, 'transfer_pallet_template.xlsx');
@@ -229,12 +249,10 @@ export default function Transfer() {
           <TextField label="PO #" size="small" value={poNumber} onChange={(e)=>setPoNumber(e.target.value)} fullWidth />
         </Stack>
         <Stack direction={{ xs:'column', md:'row' }} spacing={2} alignItems="center" sx={{ mb:2 }}>
-          {isAdmin && (
-            <>
-              <input key={fileInputKey} type="file" accept=".xlsx" onChange={(e)=> setFile(e.target.files?.[0] || null)} />
-              <Button variant="outlined" onClick={importXlsx} disabled={!file}>Import .xlsx</Button>
-            </>
-          )}
+          <>
+            <input key={fileInputKey} type="file" accept=".xlsx" onChange={(e)=> setFile(e.target.files?.[0] || null)} />
+            <Button variant="outlined" onClick={importXlsx} disabled={!file}>Import .xlsx</Button>
+          </>
           <Button variant="text" onClick={downloadTemplate}>Download Template</Button>
         </Stack>
         <Paper variant="outlined" sx={{ p:2 }}>
@@ -242,7 +260,7 @@ export default function Transfer() {
           <table style={{ width:'100%', borderCollapse:'collapse' }}>
             <thead>
               <tr>
-                <th align="left">Pallet Description</th>
+                <th align="left">Pallet Name</th>
                 <th align="right">Total Pallet</th>
                 <th align="right">Available (source)</th>
                 <th align="left">Status</th>
@@ -252,9 +270,14 @@ export default function Transfer() {
               {items.map((it, idx) => {
                 const avail = available[it.groupName] || 0;
                 const ok = Number(it.pallets) > 0 && avail >= Number(it.pallets);
+                const nameLabel = (() => {
+                  const by = groupByPalletName || {};
+                  const hit = Object.keys(by).find((k) => String(by[k] || '') === String(it.groupName || ''));
+                  return hit ? String(hit) : '';
+                })();
                 return (
                   <tr key={idx} style={{ borderTop:'1px solid #eee', background: ok ? undefined : '#fff4f4' }}>
-                    <td>{it.groupName}</td>
+                    <td>{nameLabel || it.groupName}</td>
                     <td align="right">{it.pallets}</td>
                     <td align="right">{avail}</td>
                     <td style={{ color: ok ? '#2e7d32' : '#c62828' }}>{ok ? 'OK' : 'Insufficient'}</td>

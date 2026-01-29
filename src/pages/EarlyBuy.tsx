@@ -47,6 +47,8 @@ export default function EarlyBuy() {
   const [open, setOpen] = useState(false);
   const [editingOrder, setEditingOrder] = useState<EarlyOrder | null>(null);
 
+  const [palletDescByGroup, setPalletDescByGroup] = useState<Record<string, string>>({});
+
   // Form state
   const [status, setStatus] = useState<EarlyOrder['status']>('processing');
   const [customerEmail, setCustomerEmail] = useState('');
@@ -74,13 +76,56 @@ export default function EarlyBuy() {
     return !editingOrder || (status !== 'completed' && status !== 'canceled');
   }, [editingOrder, status]);
 
+  const [originalPrice, setOriginalPrice] = useState('');
+  const [shippingPercent, setShippingPercent] = useState('');
+  const [discountPercent, setDiscountPercent] = useState('');
+  const [notes, setNotes] = useState('');
+
   const handleStatusChange = useCallback((nextRaw: any) => {
-    const next = String(nextRaw || '').trim() as EarlyOrder['status'];
+    const extracted = (nextRaw && typeof nextRaw === 'object' && 'target' in nextRaw)
+      ? (nextRaw as any)?.target?.value
+      : nextRaw;
+    const next = String(extracted || '').trim().toLowerCase() as EarlyOrder['status'];
+    if (!['processing', 'ready_to_ship', 'shipped', 'completed', 'canceled'].includes(String(next))) return;
+    if (next === 'shipped') {
+      const op = Number(originalPrice);
+      const sp = Number(shippingPercent);
+      const dp = Number(discountPercent);
+      if (!String(originalPrice || '').trim() || !Number.isFinite(op) || op <= 0) {
+        toast?.error?.('Original Price is required before setting status to SHIPPED');
+        return;
+      }
+      if (!String(shippingPercent || '').trim() || !Number.isFinite(sp) || sp < 0 || sp > 100) {
+        toast?.error?.('Shipping Charges (%) is required before setting status to SHIPPED');
+        return;
+      }
+      if (!String(discountPercent || '').trim() || !Number.isFinite(dp) || dp < 0 || dp > 100) {
+        toast?.error?.('Discount (%) is required before setting status to SHIPPED');
+        return;
+      }
+    }
     if (next === 'completed') {
       if (!String(estDelivered || '').trim()) {
         toast?.error?.('Estimated Arrival Date is required before setting status to COMPLETED');
         return;
       }
+
+      const op = Number(originalPrice);
+      const sp = Number(shippingPercent);
+      const dp = Number(discountPercent);
+      if (!String(originalPrice || '').trim() || !Number.isFinite(op) || op <= 0) {
+        toast?.error?.('Original Price is required before setting status to COMPLETED');
+        return;
+      }
+      if (!String(shippingPercent || '').trim() || !Number.isFinite(sp) || sp < 0 || sp > 100) {
+        toast?.error?.('Shipping Charges (%) is required before setting status to COMPLETED');
+        return;
+      }
+      if (!String(discountPercent || '').trim() || !Number.isFinite(dp) || dp < 0 || dp > 100) {
+        toast?.error?.('Discount (%) is required before setting status to COMPLETED');
+        return;
+      }
+
       const ok = window.confirm(
         'Are you sure you want to change the status to COMPLETED?\n\nThis cannot be undone and you can no longer edit the order.'
       );
@@ -93,11 +138,7 @@ export default function EarlyBuy() {
       if (!ok) return;
     }
     setStatus(next);
-  }, [estDelivered, toast]);
-  const [originalPrice, setOriginalPrice] = useState('');
-  const [shippingPercent, setShippingPercent] = useState('');
-  const [discountPercent, setDiscountPercent] = useState('');
-  const [notes, setNotes] = useState('');
+  }, [discountPercent, estDelivered, originalPrice, shippingPercent, toast]);
 
   const computedFinalPrice = useMemo(() => {
     const op = Number(originalPrice);
@@ -143,6 +184,37 @@ export default function EarlyBuy() {
   const [palletItemsLoading, setPalletItemsLoading] = useState(false);
   const [palletItemsGroupName, setPalletItemsGroupName] = useState('');
   const [palletItemsRows, setPalletItemsRows] = useState<any[]>([]);
+
+  useEffect(() => {
+    try {
+      const cached = localStorage.getItem('palletDescByGroup');
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          setPalletDescByGroup(parsed as Record<string, string>);
+        }
+      }
+    } catch {}
+
+    let canceled = false;
+    (async () => {
+      try {
+        const { data } = await api.get<any[]>('/item-groups');
+        if (canceled) return;
+        const descMap: Record<string, string> = {};
+        for (const g of (Array.isArray(data) ? data : [])) {
+          const name = String((g as any)?.name || '').trim().toLowerCase();
+          if (!name) continue;
+          descMap[name] = String((g as any)?.palletDescription || '').trim();
+        }
+        setPalletDescByGroup(descMap);
+        try { localStorage.setItem('palletDescByGroup', JSON.stringify(descMap)); } catch {}
+      } catch {
+        if (!canceled) setPalletDescByGroup((m) => (m && Object.keys(m).length ? m : {}));
+      }
+    })();
+    return () => { canceled = true; };
+  }, []);
 
   const openPalletItems = useCallback(async ({ groupName }: { groupName: string }) => {
     const g = String(groupName || '').trim();
@@ -204,9 +276,10 @@ export default function EarlyBuy() {
       const gid = String(r?.lineItem || '').trim().toLowerCase();
       const gnameLower = String(r?.groupName || '').trim().toLowerCase();
       const pname = String(r?.palletName || '').trim().toLowerCase();
-      return gid.includes(q) || gnameLower.includes(q) || pname.includes(q);
+      const pdesc = String(palletDescByGroup?.[gnameLower] || '').trim().toLowerCase();
+      return gid.includes(q) || gnameLower.includes(q) || pname.includes(q) || pdesc.includes(q);
     });
-  }, [pickerRows, pickerQDebounced]);
+  }, [pickerRows, pickerQDebounced, palletDescByGroup]);
 
   const addSelectedToLines = () => {
     const rows = Array.isArray(pickerRows) ? pickerRows : [];
@@ -422,7 +495,11 @@ export default function EarlyBuy() {
 
   const linesColumns: GridColDef[] = useMemo(() => [
     { field: 'palletName', headerName: 'Pallet Name', width: 220 },
-    { field: 'groupName', headerName: 'Pallet Description', width: 260 },
+    { field: 'groupName', headerName: 'Pallet Description', width: 260, renderCell: (p: any) => {
+      const row: any = p?.row || {};
+      const gLower = String(row?.groupName || '').trim().toLowerCase();
+      return String(palletDescByGroup?.[gLower] || row?.groupName || '');
+    } },
     { field: 'lineItem', headerName: 'Pallet ID', width: 160 },
     {
       field: 'qty',
@@ -470,7 +547,7 @@ export default function EarlyBuy() {
         );
       },
     },
-  ], [lines]);
+  ], [lines, palletDescByGroup]);
 
   const refreshOrders = useCallback(async () => {
     try {
@@ -577,6 +654,26 @@ export default function EarlyBuy() {
     if (estDelivered && !isYmd(estDelivered)) errs.push('Estimated Arrival Date is invalid');
     if (estDelivered && estFulfillment && estDelivered < estFulfillment) errs.push('Estimated Arrival Date must be >= Estimated ShipDate');
 
+    // If status is SHIPPED, price fields are required
+    if (status === 'shipped') {
+      const op = Number(originalPrice);
+      const sp = Number(shippingPercent);
+      const dp = Number(discountPercent);
+      if (!String(originalPrice || '').trim() || !Number.isFinite(op) || op <= 0) errs.push('Original Price is required when status is SHIPPED');
+      if (!String(shippingPercent || '').trim() || !Number.isFinite(sp) || sp < 0 || sp > 100) errs.push('Shipping Charges (%) is required when status is SHIPPED');
+      if (!String(discountPercent || '').trim() || !Number.isFinite(dp) || dp < 0 || dp > 100) errs.push('Discount (%) is required when status is SHIPPED');
+    }
+
+    // If status is COMPLETED, price fields are required
+    if (status === 'completed') {
+      const op = Number(originalPrice);
+      const sp = Number(shippingPercent);
+      const dp = Number(discountPercent);
+      if (!String(originalPrice || '').trim() || !Number.isFinite(op) || op <= 0) errs.push('Original Price is required when status is COMPLETED');
+      if (!String(shippingPercent || '').trim() || !Number.isFinite(sp) || sp < 0 || sp > 100) errs.push('Shipping Charges (%) is required when status is COMPLETED');
+      if (!String(discountPercent || '').trim() || !Number.isFinite(dp) || dp < 0 || dp > 100) errs.push('Discount (%) is required when status is COMPLETED');
+    }
+
     const rows = Array.isArray(lines) ? lines : [];
     if (rows.length === 0) errs.push('Please add at least one pallet');
     const anyQty = rows.some(l => Number(l.qty) > 0);
@@ -655,7 +752,9 @@ export default function EarlyBuy() {
     rows.push(['Pallets to Order']);
     rows.push(['Pallet ID', 'Pallet Name', 'Pallet Description', 'Qty Ordered']);
     for (const l of (row.lines||[])) {
-      rows.push([l.lineItem, l.palletName, l.groupName, Number(l.qty||0)]);
+      const gLower = String(l.groupName || '').trim().toLowerCase();
+      const desc = String(palletDescByGroup?.[gLower] || l.groupName || '');
+      rows.push([l.lineItem, l.palletName, desc, Number(l.qty||0)]);
     }
 
     const ws = XLSX.utils.aoa_to_sheet(rows);
@@ -860,7 +959,11 @@ export default function EarlyBuy() {
               }}
               columns={([
                 { field: 'palletName', headerName: 'Pallet Name', flex: 1, minWidth: 200, sortable: true },
-                { field: 'groupName', headerName: 'Pallet Description', flex: 1.2, minWidth: 260, sortable: true },
+                { field: 'groupName', headerName: 'Pallet Description', flex: 1.2, minWidth: 260, sortable: true, renderCell: (p: any) => {
+                  const row: any = p?.row || {};
+                  const gLower = String(row?.groupName || '').trim().toLowerCase();
+                  return String(palletDescByGroup?.[gLower] || row?.groupName || '');
+                } },
                 { field: 'lineItem', headerName: 'Pallet ID', width: 160, sortable: true },
               ]) as GridColDef[]}
               checkboxSelection

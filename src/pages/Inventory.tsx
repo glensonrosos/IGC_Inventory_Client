@@ -18,7 +18,7 @@ type GroupDetails = {
   recentTransactions: any[];
 };
 
-type ItemGroupOption = { _id: string; name: string };
+type ItemGroupOption = { _id: string; name: string; palletName?: string };
 
 export default function Inventory() {
   const [isAdmin, setIsAdmin] = useState(false);
@@ -50,6 +50,7 @@ export default function Inventory() {
   const [search, setSearch] = useState('');
   const [groupLineItemByName, setGroupLineItemByName] = useState<Record<string, string>>({});
   const [groupPalletNameByName, setGroupPalletNameByName] = useState<Record<string, string>>({});
+  const [groupPalletDescByName, setGroupPalletDescByName] = useState<Record<string, string>>({});
   const [importOpen, setImportOpen] = useState(false);
   const [lossOpen, setLossOpen] = useState(false);
   const [lossWarehouse, setLossWarehouse] = useState('');
@@ -83,7 +84,7 @@ export default function Inventory() {
     const current = getLossGroupName(lossItems[idx]?.group);
     if (!current) return '';
     const matches = lossItems.filter((it, i) => i !== idx && getLossGroupName(it?.group).toLowerCase() === current.toLowerCase());
-    return matches.length ? 'Duplicate pallet description' : '';
+    return matches.length ? 'Duplicate pallet name' : '';
   };
 
   const getLossRowOptions = (idx: number) => {
@@ -120,7 +121,10 @@ export default function Inventory() {
         const matchedByPalletName = Object.entries(groupPalletNameByName)
           .filter(([nameLower, pName]) => String(pName || '').toLowerCase().includes(qLower))
           .map(([nameLower]) => nameLower);
-        const matchedGroupNames = Array.from(new Set([...matchedById, ...matchedByPalletName]));
+        const matchedByPalletDesc = Object.entries(groupPalletDescByName)
+          .filter(([nameLower, desc]) => String(desc || '').toLowerCase().includes(qLower))
+          .map(([nameLower]) => nameLower);
+        const matchedGroupNames = Array.from(new Set([...matchedById, ...matchedByPalletName, ...matchedByPalletDesc]));
 
         // If Pallet ID or Pallet Name search yields group names that aren't in the server-filtered result, fetch all and filter locally
         const missingFromBase = new Set(
@@ -156,25 +160,30 @@ export default function Inventory() {
       const { data } = await api.get<any[]>('/item-groups');
       const idMap: Record<string, string> = {};
       const nameMap: Record<string, string> = {};
+      const descMap: Record<string, string> = {};
       for (const g of (Array.isArray(data) ? data : [])) {
         const name = String(g?.name || '').trim();
         if (!name) continue;
         const lineItem = String(g?.lineItem || '').trim();
         const palletName = String(g?.palletName || '').trim();
+        const palletDescription = String(g?.palletDescription || '').trim();
         idMap[name.toLowerCase()] = lineItem;
         nameMap[name.toLowerCase()] = palletName;
+        descMap[name.toLowerCase()] = palletDescription;
       }
       setGroupLineItemByName(idMap);
       setGroupPalletNameByName(nameMap);
+      setGroupPalletDescByName(descMap);
     } catch {
       setGroupLineItemByName({});
       setGroupPalletNameByName({});
+      setGroupPalletDescByName({});
     }
   };
 
   useEffect(() => { loadWarehouses(); }, []);
   useEffect(() => { loadItemGroups(); }, []);
-  useEffect(() => { loadGroups(); }, [search, groupLineItemByName, groupPalletNameByName]);
+  useEffect(() => { loadGroups(); }, [search, groupLineItemByName, groupPalletNameByName, groupPalletDescByName]);
 
   useEffect(() => {
     if (!lossOpen) return;
@@ -190,7 +199,7 @@ export default function Inventory() {
   const columns: GridColDef[] = useMemo(() => {
     const cols: GridColDef[] = [
       { field: 'palletName', headerName: 'Pallet Name', flex: 1, minWidth: 180 },
-      { field: 'groupName', headerName: 'Pallet Description', flex: 2, minWidth: 240 },
+      { field: 'palletDescription', headerName: 'Pallet Description', flex: 2, minWidth: 240 },
       { field: 'lineItem', headerName: 'Pallet ID', flex: 1, minWidth: 180 },
       { field: 'totalPallets', headerName: 'Total Pallets', type: 'number', align: 'right', headerAlign: 'right', width: 140 },
     ];
@@ -215,10 +224,12 @@ export default function Inventory() {
 
   const rows = useMemo(() => {
     return groups.map((g) => {
+      const gKeyLower = String(g.groupName || '').toLowerCase();
       const row: any = {
         id: g.groupName,
-        lineItem: groupLineItemByName[String(g.groupName || '').toLowerCase()] || '',
-        palletName: groupPalletNameByName[String(g.groupName || '').toLowerCase()] || '',
+        lineItem: groupLineItemByName[gKeyLower] || '',
+        palletName: groupPalletNameByName[gKeyLower] || '',
+        palletDescription: groupPalletDescByName[gKeyLower] || '',
         groupName: g.groupName,
         totalPallets: g.totalPallets || 0
       };
@@ -228,7 +239,7 @@ export default function Inventory() {
       }
       return row;
     });
-  }, [groups, warehouses, groupLineItemByName, groupPalletNameByName]);
+  }, [groups, warehouses, groupLineItemByName, groupPalletNameByName, groupPalletDescByName]);
 
   // After importing existing inventory, refresh list and trigger order rebalance
   const handleImported = async () => {
@@ -278,7 +289,7 @@ export default function Inventory() {
       .map((it) => ({ groupName: it.group?.name || '', qty: Number(it.qty) }))
       .filter((it) => it.groupName);
     if (normalized.length === 0) {
-      toast.error('At least one Pallet Description is required');
+      toast.error('At least one Pallet Name is required');
       return;
     }
     for (const it of normalized) {
@@ -291,7 +302,7 @@ export default function Inventory() {
     for (const it of normalized) {
       const key = it.groupName.toLowerCase();
       if (seen.has(key)) {
-        toast.error(`Duplicate Pallet Description: ${it.groupName}`);
+        toast.error(`Duplicate Pallet Name: ${it.groupName}`);
         return;
       }
       seen.add(key);
@@ -401,7 +412,7 @@ export default function Inventory() {
                 />
                 <Autocomplete
                   options={getLossRowOptions(idx)}
-                  getOptionLabel={(o)=> o?.name || ''}
+                  getOptionLabel={(o)=> (o as any)?.palletName || o?.name || ''}
                   value={row.group}
                   onChange={(_, v)=> {
                     setLossItems((prev)=> prev.map((p, i)=> i === idx ? { ...p, group: v } : p));
@@ -409,7 +420,7 @@ export default function Inventory() {
                   renderInput={(params)=> (
                     <TextField
                       {...params}
-                      label="Pallet Description"
+                      label="Pallet Name"
                       size="small"
                       error={Boolean(getLossRowError(idx))}
                       helperText={getLossRowError(idx) || ''}
@@ -443,7 +454,7 @@ export default function Inventory() {
               onClick={()=> setLossItems((prev)=> [...prev, { group: null, qty: '' }])}
               sx={{ alignSelf: 'flex-start' }}
             >
-              Add Pallet Description
+              Add Pallet Name
             </Button>
           </Stack>
         </DialogContent>

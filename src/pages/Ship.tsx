@@ -22,7 +22,7 @@ interface Shipment {
   createdAt: string;
 }
 
-interface ItemGroupRow { name: string; lineItem?: string; palletName?: string }
+interface ItemGroupRow { name: string; lineItem?: string; palletName?: string; palletDescription?: string }
 
 export default function Ship() {
   const [isAdmin, setIsAdmin] = useState(false);
@@ -57,6 +57,7 @@ export default function Ship() {
   const [warehouses, setWarehouses] = useState<any[]>([]);
   const [palletIdByGroup, setPalletIdByGroup] = useState<Record<string, string>>({});
   const [palletNameByGroup, setPalletNameByGroup] = useState<Record<string, string>>({});
+  const [palletDescByGroup, setPalletDescByGroup] = useState<Record<string, string>>({});
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(10);
   const [rowCount, setRowCount] = useState(0);
@@ -120,17 +121,21 @@ export default function Ship() {
         const groups = Array.isArray(data) ? data : [];
         const idMap: Record<string, string> = {};
         const nameMap: Record<string, string> = {};
+        const descMap: Record<string, string> = {};
         for (const g of groups) {
           const name = String((g as any)?.name || '').trim();
           if (!name) continue;
           idMap[name] = String((g as any)?.lineItem || '').trim();
           nameMap[name] = String((g as any)?.palletName || '').trim();
+          descMap[name] = String((g as any)?.palletDescription || '').trim();
         }
         setPalletIdByGroup(idMap);
         setPalletNameByGroup(nameMap);
+        setPalletDescByGroup(descMap);
       } catch {
         setPalletIdByGroup({});
         setPalletNameByGroup({});
+        setPalletDescByGroup({});
       }
     })();
   }, []);
@@ -208,6 +213,7 @@ export default function Ship() {
           palletSegs.map((p, idx) => ({
             id: `${p.groupName}-${idx}`,
             palletName: String(palletNameByGroup[String(p.groupName || '').trim()] || ''),
+            palletDescription: String(palletDescByGroup[String(p.groupName || '').trim()] || ''),
             palletId: String(palletIdByGroup[String(p.groupName || '').trim()] || ''),
             ...p,
           }))
@@ -234,6 +240,7 @@ export default function Ship() {
           Array.from(grouped.entries()).map(([groupName, pallets], idx) => ({
             id: `${groupName}-${idx}`,
             palletName: String(palletNameByGroup[String(groupName || '').trim()] || ''),
+            palletDescription: String(palletDescByGroup[String(groupName || '').trim()] || ''),
             palletId: String(palletIdByGroup[String(groupName || '').trim()] || ''),
             groupName,
             pallets,
@@ -515,6 +522,11 @@ export default function Ship() {
             columns={columns}
             loading={loading}
             disableRowSelectionOnClick
+            onRowDoubleClick={(params: any) => {
+              const sid = String((params as any)?.row?.id || (params as any)?.id || '');
+              if (!sid) return;
+              openView(sid);
+            }}
             getRowHeight={()=> 'auto'}
             sx={{
               '& .MuiDataGrid-cell': {
@@ -544,7 +556,7 @@ export default function Ship() {
                   rows={viewPalletRows}
                   columns={([
                     { field: 'palletName', headerName: 'Pallet Name', flex: 1, minWidth: 200 },
-                    { field: 'groupName', headerName: 'Pallet Description', flex: 1, minWidth: 240 },
+                    { field: 'palletDescription', headerName: 'Pallet Description', flex: 1, minWidth: 240 },
                     { field: 'palletId', headerName: 'Pallet ID', width: 160 },
                     { field: 'pallets', headerName: 'Qty', width: 120, type: 'number', align: 'right', headerAlign: 'right' },
                   ]) as GridColDef[]}
