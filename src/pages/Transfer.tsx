@@ -7,7 +7,7 @@ import { useToast } from '../components/ToastProvider';
  
 
 interface Warehouse { _id: string; name: string }
-interface TransferPallet { groupName: string; pallets: number }
+interface TransferPallet { groupName: string; pallets: number; palletName?: string }
 
 export default function Transfer() {
   const [isAdmin, setIsAdmin] = useState(false);
@@ -51,6 +51,7 @@ export default function Transfer() {
   const navigate = useNavigate();
   const [available, setAvailable] = useState<Record<string, number>>({});
   const [groupByPalletName, setGroupByPalletName] = useState<Record<string, string>>({});
+  const [palletNameByGroup, setPalletNameByGroup] = useState<Record<string, string>>({});
   const [file, setFile] = useState<File | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
   const todayYmd = useMemo(() => new Date().toISOString().slice(0, 10), []);
@@ -68,15 +69,19 @@ export default function Transfer() {
     try {
       const { data } = await api.get('/item-groups');
       const map: Record<string, string> = {};
+      const byGroup: Record<string, string> = {};
       (Array.isArray(data) ? data : []).forEach((g: any) => {
         const groupName = String(g?.name || '').trim();
         const palletName = String(g?.palletName || '').trim();
         if (!groupName || !palletName) return;
         map[palletName.toLowerCase()] = groupName;
+        byGroup[groupName.toLowerCase()] = palletName;
       });
       setGroupByPalletName(map);
+      setPalletNameByGroup(byGroup);
     } catch {
       setGroupByPalletName({});
+      setPalletNameByGroup({});
     }
   };
 
@@ -98,10 +103,13 @@ export default function Transfer() {
       const map: Record<string, number> = {};
       (Array.isArray(data) ? data : []).forEach((g: any) => {
         const groupName = String(g.groupName || '').trim();
-        if (!groupName) return;
+        const gLower = groupName.toLowerCase();
+        if (!gLower) return;
         const per = Array.isArray(g.perWarehouse) ? g.perWarehouse : [];
         const rec = per.find((p: any) => String(p.warehouseId) === String(srcId));
-        map[groupName] = Number(rec?.pallets || 0);
+        const pName = String(palletNameByGroup?.[gLower] || '').trim();
+        const key = String(pName || '').toLowerCase();
+        if (key) map[key] = Number(rec?.pallets || 0);
       });
       setAvailable(map);
     } catch {
@@ -121,7 +129,6 @@ export default function Transfer() {
       resetImport();
       await loadWarehouses();
       await loadPalletNameLookup();
-      await loadStock(sourceWarehouseId);
     } finally {
       setRefreshing(false);
     }
@@ -133,8 +140,12 @@ export default function Transfer() {
   }, []);
 
   useEffect(() => {
-    loadStock(sourceWarehouseId);
-  }, [sourceWarehouseId]);
+    const srcId = String(sourceWarehouseId || '').trim();
+    if (!srcId) return;
+    const hasMap = palletNameByGroup && Object.keys(palletNameByGroup).length > 0;
+    if (!hasMap) return;
+    loadStock(srcId);
+  }, [sourceWarehouseId, palletNameByGroup]);
 
   // Items are provided exclusively by .xlsx import
 
@@ -146,7 +157,7 @@ export default function Transfer() {
     const valid = items.filter(i => i.groupName && Number.isFinite(i.pallets) && i.pallets > 0);
     if (!valid.length) { toast.error('Import at least one valid pallet row (Pallet Name, Total Pallet)'); return; }
     // client-side availability check
-    const insufficient = valid.filter(i => (available[i.groupName] || 0) < i.pallets);
+    const insufficient = valid.filter(i => (available[String(i.palletName || '').trim().toLowerCase()] || 0) < i.pallets);
     if (insufficient.length) { toast.error(`Insufficient pallet stock for: ${insufficient.map(i=>i.groupName).join(', ')}`); return; }
     setSubmitting(true);
     try {
@@ -195,7 +206,7 @@ export default function Transfer() {
         if (!palletName || !Number.isFinite(pallets) || pallets <= 0) continue;
         const resolved = String(groupByPalletName?.[palletName.toLowerCase()] || '').trim();
         if (!resolved) continue;
-        parsed.push({ groupName: resolved, pallets });
+        parsed.push({ groupName: resolved, palletName, pallets });
       }
       if (!parsed.length) { toast.error('No valid rows found (need Pallet Name, Total Pallet)'); return; }
       setItems(parsed);
@@ -268,16 +279,11 @@ export default function Transfer() {
             </thead>
             <tbody>
               {items.map((it, idx) => {
-                const avail = available[it.groupName] || 0;
+                const avail = available[String(it.palletName || '').trim().toLowerCase()] || 0;
                 const ok = Number(it.pallets) > 0 && avail >= Number(it.pallets);
-                const nameLabel = (() => {
-                  const by = groupByPalletName || {};
-                  const hit = Object.keys(by).find((k) => String(by[k] || '') === String(it.groupName || ''));
-                  return hit ? String(hit) : '';
-                })();
                 return (
                   <tr key={idx} style={{ borderTop:'1px solid #eee', background: ok ? undefined : '#fff4f4' }}>
-                    <td>{nameLabel || it.groupName}</td>
+                    <td>{String(it.palletName || '') || it.groupName}</td>
                     <td align="right">{it.pallets}</td>
                     <td align="right">{avail}</td>
                     <td style={{ color: ok ? '#2e7d32' : '#c62828' }}>{ok ? 'OK' : 'Insufficient'}</td>
@@ -293,7 +299,7 @@ export default function Transfer() {
         <Stack direction="row" spacing={1} sx={{ mt:2 }}>
           <Button variant="outlined" onClick={()=>{ setItems([]); setFile(null); }}>Clear</Button>
           {isAdmin && (
-            <Button variant="contained" onClick={submit} disabled={submitting || !items.length || !poNumber.trim() || items.some(i=> (available[i.groupName]||0) < Number(i.pallets) || Number(i.pallets)<=0)}>Create Transfer</Button>
+            <Button variant="contained" onClick={submit} disabled={submitting || !items.length || !poNumber.trim() || items.some(i=> (available[String(i.palletName||'').trim().toLowerCase()]||0) < Number(i.pallets) || Number(i.pallets)<=0)}>Create Transfer</Button>
           )}
         </Stack>
         <Typography variant="body2" sx={{ display: 'block', mt: 1, color: 'error.main' }}>
