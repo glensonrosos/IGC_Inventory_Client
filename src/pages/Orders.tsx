@@ -2,13 +2,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Container, Typography, Paper, Stack, TextField, Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions, LinearProgress, MenuItem, Box, Chip, Accordion, AccordionSummary, AccordionDetails, Tooltip } from '@mui/material';
 import Autocomplete from '@mui/material/Autocomplete';
 import DeleteIcon from '@mui/icons-material/Delete';
+import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
-import * as XLSX from 'xlsx';
+import XLSX from 'xlsx-js-style';
 import { DataGrid, GridColDef, GridToolbar } from '@mui/x-data-grid';
 import api from '../api';
 import { useToast } from '../components/ToastProvider';
 import { formatDateTimeUS } from '../utils/datetime';
+import pdfMake from 'pdfmake/build/pdfmake';
+import pdfFonts from 'pdfmake/build/vfs_fonts';
+// Support different export shapes between CJS/ESM bundles
+try {
+  const anyFonts: any = pdfFonts as any;
+  (pdfMake as any).vfs = anyFonts?.pdfMake?.vfs || anyFonts?.vfs || (pdfMake as any).vfs || {};
+} catch {}
 
 type Warehouse = { _id: string; name: string };
 
@@ -90,6 +98,7 @@ export default function Orders() {
   const [manualShippingPercent, setManualShippingPercent] = useState('');
   const [manualDiscountPercent, setManualDiscountPercent] = useState('');
   const [manualLineMode, setManualLineMode] = useState<'pallet_group' | 'line_item'>('pallet_group');
+  const [manualUnitPriceByRow, setManualUnitPriceByRow] = useState<Record<string, number>>({});
   const [manualPalletGroupOptions, setManualPalletGroupOptions] = useState<string[]>([]);
   const [manualLineItemOptions, setManualLineItemOptions] = useState<string[]>([]);
   const [manualLines, setManualLines] = useState<Array<{ lineItem: string; qty: string }>>([{ lineItem: '', qty: '' }]);
@@ -108,6 +117,81 @@ export default function Orders() {
       if (el && typeof el.blur === 'function') el.blur();
     } catch {}
   }, []);
+
+  // Refs to late-defined helpers to avoid TDZ in early effects
+  const refreshPickerRef = useRef<null | ((wid: string) => Promise<any>)>(null);
+  const refreshAllocRef = useRef<null | ((rawId: string) => Promise<any>)>(null);
+
+  // Auto-refresh Orders list so statuses (PROCESSING/READY TO SHIP) and reserved stock reflect latest hierarchy
+  useEffect(() => {
+    let stopped = false;
+    let ticking = false;
+    const tick = async () => {
+      if (stopped) return;
+      if (manualOpen) return; // don't interrupt when add/edit dialog is open
+      if (ticking) return;
+      ticking = true;
+      try { await api.post('/orders/unfulfilled/rebalance-processing', {}); } catch {}
+      try { await new Promise((r) => setTimeout(r, 180)); } catch {}
+      try { await loadOrders(); } catch {}
+      ticking = false;
+    };
+    const onFocus = () => { void tick(); };
+    const interval = setInterval(tick, 60000); // every 60s
+    window.addEventListener('focus', onFocus);
+    const kick = setTimeout(tick, 300);
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+      clearTimeout(kick);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [manualOpen]);
+
+  // While viewing/editing an order, auto-refresh the Reserved Stock (Hierarchy)
+  useEffect(() => {
+    if (!manualOpen) return;
+    const rawId = String((manualEditRow as any)?.rawId || '').trim();
+    const wid = String(manualWarehouseId || '').trim();
+    let stopped = false;
+    let ticking = false;
+    const tick = async () => {
+      if (stopped) return;
+      if (ticking) return;
+      ticking = true;
+      try { await api.post('/orders/unfulfilled/rebalance-processing', {}); } catch {}
+      try { await new Promise((r) => setTimeout(r, 150)); } catch {}
+      try { if (wid) await refreshPickerRef.current?.(wid); } catch {}
+      try { if (rawId) await refreshAllocRef.current?.(rawId); } catch {}
+      ticking = false;
+    };
+    const onFocus = () => { void tick(); };
+    const interval = setInterval(tick, 30000); // every 30s while dialog is open
+    window.addEventListener('focus', onFocus);
+    const kick = setTimeout(tick, 200);
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+      clearTimeout(kick);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [manualOpen, manualEditRow, manualWarehouseId]);
+
+  // After helpers are declared, assign them to refs for early effects to use safely
+  useEffect(() => {
+    // @ts-ignore
+    refreshPickerRef.current = typeof refreshManualPicker === 'function' ? refreshManualPicker : null;
+    // @ts-ignore
+    refreshAllocRef.current = typeof refreshManualAllocations === 'function' ? refreshManualAllocations : null;
+  });
+
+  const keyToGroupName = (key: string) => String(key || '').split('||')[0];
+
+  const makeRowKey = (groupName: string) => {
+    const g = String(groupName || '').trim();
+    const uid = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    return `${g}||${uid}`;
+  };
 
   const openOrderableGroupItems = useCallback(async ({ groupName }: { groupName: string }) => {
     const g = String(groupName || '').trim();
@@ -133,10 +217,14 @@ export default function Orders() {
   const [manualPickerWarehouses, setManualPickerWarehouses] = useState<Array<{ _id: string; name: string }>>([]);
   const [manualPickerRows, setManualPickerRows] = useState<any[]>([]);
   const [manualOrderQtyByGroup, setManualOrderQtyByGroup] = useState<Record<string, string>>({});
+  const [manualDiscountByGroup, setManualDiscountByGroup] = useState<Record<string, string>>({});
   const [manualShipdateTouched, setManualShipdateTouched] = useState(false);
+  const [manualStatusTouched, setManualStatusTouched] = useState(false);
   const [manualPickOpen, setManualPickOpen] = useState(false);
   const [manualPickSelected, setManualPickSelected] = useState<any>({ type: 'include', ids: new Set() });
   const [manualOrderGroups, setManualOrderGroups] = useState<string[]>([]);
+  const [manualBaseTiersByGroup, setManualBaseTiersByGroup] = useState<Record<string, { primary: number; onWater: number; second: number; onProcess: number; total: number }>>({});
+  
 
   const [onWaterOpen, setOnWaterOpen] = useState(false);
   const [onWaterLoading, setOnWaterLoading] = useState(false);
@@ -257,14 +345,33 @@ export default function Orders() {
     let stopped = false;
     const loadPrices = async () => {
       try {
-        const { data } = await api.get<any[]>('/item-groups');
+        // Mirror Pallet Registry logic: compute pallet price as sum of item prices per pallet group
+        const [groupsRes, itemsRes] = await Promise.all([
+          api.get<any[]>('/item-groups'),
+          api.get<any[]>('/items', { params: { includeDisabled: 1 } }),
+        ]);
+
+        const groups = Array.isArray(groupsRes.data) ? groupsRes.data : [];
+        const items = Array.isArray(itemsRes.data) ? itemsRes.data : [];
+
+        const activeSet = new Set(
+          groups
+            .filter((g: any) => (g as any).active !== false)
+            .map((g: any) => String(g?.name || '').trim())
+            .filter((v: string) => v)
+        );
+
         const map: Record<string, number> = {};
-        for (const g of (Array.isArray(data) ? data : [])) {
-          const name = String(g?.name || '').trim().toLowerCase();
-          if (!name) continue;
-          const p = Number(g?.price);
-          if (Number.isFinite(p)) map[name] = p;
+        for (const it of items as any[]) {
+          const groupName = String((it as any)?.itemGroup || '').trim();
+          if (!groupName || !activeSet.has(groupName)) continue;
+          const key = groupName.toLowerCase();
+          const prev = map[key] || 0;
+          const pack = Number((it as any).packSize ?? 0) || 0;
+          const price = Number((it as any).price ?? 0) || 0;
+          map[key] = prev + (pack * price);
         }
+
         if (!stopped) setGroupPriceByName(map);
       } catch {
         if (!stopped) setGroupPriceByName({});
@@ -474,6 +581,7 @@ export default function Orders() {
     setManualOpen(true);
     setManualWarehouseId(String(row?.warehouseId || fixedWarehouseId));
     setManualStatus((normalizeStatus(row?.status || '') as any) || 'processing');
+    setManualStatusTouched(false);
     setManualCustomerEmail(String(row?.email || '').trim());
     setManualCustomerName(String(row?.customerName || '').trim());
     setManualCustomerPhone(String(row?.customerPhone || '').trim());
@@ -503,20 +611,53 @@ export default function Orders() {
     const baseLines = Array.isArray(row?.lines) ? row.lines : [];
     const groups: string[] = [];
     const qtyBy: Record<string, string> = {};
+    const discountBy: Record<string, string> = {};
+    const baseTiersMap: Record<string, { primary: number; onWater: number; second: number; onProcess: number; total: number }> = {};
+    const unitByRow: Record<string, number> = {};
     const baseMap = new Map<string, string>();
     for (const l of baseLines) {
       const g = String(l?.groupName || l?.lineItem || '').trim();
       if (!g) continue;
-      groups.push(g);
+
+      // Create a unique row key per line so duplicates are preserved as separate rows
+      const rowKey = makeRowKey(g);
+      groups.push(rowKey);
+
       const q = Math.floor(Number(l?.qty || 0));
-      qtyBy[g] = q > 0 ? String(q) : '';
-      const gLower = String(l?.groupName || '').trim().toLowerCase();
+      qtyBy[rowKey] = q > 0 ? String(q) : '';
+
+      const gLower = String(l?.groupName || g || '').trim().toLowerCase();
       const id = String(l?.lineItem || '').trim();
       if (gLower && id && !baseMap.has(gLower)) baseMap.set(gLower, id);
+
+      const discRaw = Number((l as any)?.discountPercent ?? (l as any)?.discount ?? 0);
+      if (Number.isFinite(discRaw)) {
+        const sanitized = Math.max(0, Math.min(100, Math.floor(discRaw)));
+        discountBy[rowKey] = String(sanitized);
+      }
+      const unitRaw = Number((l as any)?.unitPrice);
+      if (Number.isFinite(unitRaw) && unitRaw >= 0) {
+        unitByRow[rowKey] = unitRaw;
+      }
+      const bt = (l as any)?.baseTiers;
+      if (bt && typeof bt === 'object') {
+        const primary = Math.max(0, Math.floor(Number((bt as any)?.primary || 0)));
+        const onWater = Math.max(0, Math.floor(Number((bt as any)?.onWater || 0)));
+        const second = Math.max(0, Math.floor(Number((bt as any)?.second || 0)));
+        const onProcess = Math.max(0, Math.floor(Number((bt as any)?.onProcess || 0)));
+        const total = Math.max(0, Math.floor(Number((bt as any)?.total || (primary + onWater + second + onProcess))));
+        const gLowerKey = String((l as any)?.groupName || '').trim().toLowerCase();
+        if (gLowerKey && !baseTiersMap[gLowerKey]) baseTiersMap[gLowerKey] = { primary, onWater, second, onProcess, total };
+      }
     }
-    setManualOrderGroups(Array.from(new Set(groups)));
+    setManualOrderGroups(groups);
     setManualOrderQtyByGroup(qtyBy);
+    setManualDiscountByGroup(discountBy);
+    setManualBaseTiersByGroup(baseTiersMap);
+    setManualUnitPriceByRow(unitByRow);
     manualBaseLineItemByGroupRef.current = baseMap;
+    // Kick a recompute so Available Qty/rows reflect hydrated quantities immediately
+    setManualRecalcTick((t) => t + 1);
 
     try {
       const wid = String(row?.warehouseId || fixedWarehouseId || '').trim();
@@ -525,6 +666,8 @@ export default function Orders() {
         const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: wid } });
         setManualPickerRows(Array.isArray(data?.rows) ? data.rows : []);
         setManualPickerWarehouses(Array.isArray(data?.warehouses) ? data.warehouses : []);
+        // Ensure grid recomputes once source availability data arrives
+        setManualRecalcTick((t) => t + 1);
       }
     } catch {
       setManualPickerRows([]);
@@ -536,15 +679,37 @@ export default function Orders() {
     try {
       const rawId = String(row?.rawId || '').trim();
       if (rawId) {
-        const { data } = await api.get(`/orders/unfulfilled/${rawId}`);
-        setManualAllocations(Array.isArray((data as any)?.allocations) ? (data as any).allocations : []);
-        setManualReservedBreakdown(Array.isArray((data as any)?.reservedBreakdown) ? (data as any).reservedBreakdown : []);
-        setManualLastUpdatedAt(toLocalDateTime((data as any)?.updatedAt || (data as any)?.createdAt || ''));
-        setManualLastUpdatedBy(String((data as any)?.lastUpdatedBy || '').trim());
-        // Reflect any server-side rebalancing result in the modal immediately
-        const nextStatus = (normalizeStatus((data as any)?.status || '') as any) || 'processing';
-        setManualStatus(nextStatus);
-        setManualEstFulfillment(toYmd((data as any)?.estFulfillmentDate));
+        // Proactively rebalance before fetching details to avoid stale reserved breakdown
+        try {
+          const wid = String(row?.warehouseId || fixedWarehouseId || '').trim();
+          const groups = Array.isArray(row?.lines) ? Array.from(new Set(row.lines.map((l:any)=> String(l?.groupName || l?.lineItem || '').trim()).filter(Boolean))) : [];
+          await api.post('/orders/unfulfilled/rebalance-processing', { warehouseId: wid || undefined, groupNames: groups.length ? groups : undefined });
+        } catch {}
+        // Trailing refresh to catch any server writes that land just after first fetch
+        try {
+          const laterRaw = rawId;
+          setTimeout(async () => {
+            try {
+              const wid2 = String(row?.warehouseId || fixedWarehouseId || '').trim();
+              const groups2 = Array.isArray(row?.lines) ? Array.from(new Set(row.lines.map((l:any)=> String(l?.groupName || l?.lineItem || '').trim()).filter(Boolean))) : [];
+              await api.post('/orders/unfulfilled/rebalance-processing', { warehouseId: wid2 || undefined, groupNames: groups2.length ? groups2 : undefined });
+            } catch {}
+            try { await new Promise((r) => setTimeout(r, 250)); } catch {}
+            try { await refreshManualAllocations(laterRaw); } catch {}
+          }, 900);
+        } catch {}
+        try { await new Promise((r) => setTimeout(r, 180)); } catch {}
+        const { allocations, reserved } = await refreshManualAllocations(rawId);
+        setManualAllocations(Array.isArray(allocations) ? allocations : []);
+        setManualReservedBreakdown(Array.isArray(reserved) ? reserved : []);
+        try {
+          const { data } = await api.get(`/orders/unfulfilled/${rawId}`);
+          setManualLastUpdatedAt(toLocalDateTime((data as any)?.updatedAt || (data as any)?.createdAt || ''));
+          setManualLastUpdatedBy(String((data as any)?.lastUpdatedBy || '').trim());
+          const nextStatus = (normalizeStatus((data as any)?.status || '') as any) || 'processing';
+          if (!manualStatusTouched) setManualStatus(nextStatus);
+          setManualEstFulfillment(toYmd((data as any)?.estFulfillmentDate));
+        } catch {}
       }
     } catch {
       setManualAllocations(Array.isArray((row as any)?.allocations) ? ((row as any).allocations as any) : []);
@@ -822,15 +987,23 @@ export default function Orders() {
     const cols: any[] = [
       { field: 'palletName', headerName: 'Pallet Name', flex: 1, minWidth: 200, renderCell: (p: any) => {
         const fromRow = String((p?.row as any)?.palletName || '').trim();
-        if (fromRow) return fromRow;
-        const g = String(p?.row?.groupName || '').trim().toLowerCase();
-        return String(palletNameByGroup?.[g] || '');
+        const gRaw = String(p?.row?.groupName || '').trim();
+        const gLower = gRaw.toLowerCase();
+        const isAdded = (manualOrderGroups || []).some((k) => keyToGroupName(String(k || '')).trim().toLowerCase() === gLower);
+        const base = fromRow || String(palletNameByGroup?.[gLower] || '');
+        return isAdded && base ? `${base} — Added` : (base || '');
       } },
       { field: 'palletDescription', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => {
         const g = String(p?.row?.groupName || '').trim().toLowerCase();
         return String(palletDescByGroup?.[g] || '');
       } },
       { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
+      { field: 'palletPrice', headerName: 'Pallet Price', width: 120, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => {
+        const gLower = String(p?.row?.groupName || '').trim().toLowerCase();
+        const val = Number(groupPriceByName?.[gLower]);
+        if (!Number.isFinite(val)) return '';
+        return val.toFixed(2);
+      } },
       { field: 'selectedWarehouseAvailable', headerName: `${cleanedPrimaryName}`, width: 90, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
     ];
 
@@ -960,13 +1133,40 @@ export default function Orders() {
         return Math.max(0, Math.floor(total));
       },
       renderCell: (p: any) => {
-        const v = Number((p && typeof p === 'object' && 'value' in p) ? (p as any).value : 0);
-        return String(Number.isFinite(v) ? v : 0);
+        const row = (p && typeof p === 'object' && 'row' in p) ? (p as any).row : {};
+        if (row && (row as any).isDuplicate) return '-';
+        const primary = Number((row as any)?.selectedWarehouseAvailable ?? 0);
+        const onWater = Number((row as any)?.onWaterPallets ?? 0);
+        const onProcess = Number((row as any)?.onProcessPallets ?? 0);
+        let second = 0;
+        if (secondWarehouse?._id) {
+          const per = (row as any)?.perWarehouse || {};
+          const wid = String(secondWarehouse._id);
+          second = Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0);
+        }
+        let baseTotal =
+          (Number.isFinite(primary) ? primary : 0) +
+          (Number.isFinite(onWater) ? onWater : 0) +
+          (Number.isFinite(second) ? second : 0) +
+          (Number.isFinite(onProcess) ? onProcess : 0);
+        const gLower = String((row as any)?.groupName || '').trim().toLowerCase();
+        let otherQty = 0;
+        for (const r of (Array.isArray(manualOrderRows) ? manualOrderRows : []) as any[]) {
+          const rg = String((r as any)?.groupName || '').trim().toLowerCase();
+          const rid = String((r as any)?.id || '');
+          if (rg === gLower) {
+            const qRaw = (manualOrderQtyByGroup as any)?.[rid] ?? '';
+            const q = Math.max(0, Math.floor(Number(qRaw || 0)) || 0);
+            otherQty += q;
+          }
+        }
+        const remaining = Math.max(0, Math.floor(baseTotal - otherQty));
+        return String(remaining);
       },
     });
 
     return cols;
-  }, [manualWarehouseName, manualPickerEddLists, manualPickerWarehouses, manualWarehouseId, palletNameByGroup, palletDescByGroup]);
+  }, [manualWarehouseName, manualPickerEddLists, manualPickerWarehouses, manualWarehouseId, palletNameByGroup, palletDescByGroup, groupPriceByName, manualOrderGroups]);
 
   // Map the original order's lines to quickly lookup Pallet ID by Pallet Description
   const manualLineItemByGroup = useMemo(() => {
@@ -985,94 +1185,189 @@ export default function Orders() {
   }, [manualEditRow]);
 
   const manualOrderRows = useMemo(() => {
-    return (manualOrderGroups || [])
-      .map((g) => {
-        const r: any = manualPickerRowByGroup.get(String(g)) || {};
-        return { id: String(g), ...r, groupName: String(g) };
+    const keys = Array.isArray(manualOrderGroups) ? manualOrderGroups : [];
+    const seenIndexByGroup = new Map<string, number>();
+
+    const rows = keys
+      .map((key) => {
+        const keyStr = String(key || '');
+        const groupNameRaw = keyToGroupName(keyStr);
+        const groupNameTrimmed = groupNameRaw.trim();
+        const groupKey = groupNameTrimmed.toLowerCase();
+        const baseRow: any = manualPickerRowByGroup.get(groupNameTrimmed) || {};
+
+        const persistedUnit = Number((manualUnitPriceByRow as any)?.[keyStr]);
+        const priceFromMap = Number(groupPriceByName?.[groupKey]);
+        const fallbackPrice = Number(baseRow?.palletPrice ?? baseRow?.price ?? 0);
+        const basePrice = Number.isFinite(persistedUnit)
+          ? persistedUnit
+          : (Number.isFinite(priceFromMap) ? priceFromMap : (Number.isFinite(fallbackPrice) ? fallbackPrice : 0));
+
+        const discountRaw = (manualDiscountByGroup as any)?.[keyStr] ?? '';
+        let discountPct = Number(discountRaw || 0);
+        if (!Number.isFinite(discountPct)) discountPct = 0;
+        discountPct = Math.max(0, Math.min(100, discountPct));
+
+        const discountedPrice = Number.isFinite(basePrice)
+          ? basePrice * (1 - discountPct / 100)
+          : 0;
+
+        const qtyRaw = (manualOrderQtyByGroup as any)?.[keyStr] ?? '';
+        const qtySanitized = Math.max(0, Math.floor(Number(qtyRaw || 0)) || 0);
+
+        const subTotal = Number.isFinite(discountedPrice) ? discountedPrice * qtySanitized : 0;
+
+        const gLower = groupNameTrimmed.toLowerCase();
+        const prevIndex = seenIndexByGroup.get(gLower) || 0;
+        const instanceIndex = prevIndex + 1;
+        seenIndexByGroup.set(gLower, instanceIndex);
+        const isDuplicate = instanceIndex > 1;
+
+        return {
+          id: keyStr,
+          ...baseRow,
+          groupName: groupNameRaw,
+          unitPrice: Number.isFinite(basePrice) ? basePrice : 0,
+          discountedPrice: Number.isFinite(discountedPrice) ? discountedPrice : 0,
+          discountPercent: discountPct,
+          subTotal: Number.isFinite(subTotal) ? subTotal : 0,
+          isDuplicate,
+          instanceIndex,
+        };
       })
       .filter((r) => String(r.groupName || '').trim());
-  }, [manualOrderGroups, manualPickerRowByGroup]);
+
+    // Sort by pallet (group) then by instance index so duplicates are grouped
+    rows.sort((a: any, b: any) => {
+      const ag = String(a.groupName || '').trim().toLowerCase();
+      const bg = String(b.groupName || '').trim().toLowerCase();
+      if (ag < bg) return 1 * -1; // keep existing order but group logically
+      if (ag > bg) return 1;
+      return (a.instanceIndex || 0) - (b.instanceIndex || 0);
+    });
+
+    return rows;
+  }, [manualOrderGroups, manualPickerRowByGroup, manualDiscountByGroup, manualOrderQtyByGroup, groupPriceByName, manualUnitPriceByRow]);
+
+  // Sum of all row subtotals for the order pricing summary
+  const manualOrderSubTotal = useMemo(() => {
+    const rows = Array.isArray(manualOrderRows) ? manualOrderRows : [];
+    let sum = 0;
+    for (const r of rows as any[]) {
+      const v = Number((r as any)?.subTotal ?? 0);
+      if (Number.isFinite(v)) sum += v;
+    }
+    return sum;
+  }, [manualOrderRows]);
 
   const manualOrderColumns = useMemo(() => {
     const cols: any[] = [
       { field: 'palletName', headerName: 'Pallet Name', flex: 1, minWidth: 200, renderCell: (p: any) => {
         const g = String(p?.row?.groupName || '').trim().toLowerCase();
-        return String(palletNameByGroup?.[g] || '');
+        const name = String(palletNameByGroup?.[g] || '');
+        const isDup = Boolean((p?.row as any)?.isDuplicate);
+        if (!isDup) return name;
+        return `${name} (copy)`;
       } },
       { field: 'palletDescription', headerName: 'Pallet Description', flex: 1, minWidth: 220, renderCell: (p: any) => {
         const g = String(p?.row?.groupName || '').trim().toLowerCase();
         return String(palletDescByGroup?.[g] || '');
       } },
       { field: 'lineItem', headerName: 'Pallet ID', width: 140, renderCell: (p: any) => String(p?.row?.lineItem || '-') },
-      { field: 'selectedWarehouseAvailable', headerName: `${String(manualWarehouseName || 'Warehouse').replace(/^THIS\s*-\s*/i, '')}`, width: 90, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => String(p?.row?.selectedWarehouseAvailable ?? 0) },
       {
-        field: 'onWaterPallets',
-        headerName: 'On-Water',
-        width: 100,
+        field: 'palletPrice',
+        headerName: 'Pallet Price',
+        width: 110,
         type: 'number',
         align: 'right',
         headerAlign: 'right',
         renderCell: (p: any) => {
-          const qty = Number(p?.row?.onWaterPallets ?? 0);
-          const groupName = String(p?.row?.groupName || '').trim();
-          const wid = String(manualWarehouseId || '').trim();
-          if (!qty) return '0';
-          return (
-            <Button
-              variant="text"
-              size="small"
-              onClick={() => openOnWaterDetails({ warehouseId: wid, groupName })}
-              sx={{ minWidth: 0, p: 0, textDecoration: 'underline', fontSize: 16, fontWeight: 700 }}
-            >
-              {qty}
-            </Button>
-          );
+          const rowUnit = Number((p?.row as any)?.unitPrice);
+          if (Number.isFinite(rowUnit) && rowUnit >= 0) return rowUnit.toFixed(2);
+          const gLower = String(p?.row?.groupName || '').trim().toLowerCase();
+          const v = Number(groupPriceByName?.[gLower]);
+          if (!Number.isFinite(v)) return '';
+          return v.toFixed(2);
         },
       },
-    ];
-
-    if (secondWarehouse?._id) {
-      cols.push({
-        field: 'secondWarehouseAvailable',
-        headerName: `${secondWarehouse.name || 'Warehouse'}`,
-        width: 100,
-        type: 'number',
-        align: 'right',
-        headerAlign: 'right',
+      {
+        field: 'discountPercent',
+        headerName: 'Discount (%)',
+        width: 120,
         sortable: false,
         filterable: false,
         renderCell: (p: any) => {
-          const per = (p?.row as any)?.perWarehouse || {};
-          const wid = String(secondWarehouse._id);
-          const v = Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0);
-          return String(Number.isFinite(v) ? v : 0);
+          const rowKey = String(p?.row?.id || '');
+          const val = manualDiscountByGroup[rowKey] ?? '';
+          return (
+            <TextField
+              type="number"
+              size="small"
+              value={val}
+              disabled={manualFieldsLocked}
+              onChange={(e) => {
+                const raw = String(e.target.value || '').replace(/[^0-9.\-+eE]/g, '');
+                let n = Number(raw || 0);
+                if (!Number.isFinite(n)) n = 0;
+                n = Math.max(0, Math.min(100, Math.floor(n)));
+                setManualDiscountByGroup((prev) => ({ ...prev, [rowKey]: String(n) }));
+              }}
+              onBlur={(e) => {
+                const raw = String(e.target.value || '').trim();
+                let n = Number(raw || 0);
+                if (!Number.isFinite(n)) n = 0;
+                n = Math.max(0, Math.min(100, Math.floor(n)));
+                setManualDiscountByGroup((prev) => ({ ...prev, [rowKey]: String(n) }));
+              }}
+              onKeyDown={(e) => {
+                const k = (e as any).key;
+                if (k === 'e' || k === 'E' || k === '.' || k === '-' || k === '+' ) {
+                  e.preventDefault();
+                }
+              }}
+              inputProps={{ inputMode: 'numeric', pattern: '[0-9]*', min: 0, max: 100, step: 1 }}
+              sx={{ width: 90 }}
+            />
+          );
         },
-      });
-    }
-
-    cols.push({
-      field: 'onProcessPallets',
-      headerName: 'On-Process',
-      width: 100,
-      type: 'number',
-      align: 'right',
-      headerAlign: 'right',
-      renderCell: (p: any) => {
-        const qty = Number(p?.row?.onProcessPallets ?? 0);
-        const groupName = String(p?.row?.groupName || '').trim();
-        if (!qty) return '0';
-        return (
-          <Button
-            variant="text"
-            size="small"
-            onClick={() => openOnProcessDetails({ groupName })}
-            sx={{ minWidth: 0, p: 0, textDecoration: 'underline', fontSize: 16, fontWeight: 700 }}
-          >
-            {qty}
-          </Button>
-        );
       },
-    });
+      {
+        field: 'discountedPrice',
+        headerName: 'Discounted Price',
+        width: 130,
+        type: 'number',
+        align: 'right',
+        headerAlign: 'right',
+        renderCell: (p: any) => {
+          const v = Number((p && typeof p === 'object' && 'row' in p) ? (p as any).row?.discountedPrice ?? (p as any).value : 0);
+          if (!Number.isFinite(v) || v <= 0) return '-';
+          return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        },
+        valueGetter: (params: any) => {
+          const row = (params && typeof params === 'object' && 'row' in params) ? (params as any).row : params;
+          const v = Number(row?.discountedPrice ?? 0);
+          return Number.isFinite(v) ? v : 0;
+        },
+      },
+      {
+        field: 'subTotal',
+        headerName: 'Sub Total',
+        width: 140,
+        type: 'number',
+        align: 'right',
+        headerAlign: 'right',
+        valueGetter: (params: any) => {
+          const row = (params && typeof params === 'object' && 'row' in params) ? (params as any).row : params;
+          const v = Number(row?.subTotal ?? 0);
+          return Number.isFinite(v) ? v : 0;
+        },
+        renderCell: (p: any) => {
+          const v = Number((p && typeof p === 'object' && 'row' in p) ? (p as any).row?.subTotal ?? (p as any).value : 0);
+          if (!Number.isFinite(v) || !v) return '-';
+          return v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        },
+      },
+    ];
 
     cols.push({
       field: 'maxQtyOrder',
@@ -1089,6 +1384,8 @@ export default function Orders() {
         const maybeParams = args?.[0];
         const maybeRow = args?.[1];
         const row = (maybeRow && typeof maybeRow === 'object') ? maybeRow : (maybeParams?.row || {});
+        if (row && (row as any).isDuplicate) return null;
+        // Use live picker totals (global post-reservation availability); do NOT subtract this order's quantities
         const primary = Number(row?.selectedWarehouseAvailable ?? 0);
         const onWater = Number(row?.onWaterPallets ?? 0);
         const onProcess = Number(row?.onProcessPallets ?? 0);
@@ -1098,16 +1395,71 @@ export default function Orders() {
           const wid = String(secondWarehouse._id);
           second = Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0);
         }
-        const total =
+        const liveTotal =
           (Number.isFinite(primary) ? primary : 0) +
           (Number.isFinite(onWater) ? onWater : 0) +
           (Number.isFinite(second) ? second : 0) +
           (Number.isFinite(onProcess) ? onProcess : 0);
-        return Math.max(0, Math.floor(total));
+        const groupNameTrimmed = String((row as any)?.groupName || '').trim();
+        if (liveTotal > 0 || manualPickerRowByGroup.has(groupNameTrimmed)) {
+          return Math.max(0, Math.floor(liveTotal));
+        }
+        // Fallback to saved snapshot only when live picker not ready yet (Edit mode)
+        if (manualMode === 'edit') {
+          const gLower = String(groupNameTrimmed).toLowerCase();
+          const snapTotal = Number((manualBaseTiersByGroup as any)?.[gLower]?.total ?? NaN);
+          if (Number.isFinite(snapTotal) && snapTotal >= 0) return Math.floor(snapTotal);
+        }
+        return null;
       },
       renderCell: (p: any) => {
-        const v = Number((p && typeof p === 'object' && 'value' in p) ? (p as any).value : 0);
-        return String(Number.isFinite(v) ? v : 0);
+        const row = (p && typeof p === 'object' && 'row' in p) ? (p as any).row : {};
+        if (row && (row as any).isDuplicate) return '-';
+        const primary = Number((row as any)?.selectedWarehouseAvailable ?? 0);
+        const onWater = Number((row as any)?.onWaterPallets ?? 0);
+        const onProcess = Number((row as any)?.onProcessPallets ?? 0);
+        let second = 0;
+        if (secondWarehouse?._id) {
+          const per = (row as any)?.perWarehouse || {};
+          const wid = String(secondWarehouse._id);
+          second = Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0);
+        }
+        const liveTotal =
+          (Number.isFinite(primary) ? primary : 0) +
+          (Number.isFinite(onWater) ? onWater : 0) +
+          (Number.isFinite(second) ? second : 0) +
+          (Number.isFinite(onProcess) ? onProcess : 0);
+        const groupNameTrimmed = String((row as any)?.groupName || '').trim();
+        if (liveTotal > 0 || manualPickerRowByGroup.has(groupNameTrimmed)) {
+          const tipPrimary = Math.max(0, Math.floor(Number(primary || 0)));
+          const tipOnWater = Math.max(0, Math.floor(Number(onWater || 0)));
+          const tipSecond = Math.max(0, Math.floor(Number(second || 0)));
+          const tipOnProcess = Math.max(0, Math.floor(Number(onProcess || 0)));
+          const title = `Available (MPG ${tipPrimary} + On-Water ${tipOnWater} + PEBA ${tipSecond} + On-Process ${tipOnProcess}) = Total ${Math.max(0, Math.floor(liveTotal))}`;
+          return (
+            <Tooltip title={title} placement="top" arrow>
+              <span>{String(Math.max(0, Math.floor(liveTotal)))}</span>
+            </Tooltip>
+          );
+        }
+        if (manualMode === 'edit') {
+          const gLower = String(groupNameTrimmed).toLowerCase();
+          const bt = (manualBaseTiersByGroup as any)?.[gLower];
+          const snapTotal = Number(bt?.total ?? NaN);
+          if (Number.isFinite(snapTotal) && snapTotal >= 0) {
+            const tipPrimary = Math.max(0, Math.floor(Number(bt?.primary || 0)));
+            const tipOnWater = Math.max(0, Math.floor(Number(bt?.onWater || 0)));
+            const tipSecond = Math.max(0, Math.floor(Number(bt?.second || 0)));
+            const tipOnProcess = Math.max(0, Math.floor(Number(bt?.onProcess || 0)));
+            const title = `Original Base (MPG ${tipPrimary} + On-Water ${tipOnWater} + PEBA ${tipSecond} + On-Process ${tipOnProcess}) = Total ${Math.floor(snapTotal)}`;
+            return (
+              <Tooltip title={title} placement="top" arrow>
+                <span>{String(Math.floor(snapTotal))}</span>
+              </Tooltip>
+            );
+          }
+        }
+        return '-';
       },
     });
 
@@ -1118,8 +1470,9 @@ export default function Orders() {
       sortable: false,
       filterable: false,
       renderCell: (p: any) => {
+        const rowKey = String(p?.row?.id || '');
         const groupName = String(p?.row?.groupName || '');
-        const val = manualOrderQtyByGroup[groupName] ?? '';
+        const val = manualOrderQtyByGroup[rowKey] ?? '';
         const primary = Number(p?.row?.selectedWarehouseAvailable ?? 0);
         const onWater = Number(p?.row?.onWaterPallets ?? 0);
         const onProcess = Number(p?.row?.onProcessPallets ?? 0);
@@ -1135,8 +1488,20 @@ export default function Orders() {
           (Number.isFinite(second) ? second : 0) +
           (Number.isFinite(onProcess) ? onProcess : 0)
         ));
+        // Remaining available for this row after subtracting quantities of other duplicate rows with the same pallet
+        let otherQty = 0;
+        for (const r of (Array.isArray(manualOrderRows) ? manualOrderRows : []) as any[]) {
+          const rid = String((r as any)?.id || '');
+          const rg = String((r as any)?.groupName || '').trim().toLowerCase();
+          if (rid !== rowKey && rg === String(groupName).trim().toLowerCase()) {
+            const qRaw = (manualOrderQtyByGroup as any)?.[rid] ?? '';
+            const q = Math.max(0, Math.floor(Number(qRaw || 0)) || 0);
+            otherQty += q;
+          }
+        }
         const reserved = manualReservedByGroup.get(groupName)?.total || 0;
-        const maxAllowed = baseMax + Math.max(0, reserved);
+        const remaining = Math.max(0, baseMax - otherQty);
+        const maxAllowed = Math.max(0, Math.floor(remaining + Math.max(0, reserved)));
         return (
           <TextField
             type="number"
@@ -1146,13 +1511,17 @@ export default function Orders() {
             onChange={(e)=>{
               const raw = sanitizeIntText(e.target.value);
               setManualValidationErrors([]);
-              const n = Math.max(0, Math.floor(Number(raw || 0)));
-              setManualOrderQtyByGroup((prev)=> ({ ...prev, [groupName]: String(n) }));
+              let n = Math.max(1, Math.floor(Number(raw || 0)));
+              if (Number.isFinite(maxAllowed)) n = Math.min(n, maxAllowed);
+              setManualOrderQtyByGroup((prev)=> ({ ...prev, [rowKey]: String(n) }));
+              setManualRecalcTick((t)=> t + 1);
             }}
             onBlur={(e)=>{
               const raw = normalizeIntText(e.target.value);
-              const n = Math.max(0, Math.floor(Number(raw || 0)));
-              setManualOrderQtyByGroup((prev)=> ({ ...prev, [groupName]: String(n) }));
+              let n = Math.max(1, Math.floor(Number(raw || 0)));
+              if (Number.isFinite(maxAllowed)) n = Math.min(n, maxAllowed);
+              setManualOrderQtyByGroup((prev)=> ({ ...prev, [rowKey]: String(n) }));
+              setManualRecalcTick((t)=> t + 1);
             }}
             onKeyDown={(e)=>{
               const k = (e as any).key;
@@ -1160,7 +1529,7 @@ export default function Orders() {
                 e.preventDefault();
               }
             }}
-            inputProps={{ inputMode: 'numeric', pattern: '[0-9]*', min: 0, step: 1 }}
+            inputProps={{ inputMode: 'numeric', pattern: '[0-9]*', min: 1, max: maxAllowed, step: 1 }}
             error={Number(val || 0) > maxAllowed}
             helperText={Number(val || 0) > maxAllowed ? `Max ${maxAllowed}` : undefined}
             sx={{ width: 100 }}
@@ -1169,31 +1538,93 @@ export default function Orders() {
       }
     });
 
-    
-
     cols.push({
       field: 'remove',
-      headerName: 'Remove',
-      width: 110,
+      headerName: 'Action',
+      width: 140,
       sortable: false,
       filterable: false,
       renderCell: (p: any) => {
+        const rowKey = String(p?.row?.id || '');
         const groupName = String(p?.row?.groupName || '');
         return (
-          <IconButton
-            size="small"
-            disabled={manualFieldsLocked}
-            onClick={() => {
-              setManualOrderGroups((prev)=> prev.filter((x)=> String(x) !== groupName));
-              setManualOrderQtyByGroup((prev)=> {
-                const next = { ...prev };
-                delete (next as any)[groupName];
-                return next;
-              });
-            }}
-          >
-            <DeleteIcon fontSize="small" />
-          </IconButton>
+          <Box sx={{ display: 'flex', gap: 0.5 }}>
+            <IconButton
+              size="small"
+              disabled={(function(){
+                if (manualFieldsLocked) return true;
+                const primary = Number((p?.row as any)?.selectedWarehouseAvailable ?? 0);
+                const onWater = Number((p?.row as any)?.onWaterPallets ?? 0);
+                const onProcess = Number((p?.row as any)?.onProcessPallets ?? 0);
+                let second = 0;
+                if (secondWarehouse?._id) {
+                  const per = (p?.row as any)?.perWarehouse || {};
+                  const wid = String(secondWarehouse._id);
+                  second = Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0);
+                }
+                // Prefer live picker totals; if not ready, fall back to snapshot in edit mode
+                const liveTotal = (
+                  (Number.isFinite(primary) ? primary : 0) +
+                  (Number.isFinite(onWater) ? onWater : 0) +
+                  (Number.isFinite(second) ? second : 0) +
+                  (Number.isFinite(onProcess) ? onProcess : 0)
+                );
+                const groupNameTrimmed = String(groupName || '').trim();
+                let baseTotal = 0;
+                if (liveTotal > 0 || manualPickerRowByGroup.has(groupNameTrimmed)) {
+                  baseTotal = Math.max(0, Math.floor(liveTotal));
+                } else if (manualMode === 'edit') {
+                  const gLower = groupNameTrimmed.toLowerCase();
+                  const snapTotal = Number((manualBaseTiersByGroup as any)?.[gLower]?.total ?? NaN);
+                  if (Number.isFinite(snapTotal) && snapTotal >= 0) baseTotal = Math.floor(snapTotal);
+                }
+                let otherQty = 0;
+                const gLower = String(groupName).trim().toLowerCase();
+                for (const r of (Array.isArray(manualOrderRows) ? manualOrderRows : []) as any[]) {
+                  const rid = String((r as any)?.id || '');
+                  const rg = String((r as any)?.groupName || '').trim().toLowerCase();
+                  if (rg === gLower && rid !== rowKey) {
+                    const qRaw = (manualOrderQtyByGroup as any)?.[rid] ?? '';
+                    const q = Math.max(0, Math.floor(Number(qRaw || 0)) || 0);
+                    otherQty += q;
+                  }
+                }
+                const reserved = Math.max(0, Number(manualReservedByGroup.get(groupName)?.total || 0));
+                const remaining = Math.max(0, baseTotal - otherQty);
+                const capacity = Math.max(0, remaining + reserved);
+                return capacity <= 0;
+              })()}
+              onClick={() => {
+                const key = makeRowKey(groupName);
+                setManualOrderGroups((prev) => ([...(Array.isArray(prev) ? prev : []), key]));
+                setManualOrderQtyByGroup((prev) => ({ ...(prev || {}), [key]: '1' }));
+                setManualDiscountByGroup((prev) => ({ ...(prev || {}), [key]: '0' }));
+                setManualRecalcTick((t)=> t + 1);
+              }}
+            >
+              <ContentCopyIcon fontSize="small" />
+            </IconButton>
+            <IconButton
+              size="small"
+              disabled={manualFieldsLocked}
+              onClick={() => {
+                setManualOrderGroups((prev)=> (Array.isArray(prev) ? prev.filter((x)=> String(x) !== rowKey) : []));
+                setManualOrderQtyByGroup((prev)=> {
+                  const next = { ...(prev || {}) } as any;
+                  delete next[rowKey];
+                  return next;
+                });
+                setManualDiscountByGroup((prev) => {
+                  const next = { ...(prev || {}) } as any;
+                  delete next[rowKey];
+                  return next;
+                });
+                setManualRecalcTick((t)=> t + 1);
+              }}
+            >
+              <DeleteIcon fontSize="small" />
+            </IconButton>
+          </Box>
         );
       }
     });
@@ -1208,11 +1639,14 @@ export default function Orders() {
     manualMode,
     manualReservedBreakdown,
     manualOrderQtyByGroup,
+    manualDiscountByGroup,
     manualFieldsLocked,
     manualRecalcTick,
     openOnWaterDetails,
     openOnProcessDetails,
     groupPriceByName,
+    manualOrderRows,
+    manualBaseTiersByGroup,
   ]);
 
   const manualAllocationRows = useMemo(() => {
@@ -1367,22 +1801,15 @@ export default function Orders() {
     };
   }, [manualAllocations, manualEditRow, manualPickerWarehouses, manualReservedBreakdown, manualWarehouseId, warehouses]);
 
-  const exportManualOrderXlsx = useCallback(() => {
+  const exportManualOrderXlsx = useCallback(async () => {
     if (manualMode !== 'edit' || !manualEditRow) return;
     const orderNumber = String(manualEditRow?.orderNumber || manualEditRow?.rawId || manualEditRow?.id || '').trim();
     const sStatus = normalizeStatus(manualStatus || '');
 
-    const exportFinalPrice = (() => {
-      const op = Number(manualOriginalPrice);
-      if (!Number.isFinite(op)) return '';
-      const sp = Number(manualShippingPercent);
-      const dp = Number(manualDiscountPercent);
-      const disc = Number.isFinite(dp) ? Math.min(100, Math.max(0, dp)) : 0;
-      const ship = Number.isFinite(sp) ? Math.min(100, Math.max(0, sp)) : 0;
-      const out = op * (1 - disc / 100) * (1 + ship / 100);
-      if (!Number.isFinite(out)) return '';
-      return out.toFixed(2);
-    })();
+    const sub = Number(manualOrderSubTotal);
+    const sp = Number(manualShippingPercent);
+    const ship = Number.isFinite(sp) ? Math.min(100, Math.max(0, sp)) : 0;
+    const grand = Number.isFinite(sub) ? sub * (1 + ship / 100) : NaN;
 
     const pad = (n: number) => n.toString().padStart(2, '0');
     const d = new Date();
@@ -1392,87 +1819,274 @@ export default function Orders() {
     const fname = `order-details-${safe(orderNumber || 'order')}-(${safe(sStatus || 'status')})-(${ts}).xlsx`;
 
     const rows: any[] = [];
-    const addKV = (k: string, v: any) => rows.push([k, v ?? '']);
 
-    addKV('Order ID', orderNumber);
-    addKV('Current Status', sStatus ? String(sStatus).toUpperCase() : '');
-    addKV('Customer Email', manualCustomerEmail);
-    addKV('Customer Name', manualCustomerName);
-    addKV('Phone Number', manualCustomerPhone);
-    addKV('Create Order Date', manualCreatedAt);
-    addKV('Estimated Shipdate for Customer', manualEstFulfillment);
-    addKV('Estimated Arrival Date', manualEstDelivered);
-    addKV('Original Price', manualOriginalPrice);
-    addKV('Shipping Charges (%)', manualShippingPercent);
-    addKV('Discount (%)', manualDiscountPercent);
-    addKV('Final Price', exportFinalPrice);
-    addKV('Shipping Address', manualShippingAddress);
-    addKV('Remarks/Notes', manualNotes);
-    addKV('Last Updated', manualLastUpdatedAt);
+    // Header block (A1..E1 and A2..E2)
+    // A1: ORDER NUMBER value, B1: 'To:', C1: [CUSTOMER NAME], D1: 'Phone:', E1: [PHONE NUMBER]
+    rows.push([orderNumber, 'To:', manualCustomerName, 'Phone:', manualCustomerPhone]);
+    // A2: empty, B2: 'Address:', C2: [SHIPPING ADDRESS], D2: 'Email:', E2: [EMAIL ADDRESS]
+    rows.push(['', 'Address:', manualShippingAddress, 'Email:', manualCustomerEmail]);
 
     rows.push([]);
-    rows.push(['Current Stock Reserved of this Order']);
-    rows.push([
-      'Pallet ID',
-      'Pallet Name',
-      'Pallet Description',
-      manualAllocationWarehouseLabels.primaryLabel,
-      'On-Water',
-      manualAllocationWarehouseLabels.secondLabel,
-      'On-Process',
-    ]);
+    rows.push(['Status:', (sStatus || '').toUpperCase()]);
+    rows.push(['Estimated Shipdate for Customer:', manualEstFulfillment]);
+    rows.push(['Estimated Arrival Date:', manualEstDelivered]);
 
-    const reserved = Array.isArray(manualReservedRows) ? manualReservedRows : [];
-    for (const r of reserved) {
-      const g = String(r?.groupName || '').trim();
+    // Helper: resolve pallet metadata and items for a group
+    const pickerRows = Array.isArray(manualPickerRows) ? manualPickerRows : [];
+    const getPalletMeta = (g: string) => {
       const byMap = manualPickerRowByGroup?.get ? manualPickerRowByGroup.get(g) : null;
       const gLower = g.toLowerCase();
-      const hit = (Array.isArray(manualPickerRows) ? manualPickerRows : []).find(
-        (p: any) => String(p?.groupName || '').trim().toLowerCase() === gLower
-      );
+      const hit = pickerRows.find((p: any) => String(p?.groupName || '').trim().toLowerCase() === gLower);
       const palletId = String(byMap?.lineItem || hit?.lineItem || '').trim();
       const palletName = String(byMap?.palletName || hit?.palletName || palletNameByGroup?.[gLower] || '').trim();
+      return { palletId, palletName };
+    };
+
+    const itemsCache = new Map<string, any[]>();
+    const getGroupItems = async (g: string) => {
+      const k = g.toLowerCase();
+      if (itemsCache.has(k)) return itemsCache.get(k)!;
+      try {
+        const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
+        const list = Array.isArray((data as any)?.items) ? (data as any).items : [];
+        itemsCache.set(k, list);
+        return list;
+      } catch {
+        itemsCache.set(k, []);
+        return [] as any[];
+      }
+    };
+
+    // Per-line pallet blocks (do not merge duplicates so per-line discounts/qty are preserved)
+    const rowsList = Array.isArray(manualOrderRows) ? manualOrderRows : [];
+    const printedGroups = new Set<string>();
+    let prevGroup: string | null = null;
+    for (const r of rowsList as any[]) {
+      const g = String(r?.groupName || '').trim();
+      if (!g) continue;
+      if (prevGroup && prevGroup !== g) {
+        // separator between different pallet groups
+        rows.push([]);
+      }
+      const rowId = String((r as any)?.id || '').trim();
+      const qtyText = (manualOrderQtyByGroup as any)?.[rowId] ?? (manualOrderQtyByGroup as any)?.[g] ?? (r as any)?.orderQty ?? (r as any)?.qty;
+      const qtyNum = Number(qtyText);
+      const qty = Number.isFinite(qtyNum) ? Math.floor(qtyNum) : NaN;
+      const discount = Math.min(100, Math.max(0, Number((r as any)?.discountPercent ?? 0)));
+      const unit = Number((r as any)?.unitPrice ?? groupPriceByName?.[g.toLowerCase()] ?? 0);
+      const discounted = Number.isFinite(unit) ? unit * (1 - discount / 100) : NaN;
+      const lineSub = (Number.isFinite(discounted) && Number.isFinite(qty)) ? discounted * qty : NaN;
+
+      const { palletId, palletName } = getPalletMeta(g);
+      const palletDesc = String(palletDescByGroup?.[g.toLowerCase()] || g || '').trim();
+      if (!printedGroups.has(g)) {
+        // First occurrence of this group: print meta and items list once
+        rows.push([palletName, palletDesc, palletId, '', '', '']);
+        const items = await getGroupItems(g);
+        if (items.length) {
+          for (const it of items) {
+            const code = String((it as any)?.itemCode || '');
+            const desc = String((it as any)?.description || '');
+            const upc = String((it as any)?.upc || '');
+            const pack = (it as any)?.packSize;
+            const price = Number((it as any)?.price);
+            rows.push([
+              '',
+              code,
+              desc,
+              upc,
+              Number.isFinite(Number(pack)) ? Number(pack) : '',
+              Number.isFinite(price) ? price : '',
+            ]);
+          }
+        } else {
+          // No items available; still output a placeholder row with pallet meta
+          rows.push([palletName, palletDesc, palletId, '', '', '']);
+        }
+        printedGroups.add(g);
+      }
+
+      // Summary for this pallet line in one row per spec
       rows.push([
-        palletId,
-        palletName,
-        g,
-        Number(r?.primary ?? 0),
-        Number(r?.onWater ?? 0),
-        Number(r?.second ?? 0),
-        Number(r?.onProcess ?? 0),
+        `PALLET PRICE: ${Number.isFinite(unit) ? `$${unit.toFixed(2)}` : ''}`,
+        `DISCOUNT: ${Number.isFinite(Number(discount)) ? `${discount}%` : ''}`,
+        `DISCOUNTED PRICE: ${Number.isFinite(discounted) ? `$${discounted.toFixed(2)}` : ''}`,
+        `QUANTITY: ${Number.isFinite(qty) ? qty : ''}`,
+        'SUB TOTAL',
+        Number.isFinite(lineSub) ? lineSub : '',
       ]);
+      prevGroup = g;
     }
 
     rows.push([]);
-    rows.push(['Pallets to Order']);
-    rows.push(['Pallet ID', 'Pallet Name', 'Pallet Description', 'Qty Ordered', 'Price']);
-
-    const pickerRows = Array.isArray(manualPickerRows) ? manualPickerRows : [];
-    const toPalletId = (groupName: string) => {
-      const g = String(groupName || '').trim().toLowerCase();
-      if (!g) return '';
-      const hit = pickerRows.find((p: any) => String(p?.groupName || '').trim().toLowerCase() === g);
-      return String(hit?.lineItem || '').trim();
-    };
-
-    const groups = Array.isArray(manualOrderGroups) ? manualOrderGroups : [];
-    for (const groupName of groups) {
-      const g = String(groupName || '').trim();
-      if (!g) continue;
-      const qty = Math.floor(Number((manualOrderQtyByGroup as any)?.[g] ?? 0));
-      if (!Number.isFinite(qty) || qty <= 0) continue;
-
-      const byMap = manualPickerRowByGroup?.get ? manualPickerRowByGroup.get(g) : null;
-      const palletId = String(byMap?.lineItem || toPalletId(g) || '').trim();
-      const gLower2 = g.toLowerCase();
-      const hit2 = pickerRows.find((p: any) => String(p?.groupName || '').trim().toLowerCase() === gLower2);
-      const palletName = String(byMap?.palletName || hit2?.palletName || palletNameByGroup?.[gLower2] || '').trim();
-      const priceKey = String(g || '').trim().toLowerCase();
-      const p = Number(groupPriceByName?.[priceKey]);
-      rows.push([palletId, palletName, g, qty, Number.isFinite(p) ? p.toFixed(2) : '']);
-    }
+    rows.push(['SUB TOTAL', Number.isFinite(sub) ? sub : '']);
+    rows.push(['SHIPPING', Number.isFinite(sp) ? `${sp}%` : '']);
+    rows.push(['GRAND TOTAL', Number.isFinite(grand) ? grand : '']);
 
     const ws = XLSX.utils.aoa_to_sheet(rows);
+
+    // Column widths for readability
+    (ws as any)['!cols'] = [
+      { wch: 22 }, // A
+      { wch: 18 }, // B
+      { wch: 28 }, // C
+      { wch: 16 }, // D
+      { wch: 14 }, // E
+      { wch: 16 }, // F
+    ];
+
+    const enc = XLSX.utils.encode_cell;
+    const get = (r: number, c: number) => (ws as any)[enc({ r, c })];
+    const ensure = (r: number, c: number) => {
+      const addr = enc({ r, c });
+      (ws as any)[addr] = (ws as any)[addr] || { t: 's', v: '' };
+      return (ws as any)[addr];
+    };
+    const style = (r: number, c: number, s: any) => {
+      const cell = ensure(r, c);
+      cell.s = { ...(cell.s || {}), ...(s || {}) };
+    };
+    const fill = (rgb: string) => ({ fill: { patternType: 'solid', fgColor: { rgb } } });
+    const bold = { font: { bold: true } };
+    const border = {
+      border: {
+        top: { style: 'thin', color: { rgb: 'FFCCCCCC' } },
+        bottom: { style: 'thin', color: { rgb: 'FFCCCCCC' } },
+        left: { style: 'thin', color: { rgb: 'FFCCCCCC' } },
+        right: { style: 'thin', color: { rgb: 'FFCCCCCC' } },
+      },
+    } as any;
+
+    // Header rows (0-based indexing): rows 0 and 1
+    for (let c = 0; c <= 4; c++) {
+      style(0, c, { ...bold });
+      style(1, c, {});
+    }
+    // Make order number a bit larger and underlined bottom
+    style(0, 0, { font: { bold: true, sz: 12 }, border: { bottom: { style: 'thin', color: { rgb: 'FFAAAAAA' } } } });
+    // Emphasize labels in row 0 col 1 and 3, row 1 col 1 and 3
+    style(0, 1, { ...bold });
+    style(0, 3, { ...bold });
+    style(1, 1, { ...bold });
+    style(1, 3, { ...bold });
+    // Apply same light-blue highlight as totals to ORDER# (A1), To (B1), Address (B2), Phone (D1), Email (D2)
+    const blue = fill('FFDDEBF7');
+    style(0, 0, { ...blue, ...border }); // ORDER# value cell highlighted
+    style(0, 1, { ...blue, ...border }); // To:
+    style(1, 1, { ...blue, ...border }); // Address:
+    style(0, 3, { ...blue, ...border }); // Phone:
+    style(1, 3, { ...blue, ...border }); // Email:
+
+    // Status and date labels (rows 3..5 in column A)
+    style(3, 0, { ...bold });
+    style(4, 0, { ...bold });
+    style(5, 0, { ...bold });
+
+    // Detect and style pallet meta rows and summary rows; also zebra-strip item rows and group borders
+    const rowCount = rows.length;
+    let groupStart: number | null = null;
+    let inItems = false;
+    let zebra = false;
+    for (let r = 0; r < rowCount; r++) {
+      const a = get(r, 0)?.v;
+      const b = get(r, 1)?.v;
+      const c = get(r, 2)?.v;
+      const d = get(r, 3)?.v;
+      const e = get(r, 4)?.v;
+      const f = get(r, 5)?.v;
+      const aStr = typeof a === 'string' ? a : '';
+
+      // Pallet meta row heuristic: A,B,C non-empty and D,E,F empty
+      if (a && b && c && !d && !e && !f) {
+        // Close previous group box if any
+        if (groupStart !== null && groupStart < r) {
+          for (let rr = groupStart; rr < r; rr++) {
+            for (let cc = 0; cc <= 5; cc++) style(rr, cc, { ...border });
+          }
+        }
+        groupStart = r;
+        inItems = true;
+        zebra = false;
+        for (let col = 0; col <= 5; col++) style(r, col, { ...fill('FFE2EFDA'), ...border }); // light green meta
+        continue;
+      }
+
+      // Summary row starts with 'PALLET PRICE:'
+      if (aStr && aStr.toUpperCase().startsWith('PALLET PRICE')) {
+        for (let col = 0; col <= 5; col++) style(r, col, { ...fill('FFF2F2F2'), ...border }); // light grey
+        style(r, 0, { ...bold });
+        style(r, 1, { ...bold });
+        style(r, 2, { ...bold });
+        style(r, 3, { ...bold });
+        style(r, 4, { ...bold, ...blue }); // highlight per-pallet SUB TOTAL label
+        style(r, 5, { ...blue, alignment: { horizontal: 'right' }, numFmt: '"$"#,##0.00' }); // highlight value
+        // Close current group box at summary row (inclusive)
+        if (groupStart !== null) {
+          for (let rr = groupStart; rr <= r; rr++) {
+            for (let cc = 0; cc <= 5; cc++) style(rr, cc, { ...border });
+          }
+          groupStart = null;
+        }
+        inItems = false;
+        continue;
+      }
+
+      // Item rows: A empty and any of B-F non-empty
+      const isItem = !a && (b || c || d || e || f);
+      if (inItems && isItem) {
+        zebra = !zebra;
+        if (zebra) {
+          for (let col = 0; col <= 5; col++) style(r, col, { ...fill('FFF9F9F9') }); // very light stripe
+        }
+      }
+    }
+    // Ensure final group box closes if file ended without explicit summary (edge case)
+    if (groupStart !== null) {
+      for (let rr = groupStart; rr < rowCount; rr++) {
+        for (let cc = 0; cc <= 5; cc++) style(rr, cc, { ...border });
+      }
+    }
+
+    // Totals section: find labeled rows (SUB TOTAL, SHIPPING, GRAND TOTAL)
+    let totalsStart = -1;
+    let totalsEnd = -1;
+    for (let r = rowCount - 1; r >= 0 && r >= rowCount - 10; r--) {
+      const a = get(r, 0)?.v;
+      const aStr = typeof a === 'string' ? a.toUpperCase() : '';
+      if (aStr === 'GRAND TOTAL' && totalsEnd === -1) totalsEnd = r;
+      if (aStr === 'SUB TOTAL') totalsStart = r;
+      if (aStr === 'SUB TOTAL' || aStr === 'SHIPPING' || aStr === 'GRAND TOTAL') {
+        style(r, 0, { ...bold, ...fill('FFDDEBF7'), ...border }); // light blue label
+        style(r, 1, { ...border });
+      }
+    }
+    if (totalsStart !== -1 && totalsEnd !== -1 && totalsEnd >= totalsStart) {
+      // Apply thin border around the entire totals block A..F
+      for (let r = totalsStart; r <= totalsEnd; r++) {
+        for (let c = 0; c <= 5; c++) {
+          style(r, c, { ...border });
+        }
+      }
+      // Emphasize GRAND TOTAL value (row totalsEnd assumed to be GRAND TOTAL or below it)
+      style(totalsEnd, 1, { font: { bold: true, sz: 12 } });
+      // Apply currency numFmt to SUB TOTAL and GRAND TOTAL values in column B
+      for (let r = totalsStart; r <= totalsEnd; r++) {
+        const a = get(r, 0)?.v;
+        const aStr = typeof a === 'string' ? a.toUpperCase() : '';
+        if (aStr === 'SUB TOTAL' || aStr === 'GRAND TOTAL') {
+          style(r, 1, { alignment: { horizontal: 'right' }, numFmt: '"$"#,##0.00' });
+        }
+      }
+    }
+
+    // Align numeric columns and set basic number formats
+    for (let r = 0; r < rowCount; r++) {
+      // D (UPC column) keep general; E (PACK SIZE) right; F (ITEM PRICE/SUBTOTAL) currency-like
+      ensure(r, 4); ensure(r, 5);
+      style(r, 4, { alignment: { horizontal: 'right' } });
+      style(r, 5, { alignment: { horizontal: 'right' }, numFmt: '"$"#,##0.00' });
+    }
+
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Order Details');
     XLSX.writeFile(wb, fname);
@@ -1483,23 +2097,17 @@ export default function Orders() {
     manualCustomerEmail,
     manualCustomerName,
     manualCustomerPhone,
-    manualCreatedAt,
+    manualShippingAddress,
     manualEstFulfillment,
     manualEstDelivered,
-    manualShippingAddress,
-    manualNotes,
-    manualLastUpdatedAt,
-    manualOriginalPrice,
+    manualOrderSubTotal,
     manualShippingPercent,
-    manualDiscountPercent,
-    manualReservedRows,
-    manualOrderGroups,
+    manualOrderRows,
     manualOrderQtyByGroup,
     manualPickerRows,
     manualPickerRowByGroup,
-    manualAllocationWarehouseLabels,
-    groupPriceByName,
     palletNameByGroup,
+    groupPriceByName,
   ]);
 
   const isValidEmail = (email: string) => {
@@ -1507,6 +2115,189 @@ export default function Orders() {
     if (!s) return false;
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
   };
+
+  const exportManualOrderPdf = useCallback(async () => {
+    if (manualMode !== 'edit' || !manualEditRow) return;
+    const orderNumber = String(manualEditRow?.orderNumber || manualEditRow?.rawId || manualEditRow?.id || '').trim();
+    const sStatus = String(normalizeStatus(manualStatus || '') || '').toUpperCase();
+
+    const sub = Number(manualOrderSubTotal);
+    const sp = Number(manualShippingPercent);
+    const ship = Number.isFinite(sp) ? Math.min(100, Math.max(0, sp)) : 0;
+    const grand = Number.isFinite(sub) ? sub * (1 + ship / 100) : NaN;
+
+    const blue = '#DDEBF7';
+    const green = '#E2EFDA';
+    const gray = '#F2F2F2';
+
+    const pickerRows = Array.isArray(manualPickerRows) ? manualPickerRows : [];
+    const getPalletMeta = (g: string) => {
+      const byMap = (manualPickerRowByGroup as any)?.get ? (manualPickerRowByGroup as any).get(g) : null;
+      const gLower = g.toLowerCase();
+      const hit = pickerRows.find((p: any) => String(p?.groupName || '').trim().toLowerCase() === gLower);
+      const palletId = String(byMap?.lineItem || hit?.lineItem || '').trim();
+      const palletName = String(byMap?.palletName || hit?.palletName || (palletNameByGroup as any)?.[gLower] || '').trim();
+      const palletDesc = String((palletDescByGroup as any)?.[gLower] || g || '').trim();
+      return { palletId, palletName, palletDesc };
+    };
+    const itemsCache = new Map<string, any[]>();
+    const getGroupItems = async (g: string) => {
+      const k = g.toLowerCase();
+      if (itemsCache.has(k)) return itemsCache.get(k)!;
+      try {
+        const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
+        const list = Array.isArray((data as any)?.items) ? (data as any).items : [];
+        itemsCache.set(k, list);
+        return list;
+      } catch {
+        itemsCache.set(k, []);
+        return [] as any[];
+      }
+    };
+
+    const content: any[] = [];
+    content.push({
+      table: {
+        widths: [160, 40, '*', 55, 120],
+        body: [
+          [
+            { text: orderNumber, fillColor: blue, bold: true, border: [true, true, true, true] },
+            { text: 'To:', fillColor: blue, bold: true, border: [true, true, true, true] },
+            { text: manualCustomerName || '', border: [true, true, true, true] },
+            { text: 'Phone:', fillColor: blue, bold: true, border: [true, true, true, true] },
+            { text: manualCustomerPhone || '', border: [true, true, true, true] },
+          ],
+          [
+            { text: '', border: [true, false, true, true] },
+            { text: 'Address:', fillColor: blue, bold: true, border: [true, true, true, true] },
+            { text: manualShippingAddress || '', border: [true, true, true, true] },
+            { text: 'Email:', fillColor: blue, bold: true, border: [true, true, true, true] },
+            { text: manualCustomerEmail || '', border: [true, true, true, true] },
+          ],
+        ],
+      },
+      layout: 'noHorizontalLines',
+      margin: [0, 0, 0, 8],
+    });
+
+    content.push({ text: 'Status:', bold: true, margin: [0, 2, 0, 0] });
+    content.push({ text: sStatus, margin: [0, 0, 0, 2] });
+    content.push({ text: 'Estimated Shipdate for Customer:', bold: true });
+    content.push({ text: manualEstFulfillment || '', margin: [0, 0, 0, 2] });
+    content.push({ text: 'Estimated Arrival Date:', bold: true });
+    content.push({ text: manualEstDelivered || '', margin: [0, 0, 0, 8] });
+
+    const rowsList = Array.isArray(manualOrderRows) ? manualOrderRows : [];
+    const printedGroups = new Set<string>();
+    let prevGroup: string | null = null;
+    for (const r of rowsList as any[]) {
+      const g = String(r?.groupName || '').trim();
+      if (!g) continue;
+      if (prevGroup && prevGroup !== g) content.push({ text: '\n' });
+
+      const rowId = String((r as any)?.id || '').trim();
+      const qtyText = (manualOrderQtyByGroup as any)?.[rowId] ?? (manualOrderQtyByGroup as any)?.[g] ?? (r as any)?.orderQty ?? (r as any)?.qty;
+      const qtyNum = Number(qtyText);
+      const qty = Number.isFinite(qtyNum) ? Math.floor(qtyNum) : NaN;
+      const discount = Math.min(100, Math.max(0, Number((r as any)?.discountPercent ?? 0)));
+      const unit = Number((r as any)?.unitPrice ?? (groupPriceByName as any)?.[g.toLowerCase()] ?? 0);
+      const discounted = Number.isFinite(unit) ? unit * (1 - discount / 100) : NaN;
+      const lineSub = (Number.isFinite(discounted) && Number.isFinite(qty)) ? discounted * qty : NaN;
+
+      const { palletId, palletName, palletDesc } = getPalletMeta(g);
+      if (!printedGroups.has(g)) {
+        content.push({
+          table: {
+            widths: ['*', '*', 120, 60, 60, 80],
+            body: [[
+              { text: palletName, fillColor: green, border: [true, true, true, true] },
+              { text: palletDesc, fillColor: green, border: [true, true, true, true] },
+              { text: palletId, fillColor: green, border: [true, true, true, true] },
+              { text: '', fillColor: green, border: [true, true, true, true] },
+              { text: '', fillColor: green, border: [true, true, true, true] },
+              { text: '', fillColor: green, border: [true, true, true, true] },
+            ]],
+          },
+          layout: 'noHorizontalLines',
+        });
+
+        const items = await getGroupItems(g);
+        if (items.length) {
+          const itemRows = items.map((it: any) => [
+            { text: '', border: [true, true, true, true] },
+            { text: String(it?.itemCode || ''), border: [true, true, true, true] },
+            { text: String(it?.description || ''), border: [true, true, true, true] },
+            { text: String(it?.upc || ''), alignment: 'right', border: [true, true, true, true] },
+            { text: (Number.isFinite(Number(it?.packSize)) ? String(Number(it?.packSize)) : ''), alignment: 'right', border: [true, true, true, true] },
+            { text: (Number.isFinite(Number(it?.price)) ? `$${Number(it?.price).toFixed(2)}` : ''), alignment: 'right', border: [true, true, true, true] },
+          ]);
+          content.push({ table: { widths: ['*', 90, '*', 70, 60, 70], body: itemRows }, layout: 'noHorizontalLines' });
+        }
+        printedGroups.add(g);
+      }
+
+      content.push({
+        table: {
+          widths: ['*', 90, 150, 90, 90, 80],
+          body: [[
+            { text: `PALLET PRICE: ${Number.isFinite(unit) ? `$${unit.toFixed(2)}` : ''}`, fillColor: gray, bold: true, border: [true, true, true, true] },
+            { text: `DISCOUNT: ${Number.isFinite(Number(discount)) ? `${discount}%` : ''}`, fillColor: gray, bold: true, border: [true, true, true, true] },
+            { text: `DISCOUNTED PRICE: ${Number.isFinite(discounted) ? `$${discounted.toFixed(2)}` : ''}`, fillColor: gray, bold: true, border: [true, true, true, true] },
+            { text: `QUANTITY: ${Number.isFinite(qty) ? qty : ''}`, fillColor: gray, bold: true, border: [true, true, true, true] },
+            { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] },
+            { text: Number.isFinite(lineSub) ? `$${lineSub.toFixed(2)}` : '', alignment: 'right', fillColor: blue, border: [true, true, true, true] },
+          ]],
+        },
+        layout: 'noHorizontalLines',
+        margin: [0, 2, 0, 4],
+      });
+
+      prevGroup = g;
+    }
+
+    content.push({
+      table: {
+        widths: [120, 120],
+        body: [
+          [ { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(sub) ? `$${sub.toFixed(2)}` : '', alignment: 'right', border: [true, true, true, true] } ],
+          [ { text: 'SHIPPING', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(sp) ? `${sp}%` : '', alignment: 'right', border: [true, true, true, true] } ],
+          [ { text: 'GRAND TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(grand) ? `$${grand.toFixed(2)}` : '', alignment: 'right', bold: true, border: [true, true, true, true] } ],
+        ],
+      },
+      layout: 'noHorizontalLines',
+      margin: [0, 6, 0, 0],
+    });
+
+    const docDefinition = {
+      pageOrientation: 'landscape',
+      pageMargins: [20, 20, 20, 20],
+      content,
+      defaultStyle: { fontSize: 9 },
+    } as any;
+
+    const safe = (v: any) => String(v ?? '').replace(/[\/\\:*?"<>|]/g, '-');
+    const fname = `order-details-${safe(orderNumber || 'order')}-(${safe(sStatus || 'status')}).pdf`;
+    (pdfMake as any).createPdf(docDefinition).download(fname);
+  }, [
+    manualMode,
+    manualEditRow,
+    manualStatus,
+    manualCustomerName,
+    manualCustomerPhone,
+    manualShippingAddress,
+    manualCustomerEmail,
+    manualEstFulfillment,
+    manualEstDelivered,
+    manualOrderSubTotal,
+    manualShippingPercent,
+    manualOrderRows,
+    manualOrderQtyByGroup,
+    manualPickerRows,
+    manualPickerRowByGroup,
+    palletNameByGroup,
+    palletDescByGroup,
+    groupPriceByName,
+  ]);
 
   const sanitizeIntText = (v: any) => {
     const s = String(v ?? '');
@@ -1549,16 +2340,14 @@ export default function Orders() {
   };
 
   const manualFinalPrice = useMemo(() => {
-    const op = Number(manualOriginalPrice);
-    if (!Number.isFinite(op)) return '';
+    const sub = Number(manualOrderSubTotal);
+    if (!Number.isFinite(sub)) return '';
     const sp = Number(manualShippingPercent);
-    const dp = Number(manualDiscountPercent);
-    const disc = Number.isFinite(dp) ? Math.min(100, Math.max(0, dp)) : 0;
     const ship = Number.isFinite(sp) ? Math.min(100, Math.max(0, sp)) : 0;
-    const out = op * (1 - disc / 100) * (1 + ship / 100);
+    const out = sub * (1 + ship / 100);
     if (!Number.isFinite(out)) return '';
     return out.toFixed(2);
-  }, [manualOriginalPrice, manualDiscountPercent, manualShippingPercent]);
+  }, [manualOrderSubTotal, manualShippingPercent]);
 
   const getActiveManualOptions = () => (manualLineMode === 'pallet_group' ? manualPalletGroupOptions : manualLineItemOptions);
 
@@ -1882,7 +2671,7 @@ export default function Orders() {
       try {
         const nextStatus = normalizeStatus((data as any)?.status || '') as any;
         const nextShip = String((data as any)?.estFulfillmentDate || '').slice(0, 10);
-        if (nextStatus) setManualStatus(nextStatus as any);
+        if (nextStatus && !manualStatusTouched) setManualStatus(nextStatus as any);
         setManualEstFulfillment(nextShip || '');
         if (!manualOpen) {
           setOrdersRows((prev) => {
@@ -1904,7 +2693,7 @@ export default function Orders() {
       // keep existing allocations if fetch fails
       return { allocations: Array.isArray(manualAllocations) ? manualAllocations : [], reserved: [] as any[] };
     }
-  }, [manualAllocations, manualReservedBreakdown]);
+  }, [manualAllocations, manualReservedBreakdown, manualStatusTouched, manualOpen]);
 
   // Return/Damage feature removed
 
@@ -1931,24 +2720,27 @@ export default function Orders() {
     const rawId = String((manualEditRow as any)?.rawId || '').trim();
 
     const reserved = Array.isArray(manualReservedBreakdown) ? manualReservedBreakdown : [];
-    const needByGroup = manualOrderQtyByGroup || {};
+    // Build per-group needs by summing quantities across rows that share the same pallet group
+    const needByGroup = new Map<string, number>();
+    for (const r of (Array.isArray(manualOrderRows) ? manualOrderRows : []) as any[]) {
+      const g = String((r as any)?.groupName || '').trim();
+      if (!g) continue;
+      const rowId = String((r as any)?.id || '');
+      const qtyRaw = (manualOrderQtyByGroup as any)?.[rowId] ?? '';
+      const q = Math.max(0, Math.floor(Number(qtyRaw || 0)) || 0);
+      if (q > 0) needByGroup.set(g, (needByGroup.get(g) || 0) + q);
+    }
 
-    // Keep the server-computed completion date if the updated quantities are still fully covered by PRIMARY only.
-    const stillFullyPrimary = Object.entries(needByGroup)
-      .filter(([, qty]) => Number(qty || 0) > 0)
-      .every(([groupName, qty]) => {
-        const g = String(groupName || '').trim();
-        if (!g) return true;
-        const need = Math.floor(Number(qty || 0));
-        if (!Number.isFinite(need) || need <= 0) return true;
-        const rr: any = reserved.find((r: any) => String(r?.groupName || '').trim() === g) || {};
-        const primary = Math.floor(Number(rr?.primary || 0));
-        const onWater = Math.floor(Number(rr?.onWater || 0));
-        const second = Math.floor(Number(rr?.second || 0));
-        const onProcess = Math.floor(Number(rr?.onProcess || 0));
-        const other = (Number.isFinite(onWater) ? onWater : 0) + (Number.isFinite(second) ? second : 0) + (Number.isFinite(onProcess) ? onProcess : 0);
-        return (Number.isFinite(primary) ? primary : 0) >= need && other <= 0;
-      });
+    // Keep the server-computed completion date if updated quantities are still fully covered by PRIMARY only.
+    const stillFullyPrimary = Array.from(needByGroup.entries()).every(([groupName, need]) => {
+      const rr: any = reserved.find((r: any) => String(r?.groupName || '').trim() === String(groupName)) || {};
+      const primary = Math.max(0, Math.floor(Number(rr?.primary || 0)));
+      const onWater = Math.max(0, Math.floor(Number(rr?.onWater || 0)));
+      const second = Math.max(0, Math.floor(Number(rr?.second || 0)));
+      const onProcess = Math.max(0, Math.floor(Number(rr?.onProcess || 0)));
+      const other = onWater + second + onProcess;
+      return primary >= need && other <= 0;
+    });
 
     if (stillFullyPrimary) return;
 
@@ -1957,26 +2749,7 @@ export default function Orders() {
     // which causes flip-flopping between two dates.
     if (!reserved.length) return;
     const next = suggestShipdateForReservedBreakdown({ rows: manualPickerRows, reserved });
-    // If quantities are no longer fully-primary, this order should no longer be READY TO SHIP.
-    if (manualStatus === 'ready_to_ship') {
-      setManualStatus('processing');
-      setManualEstDelivered('');
-      setManualEditRow((prev) => {
-        if (!prev) return prev;
-        const rawId = String((prev as any)?.rawId || '').trim();
-        if (!rawId) return prev;
-        return { ...(prev as any), status: 'processing', estDeliveredDate: '' } as any;
-      });
-      setOrdersRows((prev) => {
-        const rows = Array.isArray(prev) ? prev : [];
-        if (!rawId) return rows;
-        return rows.map((r) => {
-          const rRawId = String((r as any)?.rawId || '').trim();
-          if (rRawId && rRawId === rawId) return { ...(r as any), status: 'processing', estDeliveredDate: '' } as any;
-          return r;
-        });
-      });
-    }
+    // Do not override server-computed status here. The server rebalance determines READY TO SHIP vs PROCESSING.
 
     if (next && next !== manualEstFulfillment) {
       const last = lastAutoSuggestedShipdateRef.current || { ymd: '', at: 0 };
@@ -2316,6 +3089,8 @@ export default function Orders() {
     const tick = async () => {
       if (stopped) return;
       if (ordersLoading) return;
+      // Pause background polling while modal is open to keep typing snappy
+      if (manualOpen) return;
       try {
         await loadOrders();
       } catch {
@@ -2336,7 +3111,7 @@ export default function Orders() {
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [ordersLoading]);
+  }, [ordersLoading, manualOpen]);
 
   // Listen for cross-page signals that inventory tiers changed (e.g., On-Process updates/transfers)
   // and refresh the main Orders list without requiring the user to open the order modal.
@@ -2344,15 +3119,15 @@ export default function Orders() {
     let timer: any = null;
     let trailing: any = null;
     const handler = async () => {
+      // While modal is open (especially in create mode), skip heavy refresh to avoid input lag
+      if (manualOpen) return;
       if (timer) clearTimeout(timer);
       timer = setTimeout(async () => {
         try {
           try { await api.post('/orders/unfulfilled/rebalance-processing', {}); } catch {}
-          // allow the server a brief moment to finish any downstream writes
           try { await new Promise((r) => setTimeout(r, 180)); } catch {}
           await loadOrders();
           await syncSomeOrdersFromServer(50);
-          // trailing fetch to avoid race with server rebalance finishing just after first fetch
           if (trailing) clearTimeout(trailing);
           trailing = setTimeout(async () => {
             try { await api.post('/orders/unfulfilled/rebalance-processing', {}); } catch {}
@@ -2371,7 +3146,7 @@ export default function Orders() {
       window.removeEventListener('orders-changed', handler as any);
       window.removeEventListener('shipments-changed', handler as any);
     };
-  }, [ordersLoading, syncSomeOrdersFromServer]);
+  }, [ordersLoading, syncSomeOrdersFromServer, manualOpen]);
 
   // When the order modal is open, also refresh the reserved breakdown immediately
   // after external change signals so the Deficit column recomputes without
@@ -2543,40 +3318,22 @@ export default function Orders() {
       },
     },
     {
-      field: 'discountPercent',
-      headerName: 'Discount (%)',
-      width: 100,
-      type: 'number',
-      renderCell: (p: any) => {
-        const v = (p?.row as any)?.discountPercent;
-        if (v === null || v === undefined || v === '') return '-';
-        const n = Number(v);
-        return Number.isFinite(n) ? `${n}%` : '-';
-      },
-    },
-    {
       field: 'finalPrice',
-      headerName: 'Final Price',
+      headerName: 'Grand Total',
       width: 110,
       type: 'number',
       renderCell: (p: any) => {
         const row = (p?.row as any) || {};
         const op = Number(row?.originalPrice);
         const sp = Number(row?.shippingPercent);
-        const dp = Number(row?.discountPercent);
-        if (Number.isFinite(op) && Number.isFinite(sp) && Number.isFinite(dp)) {
-          const disc = Math.min(100, Math.max(0, dp));
-          const ship = Math.min(100, Math.max(0, sp));
-          const calc = op * (1 - disc / 100) * (1 + ship / 100);
+        if (Number.isFinite(op)) {
+          const ship = Number.isFinite(sp) ? Math.min(100, Math.max(0, sp)) : 0;
+          const calc = op * (1 + ship / 100);
           if (Number.isFinite(calc)) {
             return calc.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
           }
         }
-        const v = row?.finalPrice;
-        if (v === null || v === undefined || v === '') return '-';
-        const n = Number(v);
-        if (!Number.isFinite(n)) return '-';
-        return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        return '-';
       },
     },
     {
@@ -2632,6 +3389,7 @@ export default function Orders() {
     setManualOpen(true);
     setManualWarehouseId(fixedWarehouseId);
     setManualStatus('processing');
+    setManualStatusTouched(false);
     setManualCustomerEmail('');
     setManualCustomerName('');
     setManualCustomerPhone('');
@@ -2652,6 +3410,7 @@ export default function Orders() {
     setManualPickerRows([]);
     setManualPickerWarehouses([]);
     setManualOrderQtyByGroup({});
+    setManualDiscountByGroup({});
     setManualPickOpen(false);
     setManualPickSelected({ type: 'include', ids: new Set() });
     setManualOrderGroups([]);
@@ -2770,10 +3529,7 @@ export default function Orders() {
     if (manualMode === 'edit' && manualStatus === 'shipped' && !String(manualShippingPercent || '').trim()) {
       errs.push('Shipping Charges (%) is required when status is SHIPPED');
     }
-    const dp = Number(manualDiscountPercent);
-    if (manualDiscountPercent && (!Number.isFinite(dp) || dp < 0 || dp > 100)) {
-      errs.push('Discount (%) must be between 0 and 100');
-    }
+    // Order-level Discount (%) removed; only per-line discounts remain
     const sp = Number(manualShippingPercent);
     if (manualShippingPercent && (!Number.isFinite(sp) || sp < 0 || sp > 100)) {
       errs.push('Shipping Charges (%) must be between 0 and 100');
@@ -2782,42 +3538,68 @@ export default function Orders() {
       errs.push('Shipping Address is required');
     }
 
-    const allowed = new Set((manualOrderGroups || []).map((g) => String(g).trim().toLowerCase()).filter((v) => v));
+    // manualOrderQtyByGroup is keyed by row ID; derive pallet groupName via keyToGroupName
+    const allowed = new Set(
+      (manualOrderGroups || [])
+        .map((k) => keyToGroupName(String(k || '')).trim().toLowerCase())
+        .filter((v) => v)
+    );
     const parsed = Object.entries(manualOrderQtyByGroup || {})
-      .map(([groupName, qtyStr]) => ({
-        groupName: String(groupName || '').trim(),
-        qty: Math.floor(Number(qtyStr || 0)),
-      }))
+      .map(([rowKey, qtyStr]) => {
+        const groupName = keyToGroupName(String(rowKey || ''));
+        const gTrim = String(groupName || '').trim();
+        const gLower = gTrim.toLowerCase();
+        const persistedUnit = Number((manualUnitPriceByRow as any)?.[String(rowKey || '')]);
+        const latestFromMap = Number(groupPriceByName?.[gLower]);
+        const unitPrice = Number.isFinite(persistedUnit)
+          ? persistedUnit
+          : (Number.isFinite(latestFromMap) ? latestFromMap : 0);
+        return {
+          rowKey: String(rowKey || ''),
+          groupName: gTrim,
+          qty: Math.floor(Number(qtyStr || 0)),
+          discountPercent: (() => {
+            const raw = (manualDiscountByGroup as any)?.[rowKey] ?? '';
+            const num = Number(raw || 0);
+            if (!Number.isFinite(num)) return 0;
+            return Math.max(0, Math.min(100, Math.floor(num)));
+          })(),
+          unitPrice,
+        };
+      })
       .filter((l) => l.groupName && allowed.has(l.groupName.toLowerCase()) && Number.isFinite(l.qty) && l.qty > 0);
     if (!parsed.length) {
       errs.push('At least 1 Pallet ID is required');
     }
 
-    const op = Number(manualOriginalPrice);
-    if (!Number.isFinite(op) || op <= 0) {
-      errs.push('Original Price is required');
-    }
-    const seen = new Set<string>();
-    for (const l of parsed) {
-      const k = l.groupName.toLowerCase();
-      if (seen.has(k)) {
-        errs.push(`Duplicate Pallet Description: ${l.groupName}`);
-        break;
-      }
-      seen.add(k);
-    }
-
-    // Validate over-ordered quantities against total availability across tiers per pallet
+    // No manual Original Price validation; Sub Total is computed from rows
+    // Validate over-ordered quantities against total availability across tiers per pallet.
+    // Sum quantities across all rows (main + duplicates) per pallet group, then compare
+    // against a single availability pool for that pallet.
     if (parsed.length) {
       const byGroup = new Map<string, any>();
-      for (const r of (Array.isArray(manualPickerRows) ? manualPickerRows : [])) {
+      for (const r of (Array.isArray(manualOrderRows) ? manualOrderRows : [])) {
         const g = String((r as any)?.groupName || '').trim();
         if (!g) continue;
+        // last one wins, but all instances share the same availability numbers
         byGroup.set(g, r);
       }
-      const overErrors: string[] = [];
+
+      const needByGroup = new Map<string, number>();
       for (const l of parsed) {
-        const r: any = byGroup.get(l.groupName) || {};
+        const gName = String(l.groupName || '').trim();
+        if (!gName) continue;
+        const prev = needByGroup.get(gName) || 0;
+        needByGroup.set(gName, prev + Number(l.qty || 0));
+      }
+
+      const overErrors: string[] = [];
+      for (const [gNameRaw, totalNeedRaw] of needByGroup.entries()) {
+        const gName = String(gNameRaw || '').trim();
+        const totalNeed = Math.floor(Number(totalNeedRaw || 0));
+        if (!gName || !Number.isFinite(totalNeed) || totalNeed <= 0) continue;
+
+        const r: any = byGroup.get(gName) || {};
         const primary = Number(r?.selectedWarehouseAvailable ?? 0);
         const onWater = Number(r?.onWaterPallets ?? 0);
         const onProcess = Number(r?.onProcessPallets ?? 0);
@@ -2827,25 +3609,35 @@ export default function Orders() {
           const wid = String(secondWarehouse._id);
           second = Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0);
         }
+
+        // If we have no availability info for this pallet, skip client-side check
+        const hasAnyAvailabilityInfo =
+          Number.isFinite(primary) ||
+          Number.isFinite(onWater) ||
+          Number.isFinite(onProcess) ||
+          Number.isFinite(second);
+        if (!hasAnyAvailabilityInfo) continue;
+
         const baseMax = Math.max(0, Math.floor(
           (Number.isFinite(primary) ? primary : 0) +
           (Number.isFinite(onWater) ? onWater : 0) +
           (Number.isFinite(second) ? second : 0) +
           (Number.isFinite(onProcess) ? onProcess : 0)
         ));
-        const reserved = manualReservedByGroup.get(l.groupName)?.total || 0;
+        const reserved = manualReservedByGroup.get(gName)?.total || 0;
         const maxAllowed = baseMax + Math.max(0, reserved);
-        if (Number(l.qty) > maxAllowed) {
-          const overBy = Math.max(0, Number(l.qty) - maxAllowed);
-          const gLower = String(l.groupName || '').toLowerCase();
+
+        if (totalNeed > maxAllowed) {
+          const overBy = Math.max(0, totalNeed - maxAllowed);
+          const gLower = gName.toLowerCase();
           const palletId = String(r?.lineItem || manualBaseLineItemByGroupRef.current.get(gLower) || '') || '';
           const palletName = String(palletNameByGroup?.[gLower] || '');
           const labelParts = [
             palletName ? `Name: ${palletName}` : '',
-            `Desc: ${l.groupName}`,
+            `Desc: ${gName}`,
             palletId ? `ID: ${palletId}` : '',
           ].filter(Boolean);
-          overErrors.push(`Over-ordered — ${labelParts.join(' | ')} — Ordered ${l.qty}, Max ${maxAllowed} (over by ${overBy})`);
+          overErrors.push(`Over-ordered — ${labelParts.join(' | ')} — Ordered ${totalNeed}, Max ${maxAllowed} (over by ${overBy})`);
         }
       }
       if (overErrors.length) {
@@ -2869,7 +3661,7 @@ export default function Orders() {
       return;
     }
 
-    const originalPriceRounded = Number(op.toFixed(2));
+    const originalPriceRounded = Number(Number(manualOrderSubTotal).toFixed(2));
 
     // Client-side availability check (server also enforces)
     // For backorder, allow negative stock, so skip this check.
@@ -2915,17 +3707,17 @@ export default function Orders() {
             customerPhone: manualCustomerPhone.trim(),
             originalPrice: originalPriceRounded,
             shippingPercent: manualShippingPercent ? Number(manualShippingPercent) : undefined,
-            discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
+            // order-level discount removed; per-line discounts are used
             estFulfillmentDate: manualEstFulfillment || undefined,
             estDeliveredDate: manualEstDelivered || undefined,
             shippingAddress: manualShippingAddress.trim(),
             notes: manualNotes.trim(),
-            lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty })),
+            lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty, discountPercent: l.discountPercent, unitPrice: l.unitPrice })),
           });
           try { window.dispatchEvent(new Event('orders-changed')); } catch {}
         } else {
           // Status changes are handled by a separate endpoint.
-          // If shipping from READY TO SHIP, persist line edits first so allocations/inventory deduction use latest quantities.
+          // Only persist line edits first if shipping from READY TO SHIP so allocations/inventory deduction use latest quantities.
           if (manualPrevStatus === 'ready_to_ship' && manualStatus === 'shipped') {
             const { data: updated } = await api.put(`/orders/unfulfilled/${manualEditRow.rawId}`, {
               customerEmail: manualCustomerEmail.trim(),
@@ -2933,12 +3725,12 @@ export default function Orders() {
               customerPhone: manualCustomerPhone.trim(),
               originalPrice: originalPriceRounded,
               shippingPercent: manualShippingPercent ? Number(manualShippingPercent) : undefined,
-              discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
+              // order-level discount removed; per-line discounts are used
               estFulfillmentDate: manualEstFulfillment || undefined,
               estDeliveredDate: manualEstDelivered || undefined,
               shippingAddress: manualShippingAddress.trim(),
               notes: manualNotes.trim(),
-              lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty })),
+              lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty, discountPercent: l.discountPercent, unitPrice: l.unitPrice })),
             });
             try { window.dispatchEvent(new Event('orders-changed')); } catch {}
 
@@ -2957,25 +3749,31 @@ export default function Orders() {
               await loadOrders();
               return;
             }
-          } else {
-            await api.put(`/orders/unfulfilled/${manualEditRow.rawId}`, {
-              customerEmail: manualCustomerEmail.trim(),
-              customerName: manualCustomerName.trim(),
-              customerPhone: manualCustomerPhone.trim(),
-              originalPrice: originalPriceRounded,
-              shippingPercent: manualShippingPercent ? Number(manualShippingPercent) : undefined,
-              discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
-              estFulfillmentDate: manualEstFulfillment || undefined,
-              estDeliveredDate: manualEstDelivered || undefined,
-              shippingAddress: manualShippingAddress.trim(),
-              notes: manualNotes.trim(),
-            });
-            try { window.dispatchEvent(new Event('orders-changed')); } catch {}
           }
           await api.put(`/orders/unfulfilled/${manualEditRow.rawId}/status`, {
             status: manualStatus,
             estDeliveredDate: manualStatus === 'shipped' ? (manualEstDelivered || undefined) : undefined,
           });
+          // If canceling an order, immediately rebalance reservations so PROCESSING/READY TO SHIP orders can claim freed stock
+          if (manualStatus === 'canceled') {
+            try {
+              const wid = String(manualWarehouseId || (manualEditRow as any)?.warehouseId || '').trim();
+              // Prefer explicit group names from the order lines to scope the rebalance
+              const groupNames = Array.isArray((manualEditRow as any)?.lines)
+                ? ((manualEditRow as any).lines as any[])
+                    .map((l) => String(l?.groupName || '').trim())
+                    .filter((v) => v)
+                : [];
+              const { data: rebalanceResult } = await api.post('/orders/unfulfilled/rebalance-processing', {
+                warehouseId: wid || undefined,
+                groupNames: groupNames.length ? groupNames : undefined,
+              });
+              try { if (rebalanceResult && typeof rebalanceResult.updated === 'number') toast.info(`Rebalanced ${rebalanceResult.updated} orders`); } catch {}
+              // Close dialog and reload orders so other orders (e.g., PROCESSING/READY TO SHIP) immediately reflect reclaimed stock
+              setManualOpen(false);
+              await loadOrders();
+            } catch {}
+          }
           try { window.dispatchEvent(new Event('orders-changed')); } catch {}
         }
         // Immediately recompute shipdate (client-side) to reflect new allocations/reservations
@@ -3007,6 +3805,60 @@ export default function Orders() {
         return;
       }
 
+      // Validate availability against backend before creating
+      try {
+        const wid = String(manualWarehouseId || '').trim();
+        if (wid) {
+          const picker = await refreshManualPicker(wid);
+          const pickerRows = Array.isArray((picker as any)?.rows) ? (picker as any).rows : [];
+          const byGroupCurrent = new Map<string, any>();
+          for (const r of pickerRows as any[]) {
+            const g = String((r as any)?.groupName || '').trim();
+            if (g) byGroupCurrent.set(g, r);
+          }
+          const needByGroup = new Map<string, number>();
+          for (const l of parsed) {
+            const gName = String(l.groupName || '').trim();
+            if (!gName) continue;
+            needByGroup.set(gName, (needByGroup.get(gName) || 0) + Number(l.qty || 0));
+          }
+          const overErrors: string[] = [];
+          for (const [gNameRaw, totalNeedRaw] of needByGroup.entries()) {
+            const gName = String(gNameRaw || '').trim();
+            const totalNeed = Math.floor(Number(totalNeedRaw || 0));
+            const r: any = byGroupCurrent.get(gName) || {};
+            const primary = Number(r?.selectedWarehouseAvailable ?? 0);
+            const onWater = Number(r?.onWaterPallets ?? 0);
+            const onProcess = Number(r?.onProcessPallets ?? 0);
+            let second = 0;
+            if (secondWarehouse?._id) {
+              const per = r?.perWarehouse || {};
+              const wid2 = String(secondWarehouse._id);
+              second = Number((per && typeof per === 'object') ? (per[wid2] ?? per[String(wid2)] ?? 0) : 0);
+            }
+            const baseMax = Math.max(0, Math.floor(
+              (Number.isFinite(primary) ? primary : 0) +
+              (Number.isFinite(onWater) ? onWater : 0) +
+              (Number.isFinite(second) ? second : 0) +
+              (Number.isFinite(onProcess) ? onProcess : 0)
+            ));
+            if (totalNeed > baseMax) {
+              const overBy = Math.max(0, totalNeed - baseMax);
+              const gLower = gName.toLowerCase();
+              const palletId = String(r?.lineItem || manualBaseLineItemByGroupRef.current.get(gLower) || '') || '';
+              const palletName = String((palletNameByGroup as any)?.[gLower] || '');
+              const labelParts = [palletName ? `Name: ${palletName}` : '', `Desc: ${gName}`, palletId ? `ID: ${palletId}` : ''].filter(Boolean);
+              overErrors.push(`Over-ordered — ${labelParts.join(' | ')} — Ordered ${totalNeed}, Max ${baseMax} (over by ${overBy})`);
+            }
+          }
+          if (overErrors.length) {
+            setManualValidationErrors([...(errs || []), ...overErrors]);
+            toast.error(overErrors[0]);
+            return;
+          }
+        }
+      } catch {}
+
       await api.post('/orders/unfulfilled', {
         warehouseId: manualWarehouseId,
         status: 'processing',
@@ -3016,12 +3868,12 @@ export default function Orders() {
         createdAtOrder: manualCreatedAt || undefined,
         originalPrice: originalPriceRounded,
         shippingPercent: manualShippingPercent ? Number(manualShippingPercent) : undefined,
-        discountPercent: manualDiscountPercent ? Number(manualDiscountPercent) : undefined,
+        // order-level discount removed; per-line discounts are used
         estFulfillmentDate: manualEstFulfillment || undefined,
         estDeliveredDate: manualEstDelivered || undefined,
         shippingAddress: manualShippingAddress.trim(),
         notes: manualNotes.trim(),
-        lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty })),
+        lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty, discountPercent: l.discountPercent, unitPrice: l.unitPrice })),
       });
       toast.success('Order created');
       try {
@@ -3217,7 +4069,7 @@ export default function Orders() {
                   label="Status"
                   size="small"
                   value={manualStatus}
-                  onChange={(e)=> setManualStatus(e.target.value as any)}
+                  onChange={(e)=> { setManualStatusTouched(true); setManualStatus(e.target.value as any); }}
                   disabled={manualIsLocked}
                   sx={{ flex: 1, minWidth: 200 }}
                   SelectProps={{
@@ -3359,14 +4211,10 @@ export default function Orders() {
             }}
           >
             <TextField
-              label="Original Price"
+              label="Sub Total"
               size="small"
-              value={manualOriginalPrice}
-              onChange={(e)=> setManualOriginalPrice(normalizePriceText(e.target.value))}
-              required
-              error={!(Number.isFinite(Number(manualOriginalPrice)) && Number(manualOriginalPrice) > 0)}
-              helperText={Number.isFinite(Number(manualOriginalPrice)) && Number(manualOriginalPrice) > 0 ? '' : 'Required'}
-              disabled={manualFieldsLocked}
+              value={Number.isFinite(Number(manualOrderSubTotal)) ? Number(manualOrderSubTotal).toFixed(2) : ''}
+              disabled
             />
             <TextField
               label="Shipping Charges (%)"
@@ -3376,14 +4224,7 @@ export default function Orders() {
               disabled={manualFieldsLocked}
             />
             <TextField
-              label="Discount (%)"
-              size="small"
-              value={manualDiscountPercent}
-              onChange={(e)=> setManualDiscountPercent(normalizeDiscountText(e.target.value))}
-              disabled={manualFieldsLocked}
-            />
-            <TextField
-              label="Final Price"
+              label="Grand Total"
               size="small"
               value={manualFinalPrice}
               disabled
@@ -3590,9 +4431,16 @@ export default function Orders() {
                 const g = String(p?.row?.groupName || '').trim();
                 if (g) openOrderableGroupItems({ groupName: g });
               }}
+              getRowClassName={(params: any) => {
+                const row = (params && typeof params === 'object') ? (params as any).row : {};
+                return row && (row as any).isDuplicate ? 'duplicate-pallet-row' : 'original-pallet-row';
+              }}
               sx={{
-                '& .availableQty--cell': {
-                  backgroundColor: '#fff8b3',
+                '& .duplicate-pallet-row': {
+                  backgroundColor: '#FAF6E9',
+                },
+                '& .original-pallet-row .MuiDataGrid-cell': {
+                  fontWeight: 700,
                 },
               }}
                columnHeaderHeight={90}
@@ -3661,6 +4509,9 @@ export default function Orders() {
                   }}
                   getRowClassName={(params: any) => {
                     const row = (params as any)?.row || {};
+                    // If already added to order, mark distinctly
+                    const isAdded = (manualOrderGroups || []).some((k) => keyToGroupName(String(k || '')).trim().toLowerCase() === String(row?.groupName || '').trim().toLowerCase());
+                    if (isAdded) return 'row-already-added';
                     const primary = Number(row?.selectedWarehouseAvailable ?? 0);
                     const onWater = Number(row?.onWaterPallets ?? 0);
                     const onProcess = Number(row?.onProcessPallets ?? 0);
@@ -3685,6 +4536,11 @@ export default function Orders() {
                     '& .row-maxorder-zero': {
                       bgcolor: 'rgba(211, 47, 47, 0.08)',
                       '&:hover': { bgcolor: 'rgba(211, 47, 47, 0.12)' },
+                    },
+                    '& .row-already-added': {
+                      bgcolor: 'rgba(25, 118, 210, 0.08)',
+                      '&:hover': { bgcolor: 'rgba(25, 118, 210, 0.12)' },
+                      color: 'rgba(0,0,0,0.6)'
                     },
                     '& .MuiDataGrid-columnHeaderTitle': {
                       whiteSpace: 'normal',
@@ -3720,10 +4576,14 @@ export default function Orders() {
                       (Number.isFinite(onWater) ? onWater : 0) +
                       (Number.isFinite(onProcess) ? onProcess : 0) +
                       (Number.isFinite(secondQty) ? secondQty : 0);
+                    // Disallow selecting if already added in the order list
+                    const alreadyAdded = (manualOrderGroups || []).some((k) => keyToGroupName(String(k || '')).trim().toLowerCase() === String(row?.groupName || '').trim().toLowerCase());
+                    if (alreadyAdded) return false;
                     // Allow selecting even when availability is 0
                     const maxOrder = Math.max(0, Math.floor(total));
                     return maxOrder >= 0;
                   }}
+                  
                   disableRowSelectionOnClick
                   density="compact"
                   slots={{ toolbar: GridToolbar }}
@@ -3763,6 +4623,28 @@ export default function Orders() {
                   for (const id of picked) set.add(String(id));
                   return Array.from(set);
                 });
+                // Initialize default Order Qty to '1' for any newly added groups (do not overwrite existing values)
+                setManualOrderQtyByGroup((prev)=>{
+                  const next = { ...(prev || {}) } as Record<string, string>;
+                  for (const id of picked) {
+                    const key = String(id);
+                    if (!(key in next) || String(next[key] ?? '').trim() === '') {
+                      next[key] = '1';
+                    }
+                  }
+                  return next;
+                });
+                // Initialize default Discount (%) to '0' for any newly added groups (do not overwrite existing values)
+                setManualDiscountByGroup((prev)=>{
+                  const next = { ...(prev || {}) } as Record<string, string>;
+                  for (const id of picked) {
+                    const key = String(id);
+                    if (!(key in next) || String(next[key] ?? '').trim() === '') {
+                      next[key] = '0';
+                    }
+                  }
+                  return next;
+                });
                 setManualPickSelected({ type: 'include', ids: new Set() });
                 setManualPickOpen(false);
               }} disabled={!(manualPickSelected?.ids && manualPickSelected.ids.size > 0)}>Add to Order</Button>
@@ -3777,6 +4659,13 @@ export default function Orders() {
             disabled={manualMode !== 'edit' || !manualEditRow}
           >
             Export .xlsx
+          </Button>
+          <Button
+            variant="outlined"
+            onClick={exportManualOrderPdf}
+            disabled={manualMode !== 'edit' || !manualEditRow}
+          >
+            Export .pdf
           </Button>
           <Button
             variant="contained"
@@ -4080,11 +4969,20 @@ export default function Orders() {
           <div style={{ height: 420, width: '100%' }}>
             <DataGrid
               rows={(Array.isArray(orderableGroupItems) ? orderableGroupItems : []).map((r: any, idx: number) => ({ id: String(r?.itemCode || idx), ...r }))}
-              columns={([ 
+              columns={([
                 { field: 'itemCode', headerName: 'Item Code', width: 160 },
                 { field: 'description', headerName: 'Description', flex: 1, minWidth: 220 },
+                { field: 'upc', headerName: 'UPC', flex: 1, minWidth: 160 },
                 { field: 'color', headerName: 'Color', width: 140 },
                 { field: 'packSize', headerName: 'Pack Size', width: 110, type: 'number', align: 'right', headerAlign: 'right' },
+                { field: 'price', headerName: 'Item Price', width: 120, type: 'number', align: 'right', headerAlign: 'right', valueGetter: (p: any) => {
+                  const v = Number((p?.row as any)?.price ?? 0);
+                  return Number.isFinite(v) ? v : 0;
+                }, renderCell: (p: any) => {
+                  const v = Number((p?.row as any)?.price ?? 0);
+                  if (!Number.isFinite(v)) return '';
+                  return v.toFixed(2);
+                }},
               ]) as GridColDef[]}
               disableRowSelectionOnClick
               density="compact"

@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
-import { Container, Typography, Paper, Stack, TextField, Button, MenuItem, Dialog, DialogTitle, DialogContent, DialogActions, IconButton, Tooltip, Autocomplete, Menu, FormControlLabel, Checkbox, Chip, Divider, Grid } from '@mui/material';
+import { Container, Typography, Paper, Stack, TextField, Button, MenuItem, Dialog, DialogTitle, DialogContent, DialogActions, IconButton, Tooltip, Autocomplete, Menu, FormControlLabel, Checkbox, Chip, Divider, Grid, Box } from '@mui/material';
 import MoreVertIcon from '@mui/icons-material/MoreVert';
 import { DataGrid, GridColDef, GridRenderCellParams, GridRowSelectionModel } from '@mui/x-data-grid';
 import api from '../api';
@@ -7,7 +7,7 @@ import { useToast } from '../components/ToastProvider';
 import * as XLSX from 'xlsx';
 
 interface ItemGroup { _id: string; name: string; palletName?: string; lineItem?: string; palletDescription?: string; active?: boolean; price?: number }
-interface Item { _id: string; itemCode: string; itemGroup: string; description: string; color: string; packSize?: number; enabled?: boolean }
+interface Item { _id: string; itemCode: string; itemGroup: string; description: string; color: string; upc?: string; packSize?: number; enabled?: boolean }
 
 export default function ItemRegistry() {
   const [isAdmin, setIsAdmin] = useState(false);
@@ -73,14 +73,19 @@ export default function ItemRegistry() {
   const [enabled, setEnabled] = useState<boolean>(true);
   // Group detail (per-pallet-group items management)
   const [selectedGroup, setSelectedGroup] = useState<string>('');
+  const [selectedGroupId, setSelectedGroupId] = useState<string>('');
   const [groupModalOpen, setGroupModalOpen] = useState(false);
   const [gItemCode, setGItemCode] = useState('');
   const [gDesc, setGDesc] = useState('');
   const [gColor, setGColor] = useState('');
   const [gPack, setGPack] = useState<number>(0);
+  const [gPrice, setGPrice] = useState<string>('');
+  const [gUpc, setGUpc] = useState<string>('');
+  const [gEditingItemCode, setGEditingItemCode] = useState<string>('');
   // Import
   const [file, setFile] = useState<File | null>(null);
   const [importResult, setImportResult] = useState<any>(null);
+  const [upcConflict, setUpcConflict] = useState<string>('');
   // Search
   const [groupsQ, setGroupsQ] = useState('');
   const [itemsQ, setItemsQ] = useState('');
@@ -110,20 +115,41 @@ export default function ItemRegistry() {
     if (!row?.active) return;
     setGroupSelection({ type: 'include', ids: new Set([String(row.id)]) } as any);
     setSelectedGroup(row.name);
+    setSelectedGroupId(String(row.id || ''));
     setGItemCode('');
     setGDesc('');
     setGColor('');
     setGPack(0);
+    setGPrice('');
+    setGUpc('');
+    setGEditingItemCode('');
+    setUpcConflict('');
     setGroupModalOpen(true);
   };
 
   const closeGroupModal = () => {
     setGroupModalOpen(false);
     setSelectedGroup('');
+    setSelectedGroupId('');
     setGItemCode('');
     setGDesc('');
     setGColor('');
     setGPack(0);
+    setGPrice('');
+    setGUpc('');
+    setGEditingItemCode('');
+    setUpcConflict('');
+  };
+
+  const canonicalUpcForCode = (code: string) => {
+    const lower = String(code || '').trim().toLowerCase();
+    if (!lower) return '';
+    for (const it of items) {
+      if (String(it.itemCode || '').trim().toLowerCase() !== lower) continue;
+      const val = String((it as any).upc || '').trim();
+      if (val) return val;
+    }
+    return '';
   };
 
   const openRenameLineItem = (row: any) => {
@@ -226,11 +252,19 @@ export default function ItemRegistry() {
 
   const exportGroupsExcel = () => {
     // Export only active groups and enabled items, sorted
-    const header = ['Pallet Name','Pallet Description','Pallet ID','Item Code','Item Description','Color','Pack Size'];
+    const header = ['Pallet Name','Pallet Description','Pallet ID','Pallet Price','Item Code','Item Description','UPC','Color','Pack Size','Item Price'];
     const lineItemByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).lineItem || '']));
     const palletNameByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).palletName || '']));
     const palletDescByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).palletDescription || '']));
     const activeSet = new Set(groups.filter(g => (g as any).active !== false).map(g => g.name));
+    const priceByGroup = new Map<string, number>();
+    items.forEach((it: any) => {
+      const g = it.itemGroup || '';
+      if (!g || !activeSet.has(g)) return;
+      const prev = priceByGroup.get(g) || 0;
+      const p = Number(it.price ?? 0) || 0;
+      priceByGroup.set(g, prev + p);
+    });
     const sizeOrder = (d: string) => {
       const m = (d || '').match(/\b(XXL|XL|L|M|S)\b/i);
       const v = m ? m[1].toUpperCase() : '';
@@ -252,7 +286,23 @@ export default function ItemRegistry() {
         if (sd !== 0) return sd;
         return 0;
       })
-      .map(it => [palletNameByGroup.get(it.itemGroup||'') || '', palletDescByGroup.get(it.itemGroup||'') || '', lineItemByGroup.get(it.itemGroup||'') || '', it.itemCode, it.description||'', it.color||'', (it as any).packSize ?? 0]);
+      .map(it => {
+        const groupKey = it.itemGroup || '';
+        const palletPrice = priceByGroup.get(groupKey) || 0;
+        const itemPrice = Number((it as any).price ?? 0) || 0;
+        return [
+          palletNameByGroup.get(groupKey) || '',
+          palletDescByGroup.get(groupKey) || '',
+          lineItemByGroup.get(groupKey) || '',
+          palletPrice,
+          it.itemCode,
+          it.description || '',
+          (it as any).upc || '',
+          it.color || '',
+          (it as any).packSize ?? 0,
+          itemPrice
+        ];
+      });
     const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Groups + Items');
@@ -276,11 +326,19 @@ export default function ItemRegistry() {
 
 
   const exportItemsExcel = () => {
-    const header = ['Pallet Name','Pallet Description','Pallet ID','Item Code','Item Description','Color','Pack Size'];
+    const header = ['Pallet Name','Pallet Description','Pallet ID','Pallet Price','Item Code','Item Description','UPC','Color','Pack Size','Item Price'];
     const lineItemByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).lineItem || '']));
     const palletNameByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).palletName || '']));
     const palletDescByGroup = new Map(groups.map((g:any)=> [g.name, (g as any).palletDescription || '']));
     const activeSet = new Set(groups.filter(g => (g as any).active !== false).map(g => g.name));
+    const priceByGroup = new Map<string, number>();
+    items.forEach((it: any) => {
+      const g = it.itemGroup || '';
+      if (!g || !activeSet.has(g)) return;
+      const prev = priceByGroup.get(g) || 0;
+      const p = Number(it.price ?? 0) || 0;
+      priceByGroup.set(g, prev + p);
+    });
     const sizeOrder = (d: string) => {
       const m = (d || '').match(/\b(XXL|XL|L|M|S)\b/i);
       const v = m ? m[1].toUpperCase() : '';
@@ -300,7 +358,23 @@ export default function ItemRegistry() {
         if (sd !== 0) return sd;
         return (a.color || '').localeCompare(b.color || '');
       })
-      .map(it => [palletNameByGroup.get(it.itemGroup||'') || '', palletDescByGroup.get(it.itemGroup||'') || '', lineItemByGroup.get(it.itemGroup||'') || '', it.itemCode, it.description||'', it.color||'', (it as any).packSize ?? 0]);
+      .map(it => {
+        const groupKey = it.itemGroup || '';
+        const palletPrice = priceByGroup.get(groupKey) || 0;
+        const itemPrice = Number((it as any).price ?? 0) || 0;
+        return [
+          palletNameByGroup.get(groupKey) || '',
+          palletDescByGroup.get(groupKey) || '',
+          lineItemByGroup.get(groupKey) || '',
+          palletPrice,
+          it.itemCode,
+          it.description || '',
+          (it as any).upc || '',
+          it.color || '',
+          (it as any).packSize ?? 0,
+          itemPrice
+        ];
+      });
     const data = [header, ...rows];
     const ws = XLSX.utils.aoa_to_sheet(data);
     const wb = XLSX.utils.book_new();
@@ -309,11 +383,11 @@ export default function ItemRegistry() {
   };
 
   const downloadTemplate = () => {
-    const header = ['Pallet Name','Pallet Description','Pallet ID','Item Code','Item Description','Color','Pack Size'];
+    const header = ['Pallet Name','Pallet Description','Pallet ID','Pallet Price','Item Code','Item Description','UPC','Color','Pack Size','Item Price'];
     const example = [
       // Examples: last duplicate row per (Pallet Group + Item Code) overwrites values; identical duplicates are skipped
-      ['','Inverted Planters Smooth (OW)','Tall + Short Rounded Bottom Planters Pallet - Volcanic Ash Brown/Cement','PC2014AFBR-OW','Smooth Finish Inverted Planter S - Oyster White - Fiber Finish','Oyster White',8],
-      ['','Inverted Planters Mixed Smooth and VA (OW / MB / C / DAB)','32" Beaded Commercial Planter - Cement','MPC2032D-DAB','Volcanic Ash Texture Inverted Planter S - Dark Antique Bronze','Dark Antique Bronze',2]
+      ['', 'Inverted Planters Smooth (OW)','Tall + Short Rounded Bottom Planters Pallet - Volcanic Ash Brown/Cement', 0,'PC2014AFBR-OW','Smooth Finish Inverted Planter S - Oyster White - Fiber Finish','', 'Oyster White',8,0],
+      ['', 'Inverted Planters Mixed Smooth and VA (OW / MB / C / DAB)','32" Beaded Commercial Planter - Cement', 0,'MPC2032D-DAB','Volcanic Ash Texture Inverted Planter S - Dark Antique Bronze','', 'Dark Antique Bronze',2,0]
     ];
     const ws = XLSX.utils.aoa_to_sheet([header, ...example]);
     const wb = XLSX.utils.book_new();
@@ -345,17 +419,31 @@ export default function ItemRegistry() {
     if (!code) return;
     const existing = items.find(it => it.itemCode.toLowerCase() === code.toLowerCase());
     if (existing) {
-      setGDesc(existing.description || '');
-      setGColor(existing.color || '');
-      setGPack(0);
-      toast.info('Existing item found. Description and Color auto-filled.');
+      if (!gDesc) setGDesc(existing.description || '');
+      if (!gColor) setGColor(existing.color || '');
+      if (!gPack) setGPack((existing as any).packSize ?? 0);
+      const existingUpc = String((existing as any).upc || '').trim();
+      if (!gUpc && existingUpc) setGUpc(existingUpc);
+      setUpcConflict('');
     } else {
       setGDesc('');
       setGColor('');
       setGPack(0);
+      setGUpc('');
+      setUpcConflict('');
       toast.warning('Item code not registered yet.');
     }
   };
+
+  useEffect(() => {
+    const canonical = canonicalUpcForCode(gItemCode);
+    const current = String(gUpc || '').trim();
+    if (canonical && canonical !== current) {
+      setUpcConflict(`Item Code already uses UPC "${canonical}". Please use the same UPC.`);
+    } else {
+      setUpcConflict('');
+    }
+  }, [gItemCode, gUpc, items]);
 
   const deleteGroup = async (id: string, name: string) => {
     if (!window.confirm(`Delete pallet description "${name}"? This cannot be undone.`)) return;
@@ -405,10 +493,10 @@ export default function ItemRegistry() {
 
   const downloadGroupTemplate = () => {
     // Provide a template that includes items per pallet group, with Line Item column
-    const header = ['Pallet Name','Pallet Description','Pallet ID','Item Code','Item Description','Color','Pack Size'];
+    const header = ['Pallet Name','Pallet Description','Pallet ID','Item Code','Item Description','UPC','Color','Pack Size','Item Price'];
     const example = [
-      ['', 'Inverted Planters Smooth (OW)','Tall + Short Rounded Bottom Planters Pallet - Volcanic Ash Brown/Cement','PC2014AFBR-OW','Smooth Finish Inverted Planter S - Oyster White - Fiber Finish','Oyster White',8],
-      ['', 'Inverted Planters Mixed Smooth and VA (OW / MB / C / DAB)','32" Beaded Commercial Planter - Cement','PC2014AFBR-OW','Smooth Finish Inverted Planter S - Oyster White - Fiber Finish','Oyster White',2]
+      ['', 'Inverted Planters Smooth (OW)','Tall + Short Rounded Bottom Planters Pallet - Volcanic Ash Brown/Cement','PC2014AFBR-OW','Smooth Finish Inverted Planter S - Oyster White - Fiber Finish','', 'Oyster White',8,0],
+      ['', 'Inverted Planters Mixed Smooth and VA (OW / MB / C / DAB)','32" Beaded Commercial Planter - Cement','PC2014AFBR-OW','Smooth Finish Inverted Planter S - Oyster White - Fiber Finish','', 'Oyster White',2,0]
     ];
     const ws = XLSX.utils.aoa_to_sheet([header, ...example]);
     const wb = XLSX.utils.book_new();
@@ -542,47 +630,107 @@ export default function ItemRegistry() {
           </Stack>
 
           <Grid container spacing={2} alignItems="center" sx={{ mb: 2 }}>
-            <Grid item xs={12} md={3} sx={{mt:3}}>
-              <TextField fullWidth required label="Item Code" value={gItemCode} onChange={e=>setGItemCode(e.target.value)} onKeyDown={handleGItemCodeKeyDown} helperText="Press Enter to check and auto-fill" />
+            <Grid item xs={12} md={2.2}>
+              <TextField
+                fullWidth
+                required
+                label="Item Code"
+                value={gItemCode}
+                onChange={e=>setGItemCode(e.target.value)}
+                onKeyDown={handleGItemCodeKeyDown}
+                helperText={gEditingItemCode ? 'Item Code cannot be changed while editing' : 'Press Enter to check and auto-fill'}
+                disabled={Boolean(gEditingItemCode) || !isAdmin}
+              />
             </Grid>
-            <Grid item xs={12} md={5}>
-              <TextField fullWidth required label="Item Description" value={gDesc} onChange={e=>setGDesc(e.target.value)} />
+            <Grid item xs={12} md={4.2}>
+              <TextField fullWidth required label="Item Description" value={gDesc} onChange={e=>setGDesc(e.target.value)} disabled={!isAdmin} />
+            </Grid>
+            <Grid item xs={12} md={2.2}>
+              <TextField fullWidth label="UPC" value={gUpc} onChange={(e)=> setGUpc(e.target.value)} disabled={!isAdmin} />
             </Grid>
             <Grid item xs={12} md={2}>
-              <TextField fullWidth required label="Color" value={gColor} onChange={e=>setGColor(e.target.value)} />
+              <TextField fullWidth required label="Color" value={gColor} onChange={e=>setGColor(e.target.value)} disabled={!isAdmin} />
+            </Grid>
+            <Grid item xs={12} md={1.6}>
+              <TextField fullWidth required type="number" label="Pack Size" value={gPack} onChange={e=>setGPack(e.target.value === '' ? 0 : Number(e.target.value))} disabled={!isAdmin} />
             </Grid>
             <Grid item xs={12} md={2}>
-              <TextField fullWidth required type="number" label="Pack Size" value={gPack} onChange={e=>setGPack(e.target.value === '' ? 0 : Number(e.target.value))} />
+              <TextField
+                fullWidth
+                label="Item Price"
+                type="number"
+                value={gPrice}
+                onChange={(e) => setGPrice(e.target.value)}
+                disabled={!isAdmin}
+              />
             </Grid>
+
             <Grid item xs={12}>
               <Stack direction={{ xs:'column', sm:'row' }} spacing={2} justifyContent={{ xs:'stretch', sm:'flex-end' }} alignItems={{ xs:'stretch', sm:'center' }}>
                 {isAdmin && (
-                  <Button variant="contained" onClick={async()=>{
-                    if (!selectedGroup) return;
-                    if (!gItemCode.trim() || !gDesc.trim() || !gColor.trim() || !Number.isFinite(Number(gPack)) || Number(gPack) < 0) { toast.error('Complete all fields'); return; }
-                    try {
-                      await api.post('/items', { itemCode: gItemCode.trim(), itemGroup: selectedGroup, description: gDesc.trim(), color: gColor.trim(), packSize: Number(gPack), enabled: true });
-                      toast.success('Item added');
-                      setGItemCode(''); setGDesc(''); setGColor(''); setGPack(0);
-                      await load();
-                    } catch (e:any) {
-                      const msg = e?.response?.data?.message || e?.message || 'Failed to add item';
-                      toast.error(msg);
-                    }
-                  }}>Add Item</Button>
+                  <>
+                    <Button variant="contained" onClick={async()=>{
+                      if (!selectedGroup) return;
+
+                      const isEditing = Boolean(gEditingItemCode);
+                      const code = String((isEditing ? gEditingItemCode : gItemCode) || '').trim();
+                      if (!code || !gDesc.trim() || !gColor.trim() || !Number.isFinite(Number(gPack)) || Number(gPack) < 0) { toast.error('Complete all fields'); return; }
+                      const pRaw = String(gPrice ?? '').trim();
+                      const pNum = pRaw === '' ? 0 : Number(pRaw);
+                      if (pRaw !== '' && !Number.isFinite(pNum)) { toast.error('Price must be a valid number'); return; }
+
+                      const normUpc = String(gUpc || '').trim();
+                      const canonicalUpc = canonicalUpcForCode(code);
+                      if (canonicalUpc && canonicalUpc !== normUpc) {
+                        toast.error('UPC does not match existing item record');
+                        return;
+                      }
+
+                      try {
+                        if (isEditing) {
+                          const existing = items.find(it => String(it.itemCode || '').toLowerCase() === code.toLowerCase() && String(it.itemGroup || '') === String(selectedGroup || ''));
+                          const enabled = (existing && typeof (existing as any).enabled === 'boolean') ? Boolean((existing as any).enabled) : true;
+                          await api.put(`/items/${encodeURIComponent(code)}`, { itemGroup: selectedGroup, description: gDesc.trim(), color: gColor.trim(), upc: String(gUpc || '').trim(), packSize: Number(gPack), price: pNum, enabled });
+                          toast.success('Item updated');
+                        } else {
+                          await api.post('/items', { itemCode: code, itemGroup: selectedGroup, description: gDesc.trim(), color: gColor.trim(), upc: String(gUpc || '').trim(), packSize: Number(gPack), price: pNum, enabled: true });
+                          toast.success('Item added');
+                        }
+
+                        setGItemCode(''); setGDesc(''); setGColor(''); setGPack(0); setGPrice(''); setGUpc(''); setUpcConflict('');
+                        setGEditingItemCode('');
+                        await load();
+                      } catch (e:any) {
+                        const msg = e?.response?.data?.message || e?.message || (isEditing ? 'Failed to update item' : 'Failed to add item');
+                        toast.error(msg);
+                      }
+                    }}>{gEditingItemCode ? 'Update Item' : 'Add Item'}</Button>
+
+                    <Button variant="outlined" onClick={() => {
+                      setGItemCode(''); setGDesc(''); setGColor(''); setGPack(0); setGPrice(''); setGUpc(''); setUpcConflict('');
+                      setGEditingItemCode('');
+                    }}>Clear</Button>
+                  </>
                 )}
               </Stack>
             </Grid>
+            {upcConflict && (
+              <Grid item xs={12}>
+                <Typography color="error" variant="body2">{upcConflict}</Typography>
+              </Grid>
+            )}
           </Grid>
 
-          <div style={{ height: 460, width: '100%' }}>
+          <Box sx={{ height: 460, width: '100%', '& .editing-row': { backgroundColor: '#fff7e6' } }}>
             <DataGrid
-              rows={items.filter(it=> (it.itemGroup||'') === selectedGroup).map(it=>({ id: it._id, itemCode: it.itemCode, description: it.description, color: it.color, packSize: (it as any).packSize ?? 0 }))}
+              rows={items.filter(it=> (it.itemGroup||'') === selectedGroup).map(it=>({ id: it._id, itemCode: it.itemCode, description: it.description, upc: (it as any).upc || '', color: it.color, packSize: (it as any).packSize ?? 0, price: Number((it as any).price ?? 0) }))}
               columns={([
                 { field: 'itemCode', headerName: 'Item Code', flex: 1, minWidth: 160 },
                 { field: 'description', headerName: 'Description', flex: 2, minWidth: 240 },
+                { field: 'upc', headerName: 'UPC', flex: 1, minWidth: 160 },
                 { field: 'color', headerName: 'Color', width: 140 },
                 { field: 'packSize', headerName: 'Pack Size', type: 'number', width: 140 },
+                { field: 'price', headerName: 'Item Price', type: 'number', width: 120 },
                 { field: 'actions', headerName: 'Actions', width: 120, sortable: false, filterable: false, renderCell: (p: GridRenderCellParams) => {
                   const r = p.row as any;
                   return isAdmin ? (
@@ -591,12 +739,29 @@ export default function ItemRegistry() {
                 } }
               ]) as GridColDef[]}
               loading={loading}
+              getRowClassName={(params) => {
+                const r: any = params.row || {};
+                return gEditingItemCode && String(r.itemCode || '') === String(gEditingItemCode || '') ? 'editing-row' : '';
+              }}
+              onRowDoubleClick={(p: any) => {
+                if (!isAdmin) return;
+                const r = p?.row as any;
+                if (!r) return;
+                setGItemCode(String(r.itemCode || ''));
+                setGDesc(String(r.description || ''));
+                setGUpc(String(r.upc || ''));
+                setGColor(String(r.color || ''));
+                setGPack(Number(r.packSize) || 0);
+                setGPrice(String(r.price ?? ''));
+                setGEditingItemCode(String(r.itemCode || ''));
+                setUpcConflict('');
+              }}
               disableRowSelectionOnClick
               density="compact"
               initialState={{ pagination: { paginationModel: { pageSize: 10, page: 0 } } }}
               pageSizeOptions={[10,20,50]}
             />
-          </div>
+          </Box>
         </DialogContent>
         <DialogActions>
           <Button variant="text" onClick={closeGroupModal}>Close</Button>
@@ -700,12 +865,21 @@ export default function ItemRegistry() {
                 return name.includes(q) || lineItem.includes(q) || palletName.includes(q) || palletDesc.includes(q);
               })
               .map(g=>{
-                return ({ id: g._id, name: g.name, palletName: (g as any).palletName || '', palletDescription: (g as any).palletDescription || '', lineItem: (g as any).lineItem || '', active: (g as any).active !== false, itemCount: items.filter(it => (it.itemGroup||'') === g.name).length });
+                const groupName = g.name;
+                const totalPrice = items
+                  .filter(it => (it.itemGroup || '') === groupName)
+                  .reduce((sum, it:any) => {
+                    const pack = Number((it as any).packSize ?? 0) || 0;
+                    const price = Number((it as any).price ?? 0) || 0;
+                    return sum + (pack * price);
+                  }, 0);
+                return ({ id: g._id, name: g.name, palletName: (g as any).palletName || '', palletDescription: (g as any).palletDescription || '', lineItem: (g as any).lineItem || '', active: (g as any).active !== false, itemCount: items.filter(it => (it.itemGroup||'') === g.name).length, price: totalPrice });
               })}
             columns={([
               { field: 'palletName', headerName: 'Pallet Name', flex: 1, minWidth: 200 },
               { field: 'palletDescription', headerName: 'Pallet Description', flex: 1, minWidth: 220 },
               { field: 'lineItem', headerName: 'Pallet ID', flex: 1, minWidth: 220 },
+              { field: 'price', headerName: 'Pallet Price', type: 'number', width: 120 },
               { field: 'active', headerName: 'Active', width: 80, renderCell: (p: GridRenderCellParams) => (
                 <Chip size="small" label={p.value ? 'Yes' : 'No'} color={p.value ? 'success' : 'default'} />
               ) },

@@ -14,7 +14,7 @@ type GroupOverview = { groupName: string; perWarehouse: { warehouseId: string; p
 type GroupDetails = {
   groupName: string;
   perWarehouse: { warehouseId: string; pallets: number }[];
-  items: Array<{ itemCode: string; description: string; color: string; packSize: number; totalPallets: number; perWarehouse: Record<string, { pallets: number; qty: number }>; totalQty: number }>;
+  items: Array<{ itemCode: string; description: string; upc?: string; color: string; packSize: number; totalPallets: number; perWarehouse: Record<string, { pallets: number; qty: number }>; totalQty: number }>;
   recentTransactions: any[];
 };
 
@@ -486,12 +486,13 @@ export default function Inventory() {
               <div style={{ height: 360, width: '100%' }}>
                 <DataGrid
                   rows={details.items.map((it:any)=>{
-                    const r: any = { id: it.itemCode, ...it };
+                    const r: any = { id: it.itemCode || `${it.description}-${it.color}`, ...it, upc: String(it.upc || '') };
                     return r;
                   })}
                   columns={([
                     { field: 'itemCode', headerName: 'Item Code', flex: 1, minWidth: 140 },
                     { field: 'description', headerName: 'Description', flex: 3, minWidth: 320 },
+                    { field: 'upc', headerName: 'UPC', flex: 1, minWidth: 160 },
                     { field: 'color', headerName: 'Color', flex: 1, minWidth: 100 },
                     { field: 'packSize', headerName: 'Pack Size', width: 110, type: 'number', align: 'right', headerAlign: 'right' },
                   ]) as GridColDef[]}

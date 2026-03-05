@@ -160,6 +160,17 @@ export default function Ship() {
       try {
         window.dispatchEvent(new CustomEvent('shipments-changed', { detail: { kind: 'deliver', shipmentId: id } }));
       } catch {}
+      // Ensure Orders page immediately reflects on-water -> MPG moves
+      try {
+        const { data: rb } = await api.post('/orders/unfulfilled/rebalance-processing', {});
+        if (rb && typeof rb.updated === 'number') {
+          toast.info(`Orders rebalanced: ${rb.updated} updated`);
+        }
+      } catch {}
+      try { await new Promise((r) => setTimeout(r, 400)); } catch {}
+      try { window.dispatchEvent(new Event('orders-changed')); } catch {}
+      // trailing dispatch to avoid race with server finishing rebalance after first fetch
+      try { setTimeout(() => { try { window.dispatchEvent(new Event('orders-changed')); } catch {} }, 1200); } catch {}
       load();
     } catch (e: any) {
       toast.error(e?.response?.data?.message || 'Failed to deliver');
