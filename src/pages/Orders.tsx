@@ -122,7 +122,7 @@ export default function Orders() {
   const refreshPickerRef = useRef<null | ((wid: string) => Promise<any>)>(null);
   const refreshAllocRef = useRef<null | ((rawId: string) => Promise<any>)>(null);
 
-  // Auto-refresh Orders list so statuses (PROCESSING/READY TO SHIP) and reserved stock reflect latest hierarchy
+  // Auto-refresh Orders list at a modest cadence, without forcing rebalances each time
   useEffect(() => {
     let stopped = false;
     let ticking = false;
@@ -131,15 +131,13 @@ export default function Orders() {
       if (manualOpen) return; // don't interrupt when add/edit dialog is open
       if (ticking) return;
       ticking = true;
-      try { await api.post('/orders/unfulfilled/rebalance-processing', {}); } catch {}
-      try { await new Promise((r) => setTimeout(r, 180)); } catch {}
       try { await loadOrders(); } catch {}
       ticking = false;
     };
     const onFocus = () => { void tick(); };
-    const interval = setInterval(tick, 60000); // every 60s
+    const interval = setInterval(tick, 120000); // every 120s
     window.addEventListener('focus', onFocus);
-    const kick = setTimeout(tick, 300);
+    const kick = setTimeout(tick, 600);
     return () => {
       stopped = true;
       clearInterval(interval);
@@ -148,7 +146,7 @@ export default function Orders() {
     };
   }, [manualOpen]);
 
-  // While viewing/editing an order, auto-refresh the Reserved Stock (Hierarchy)
+  // While viewing/editing an order, refresh the Reserved Stock (Hierarchy) periodically without spamming rebalance
   useEffect(() => {
     if (!manualOpen) return;
     const rawId = String((manualEditRow as any)?.rawId || '').trim();
@@ -159,16 +157,14 @@ export default function Orders() {
       if (stopped) return;
       if (ticking) return;
       ticking = true;
-      try { await api.post('/orders/unfulfilled/rebalance-processing', {}); } catch {}
-      try { await new Promise((r) => setTimeout(r, 150)); } catch {}
       try { if (wid) await refreshPickerRef.current?.(wid); } catch {}
       try { if (rawId) await refreshAllocRef.current?.(rawId); } catch {}
       ticking = false;
     };
     const onFocus = () => { void tick(); };
-    const interval = setInterval(tick, 30000); // every 30s while dialog is open
+    const interval = setInterval(tick, 45000); // every 45s while dialog is open
     window.addEventListener('focus', onFocus);
-    const kick = setTimeout(tick, 200);
+    const kick = setTimeout(tick, 300);
     return () => {
       stopped = true;
       clearInterval(interval);
@@ -193,6 +189,10 @@ export default function Orders() {
     return `${g}||${uid}`;
   };
 
+  // Snapshots captured at Add time (declare before any usage below)
+  const [manualUnitPriceByGroup, setManualUnitPriceByGroup] = useState<Record<string, number>>({});
+  const [manualItemsByGroup, setManualItemsByGroup] = useState<Record<string, any[]>>({});
+
   const openOrderableGroupItems = useCallback(async ({ groupName }: { groupName: string }) => {
     const g = String(groupName || '').trim();
     if (!g) return;
@@ -201,14 +201,68 @@ export default function Orders() {
     setOrderableGroupItems([]);
     setOrderableGroupLoading(true);
     try {
-      const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
-      setOrderableGroupItems(Array.isArray((data as any)?.items) ? (data as any).items : []);
+      const gLower = g.toLowerCase();
+      const snap = (manualItemsByGroup as any)?.[gLower];
+      if (Array.isArray(snap) && snap.length) {
+        setOrderableGroupItems(snap);
+      } else {
+        // Fallback: check currently loaded order lines for persisted snapshot (itemsAtAdd)
+        let fromOrder: any[] | null = null;
+        try {
+          const lines = Array.isArray((manualEditRow as any)?.lines) ? (manualEditRow as any).lines : [];
+          const match = lines.find((l: any) => String(l?.groupName || l?.lineItem || '').trim().toLowerCase() === gLower);
+          if (match && Array.isArray((match as any)?.itemsAtAdd) && (match as any).itemsAtAdd.length) {
+            fromOrder = (match as any).itemsAtAdd as any[];
+          }
+        } catch {}
+        if (Array.isArray(fromOrder) && fromOrder.length) {
+          setOrderableGroupItems(fromOrder);
+        } else {
+          // Fallback: try localStorage cache per order
+          let fromCache: any[] | null = null;
+          try {
+            const orderKey = String((manualEditRow as any)?.rawId || (manualEditRow as any)?.id || '').trim();
+            if (orderKey) {
+              const cacheKey = `orderLineSnapshots:${orderKey}`;
+              const cached = localStorage.getItem(cacheKey);
+              if (cached) {
+                const parsed = JSON.parse(cached);
+                const maybe = parsed && parsed.items ? parsed.items[gLower] || parsed.items[g] : null;
+                if (Array.isArray(maybe) && maybe.length) fromCache = maybe as any[];
+              }
+            }
+          } catch {}
+          if (Array.isArray(fromCache) && fromCache.length) {
+            setOrderableGroupItems(fromCache);
+          } else {
+            const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
+            const list = Array.isArray((data as any)?.items) ? (data as any).items : [];
+            setOrderableGroupItems(list);
+            // LEGACY BACKFILL: If no snapshot exists anywhere, capture the current list as a snapshot for this order/group
+            try {
+              const gLower = g.toLowerCase();
+              const hasSnap = Array.isArray((manualItemsByGroup as any)?.[gLower]) && (manualItemsByGroup as any)[gLower].length;
+              if (!hasSnap && list && list.length) {
+                setManualItemsByGroup((prev)=> ({ ...(prev||{}), [gLower]: list }));
+                const orderKey = String((manualEditRow as any)?.rawId || (manualEditRow as any)?.id || '').trim();
+                if (orderKey) {
+                  const cacheKey = `orderLineSnapshots:${orderKey}`;
+                  const cached = localStorage.getItem(cacheKey);
+                  const parsed = cached ? JSON.parse(cached) : {};
+                  parsed.items = { ...(parsed.items || {}), [gLower]: list };
+                  localStorage.setItem(cacheKey, JSON.stringify(parsed));
+                }
+              }
+            } catch {}
+          }
+        }
+      }
     } catch {
       setOrderableGroupItems([]);
     } finally {
       setOrderableGroupLoading(false);
     }
-  }, []);
+  }, [manualItemsByGroup, manualEditRow]);
 
   const [manualPickerLoading, setManualPickerLoading] = useState(false);
   const [manualPickerQ, setManualPickerQ] = useState('');
@@ -614,6 +668,8 @@ export default function Orders() {
     const discountBy: Record<string, string> = {};
     const baseTiersMap: Record<string, { primary: number; onWater: number; second: number; onProcess: number; total: number }> = {};
     const unitByRow: Record<string, number> = {};
+    const unitByGroupSnap: Record<string, number> = {};
+    const itemsByGroupSnap: Record<string, any[]> = {};
     const baseMap = new Map<string, string>();
     for (const l of baseLines) {
       const g = String(l?.groupName || l?.lineItem || '').trim();
@@ -639,6 +695,15 @@ export default function Orders() {
       if (Number.isFinite(unitRaw) && unitRaw >= 0) {
         unitByRow[rowKey] = unitRaw;
       }
+      // Hydrate per-group snapshots if present or derivable
+      const gLowerSnap = String(l?.groupName || g || '').trim().toLowerCase();
+      if (Number.isFinite(unitRaw) && unitRaw >= 0 && !(gLowerSnap in unitByGroupSnap)) {
+        unitByGroupSnap[gLowerSnap] = unitRaw;
+      }
+      const itemsAtAdd = Array.isArray((l as any)?.itemsAtAdd) ? (l as any).itemsAtAdd : null;
+      if (itemsAtAdd && itemsAtAdd.length && !(gLowerSnap in itemsByGroupSnap)) {
+        itemsByGroupSnap[gLowerSnap] = itemsAtAdd as any[];
+      }
       const bt = (l as any)?.baseTiers;
       if (bt && typeof bt === 'object') {
         const primary = Math.max(0, Math.floor(Number((bt as any)?.primary || 0)));
@@ -655,9 +720,28 @@ export default function Orders() {
     setManualDiscountByGroup(discountBy);
     setManualBaseTiersByGroup(baseTiersMap);
     setManualUnitPriceByRow(unitByRow);
+    if (Object.keys(unitByGroupSnap).length) setManualUnitPriceByGroup((prev)=> ({ ...(prev||{}), ...unitByGroupSnap }));
+    if (Object.keys(itemsByGroupSnap).length) setManualItemsByGroup((prev)=> ({ ...(prev||{}), ...itemsByGroupSnap }));
     manualBaseLineItemByGroupRef.current = baseMap;
     // Kick a recompute so Available Qty/rows reflect hydrated quantities immediately
     setManualRecalcTick((t) => t + 1);
+
+    // Load previously saved snapshots for this order (client-side cache)
+    try {
+      const orderKey = String((row as any)?.rawId || (row as any)?.id || '').trim();
+      if (orderKey) {
+        const cacheKey = `orderLineSnapshots:${orderKey}`;
+        const cached = localStorage.getItem(cacheKey);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (parsed && typeof parsed === 'object') {
+            const u = (parsed as any).unit; const it = (parsed as any).items;
+            if (u && typeof u === 'object') setManualUnitPriceByGroup((prev)=> ({ ...(prev||{}), ...(u as any) }));
+            if (it && typeof it === 'object') setManualItemsByGroup((prev)=> ({ ...(prev||{}), ...(it as any) }));
+          }
+        }
+      }
+    } catch {}
 
     try {
       const wid = String(row?.warehouseId || fixedWarehouseId || '').trim();
@@ -679,26 +763,8 @@ export default function Orders() {
     try {
       const rawId = String(row?.rawId || '').trim();
       if (rawId) {
-        // Proactively rebalance before fetching details to avoid stale reserved breakdown
-        try {
-          const wid = String(row?.warehouseId || fixedWarehouseId || '').trim();
-          const groups = Array.isArray(row?.lines) ? Array.from(new Set(row.lines.map((l:any)=> String(l?.groupName || l?.lineItem || '').trim()).filter(Boolean))) : [];
-          await api.post('/orders/unfulfilled/rebalance-processing', { warehouseId: wid || undefined, groupNames: groups.length ? groups : undefined });
-        } catch {}
-        // Trailing refresh to catch any server writes that land just after first fetch
-        try {
-          const laterRaw = rawId;
-          setTimeout(async () => {
-            try {
-              const wid2 = String(row?.warehouseId || fixedWarehouseId || '').trim();
-              const groups2 = Array.isArray(row?.lines) ? Array.from(new Set(row.lines.map((l:any)=> String(l?.groupName || l?.lineItem || '').trim()).filter(Boolean))) : [];
-              await api.post('/orders/unfulfilled/rebalance-processing', { warehouseId: wid2 || undefined, groupNames: groups2.length ? groups2 : undefined });
-            } catch {}
-            try { await new Promise((r) => setTimeout(r, 250)); } catch {}
-            try { await refreshManualAllocations(laterRaw); } catch {}
-          }, 900);
-        } catch {}
-        try { await new Promise((r) => setTimeout(r, 180)); } catch {}
+        // Fetch latest allocations and metadata without forcing server-side rebalances
+        try { await new Promise((r) => setTimeout(r, 150)); } catch {}
         const { allocations, reserved } = await refreshManualAllocations(rawId);
         setManualAllocations(Array.isArray(allocations) ? allocations : []);
         setManualReservedBreakdown(Array.isArray(reserved) ? reserved : []);
@@ -1196,12 +1262,15 @@ export default function Orders() {
         const groupKey = groupNameTrimmed.toLowerCase();
         const baseRow: any = manualPickerRowByGroup.get(groupNameTrimmed) || {};
 
+        const persistedUnitGroup = Number((manualUnitPriceByGroup as any)?.[groupNameTrimmed] ?? (manualUnitPriceByGroup as any)?.[groupKey]);
         const persistedUnit = Number((manualUnitPriceByRow as any)?.[keyStr]);
         const priceFromMap = Number(groupPriceByName?.[groupKey]);
         const fallbackPrice = Number(baseRow?.palletPrice ?? baseRow?.price ?? 0);
-        const basePrice = Number.isFinite(persistedUnit)
-          ? persistedUnit
-          : (Number.isFinite(priceFromMap) ? priceFromMap : (Number.isFinite(fallbackPrice) ? fallbackPrice : 0));
+        const basePrice = Number.isFinite(persistedUnitGroup)
+          ? persistedUnitGroup
+          : (Number.isFinite(persistedUnit)
+            ? persistedUnit
+            : (Number.isFinite(priceFromMap) ? priceFromMap : (Number.isFinite(fallbackPrice) ? fallbackPrice : 0)));
 
         const discountRaw = (manualDiscountByGroup as any)?.[keyStr] ?? '';
         let discountPct = Number(discountRaw || 0);
@@ -1247,7 +1316,7 @@ export default function Orders() {
     });
 
     return rows;
-  }, [manualOrderGroups, manualPickerRowByGroup, manualDiscountByGroup, manualOrderQtyByGroup, groupPriceByName, manualUnitPriceByRow]);
+  }, [manualOrderGroups, manualPickerRowByGroup, manualDiscountByGroup, manualOrderQtyByGroup, groupPriceByName, manualUnitPriceByRow, manualUnitPriceByGroup]);
 
   // Sum of all row subtotals for the order pricing summary
   const manualOrderSubTotal = useMemo(() => {
@@ -1595,6 +1664,15 @@ export default function Orders() {
                 return capacity <= 0;
               })()}
               onClick={() => {
+                // Seed snapshot unit price for this group if missing
+                try {
+                  const gTrim = String(groupName || '').trim();
+                  const gLower = gTrim.toLowerCase();
+                  const rowUnit = Number((p?.row as any)?.unitPrice);
+                  if (Number.isFinite(rowUnit)) {
+                    setManualUnitPriceByGroup((prev)=> (prev && (gLower in prev || gTrim in prev)) ? prev : ({ ...(prev||{}), [gLower]: rowUnit } as any));
+                  }
+                } catch {}
                 const key = makeRowKey(groupName);
                 setManualOrderGroups((prev) => ([...(Array.isArray(prev) ? prev : []), key]));
                 setManualOrderQtyByGroup((prev) => ({ ...(prev || {}), [key]: '1' }));
@@ -1608,6 +1686,15 @@ export default function Orders() {
               size="small"
               disabled={manualFieldsLocked}
               onClick={() => {
+                // Duplicate: ensure snapshot price exists for this group
+                try {
+                  const gTrim = String(groupName || '').trim();
+                  const gLower = gTrim.toLowerCase();
+                  const rowUnit = Number((p?.row as any)?.unitPrice);
+                  if (Number.isFinite(rowUnit)) {
+                    setManualUnitPriceByGroup((prev)=> (prev && (gLower in prev || gTrim in prev)) ? prev : ({ ...(prev||{}), [gLower]: rowUnit } as any));
+                  }
+                } catch {}
                 setManualOrderGroups((prev)=> (Array.isArray(prev) ? prev.filter((x)=> String(x) !== rowKey) : []));
                 setManualOrderQtyByGroup((prev)=> {
                   const next = { ...(prev || {}) } as any;
@@ -1619,6 +1706,32 @@ export default function Orders() {
                   delete next[rowKey];
                   return next;
                 });
+                // If this was the last instance of the group, clear snapshots and update cache
+                try {
+                  const gTrim = String(groupName || '').trim();
+                  const gLower = gTrim.toLowerCase();
+                  const remaining = (Array.isArray(manualOrderGroups) ? manualOrderGroups : [])
+                    .filter((k) => String(k) !== rowKey && keyToGroupName(String(k)).trim().toLowerCase() === gLower).length;
+                  if (remaining <= 0) {
+                    setManualUnitPriceByGroup((prev) => { const next = { ...(prev||{}) } as any; delete next[gLower]; delete next[gTrim]; return next; });
+                    setManualItemsByGroup((prev) => { const next = { ...(prev||{}) } as any; delete next[gLower]; delete next[gTrim]; return next; });
+                    const orderKey = String((manualEditRow as any)?.rawId || (manualEditRow as any)?.id || '').trim();
+                    if (orderKey) {
+                      const cacheKey = `orderLineSnapshots:${orderKey}`;
+                      try {
+                        const cached = localStorage.getItem(cacheKey);
+                        if (cached) {
+                          const parsed = JSON.parse(cached) || {};
+                          if (parsed && typeof parsed === 'object') {
+                            if (parsed.unit && typeof parsed.unit === 'object') { delete parsed.unit[gLower]; delete parsed.unit[gTrim]; }
+                            if (parsed.items && typeof parsed.items === 'object') { delete parsed.items[gLower]; delete parsed.items[gTrim]; }
+                            localStorage.setItem(cacheKey, JSON.stringify(parsed));
+                          }
+                        }
+                      } catch {}
+                    }
+                  }
+                } catch {}
                 setManualRecalcTick((t)=> t + 1);
               }}
             >
@@ -1846,6 +1959,30 @@ export default function Orders() {
     const getGroupItems = async (g: string) => {
       const k = g.toLowerCase();
       if (itemsCache.has(k)) return itemsCache.get(k)!;
+      // Prefer snapshots: in-memory -> saved order lines -> localStorage -> API
+      const snap = (manualItemsByGroup as any)?.[k];
+      if (Array.isArray(snap) && snap.length) { itemsCache.set(k, snap); return snap; }
+      try {
+        const lines = Array.isArray((manualEditRow as any)?.lines) ? (manualEditRow as any).lines : [];
+        const hit = lines.find((l: any) => String(l?.groupName || l?.lineItem || '').trim().toLowerCase() === k);
+        if (hit && Array.isArray((hit as any)?.itemsAtAdd) && (hit as any).itemsAtAdd.length) {
+          const list = (hit as any).itemsAtAdd as any[];
+          itemsCache.set(k, list);
+          return list;
+        }
+      } catch {}
+      try {
+        const orderKey = String((manualEditRow as any)?.rawId || (manualEditRow as any)?.id || '').trim();
+        if (orderKey) {
+          const cacheKey = `orderLineSnapshots:${orderKey}`;
+          const cached = localStorage.getItem(cacheKey);
+          if (cached) {
+            const parsed = JSON.parse(cached);
+            const list = parsed && parsed.items ? (parsed.items[k] || parsed.items[g]) : null;
+            if (Array.isArray(list) && list.length) { itemsCache.set(k, list); return list; }
+          }
+        }
+      } catch {}
       try {
         const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
         const list = Array.isArray((data as any)?.items) ? (data as any).items : [];
@@ -1873,7 +2010,9 @@ export default function Orders() {
       const qtyNum = Number(qtyText);
       const qty = Number.isFinite(qtyNum) ? Math.floor(qtyNum) : NaN;
       const discount = Math.min(100, Math.max(0, Number((r as any)?.discountPercent ?? 0)));
-      const unit = Number((r as any)?.unitPrice ?? groupPriceByName?.[g.toLowerCase()] ?? 0);
+      const gLower = g.toLowerCase();
+      const unitSnap = (manualUnitPriceByGroup as any)?.[gLower];
+      const unit = Number.isFinite(Number(unitSnap)) ? Number(unitSnap) : Number((r as any)?.unitPrice ?? (groupPriceByName as any)?.[gLower] ?? 0);
       const discounted = Number.isFinite(unit) ? unit * (1 - discount / 100) : NaN;
       const lineSub = (Number.isFinite(discounted) && Number.isFinite(qty)) ? discounted * qty : NaN;
 
@@ -2108,6 +2247,8 @@ export default function Orders() {
     manualPickerRowByGroup,
     palletNameByGroup,
     groupPriceByName,
+    manualItemsByGroup,
+    manualUnitPriceByGroup,
   ]);
 
   const isValidEmail = (email: string) => {
@@ -2144,6 +2285,30 @@ export default function Orders() {
     const getGroupItems = async (g: string) => {
       const k = g.toLowerCase();
       if (itemsCache.has(k)) return itemsCache.get(k)!;
+      // Prefer snapshots: in-memory -> saved order lines -> localStorage -> API
+      const snap = (manualItemsByGroup as any)?.[k];
+      if (Array.isArray(snap) && snap.length) { itemsCache.set(k, snap); return snap; }
+      try {
+        const lines = Array.isArray((manualEditRow as any)?.lines) ? (manualEditRow as any).lines : [];
+        const hit = lines.find((l: any) => String(l?.groupName || l?.lineItem || '').trim().toLowerCase() === k);
+        if (hit && Array.isArray((hit as any)?.itemsAtAdd) && (hit as any).itemsAtAdd.length) {
+          const list = (hit as any).itemsAtAdd as any[];
+          itemsCache.set(k, list);
+          return list;
+        }
+      } catch {}
+      try {
+        const orderKey = String((manualEditRow as any)?.rawId || (manualEditRow as any)?.id || '').trim();
+        if (orderKey) {
+          const cacheKey = `orderLineSnapshots:${orderKey}`;
+          const cached = localStorage.getItem(cacheKey);
+          if (cached) {
+            const parsed = JSON.parse(cached);
+            const list = parsed && parsed.items ? (parsed.items[k] || parsed.items[g]) : null;
+            if (Array.isArray(list) && list.length) { itemsCache.set(k, list); return list; }
+          }
+        }
+      } catch {}
       try {
         const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
         const list = Array.isArray((data as any)?.items) ? (data as any).items : [];
@@ -2200,7 +2365,9 @@ export default function Orders() {
       const qtyNum = Number(qtyText);
       const qty = Number.isFinite(qtyNum) ? Math.floor(qtyNum) : NaN;
       const discount = Math.min(100, Math.max(0, Number((r as any)?.discountPercent ?? 0)));
-      const unit = Number((r as any)?.unitPrice ?? (groupPriceByName as any)?.[g.toLowerCase()] ?? 0);
+      const gLower = g.toLowerCase();
+      const unitSnap = (manualUnitPriceByGroup as any)?.[gLower];
+      const unit = Number.isFinite(Number(unitSnap)) ? Number(unitSnap) : Number((r as any)?.unitPrice ?? (groupPriceByName as any)?.[gLower] ?? 0);
       const discounted = Number.isFinite(unit) ? unit * (1 - discount / 100) : NaN;
       const lineSub = (Number.isFinite(discounted) && Number.isFinite(qty)) ? discounted * qty : NaN;
 
@@ -2297,6 +2464,8 @@ export default function Orders() {
     palletNameByGroup,
     palletDescByGroup,
     groupPriceByName,
+    manualItemsByGroup,
+    manualUnitPriceByGroup,
   ]);
 
   const sanitizeIntText = (v: any) => {
@@ -3574,6 +3743,15 @@ export default function Orders() {
 
     // No manual Original Price validation; Sub Total is computed from rows
     // Validate over-ordered quantities against total availability across tiers per pallet.
+    // Preflight: refresh latest availability/allocations to ensure checks use up-to-date data
+    try {
+      const wid = String(manualWarehouseId || '').trim();
+      const rawId = String((manualEditRow as any)?.rawId || '').trim();
+      if (wid) { try { await refreshManualPicker(wid); } catch {} try { await refreshManualAvailable(wid); } catch {} }
+      if (rawId) { try { await refreshManualAllocations(rawId); } catch {} }
+      // small settle delay for UI state to apply
+      try { await new Promise((r)=> setTimeout(r, 120)); } catch {}
+    } catch {}
     // Sum quantities across all rows (main + duplicates) per pallet group, then compare
     // against a single availability pool for that pallet.
     if (parsed.length) {
@@ -3712,8 +3890,33 @@ export default function Orders() {
             estDeliveredDate: manualEstDelivered || undefined,
             shippingAddress: manualShippingAddress.trim(),
             notes: manualNotes.trim(),
-            lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty, discountPercent: l.discountPercent, unitPrice: l.unitPrice })),
+            lines: parsed.map((l) => {
+              const g = String(l.groupName || '').trim();
+              const gLower = g.toLowerCase();
+              const snapItems = (manualItemsByGroup as any)?.[gLower];
+              const snapUnit = (manualUnitPriceByGroup as any)?.[gLower];
+              return {
+                search: g,
+                qty: l.qty,
+                discountPercent: l.discountPercent,
+                unitPrice: l.unitPrice,
+                unitPriceAtAdd: Number.isFinite(Number(snapUnit)) ? Number(snapUnit) : undefined,
+                itemsAtAdd: Array.isArray(snapItems) ? snapItems : undefined,
+              } as any;
+            }),
           });
+          // Persist snapshots to local cache for this order in case backend strips custom fields
+          try {
+            const orderKey = String((manualEditRow as any)?.rawId || (manualEditRow as any)?.id || '').trim();
+            if (orderKey) {
+              const cacheKey = `orderLineSnapshots:${orderKey}`;
+              const cached = localStorage.getItem(cacheKey);
+              const parsed = cached ? JSON.parse(cached) : {};
+              parsed.unit = { ...(parsed.unit || {}), ...(manualUnitPriceByGroup || {}) };
+              parsed.items = { ...(parsed.items || {}), ...(manualItemsByGroup || {}) };
+              localStorage.setItem(cacheKey, JSON.stringify(parsed));
+            }
+          } catch {}
           try { window.dispatchEvent(new Event('orders-changed')); } catch {}
         } else {
           // Status changes are handled by a separate endpoint.
@@ -3730,8 +3933,33 @@ export default function Orders() {
               estDeliveredDate: manualEstDelivered || undefined,
               shippingAddress: manualShippingAddress.trim(),
               notes: manualNotes.trim(),
-              lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty, discountPercent: l.discountPercent, unitPrice: l.unitPrice })),
+              lines: parsed.map((l) => {
+                const g = String(l.groupName || '').trim();
+                const gLower = g.toLowerCase();
+                const snapItems = (manualItemsByGroup as any)?.[gLower];
+                const snapUnit = (manualUnitPriceByGroup as any)?.[gLower];
+                return {
+                  search: g,
+                  qty: l.qty,
+                  discountPercent: l.discountPercent,
+                  unitPrice: l.unitPrice,
+                  unitPriceAtAdd: Number.isFinite(Number(snapUnit)) ? Number(snapUnit) : undefined,
+                  itemsAtAdd: Array.isArray(snapItems) ? snapItems : undefined,
+                } as any;
+              }),
             });
+            // Persist snapshots to local cache for this order in case backend strips custom fields
+            try {
+              const orderKey = String((manualEditRow as any)?.rawId || (manualEditRow as any)?.id || '').trim();
+              if (orderKey) {
+                const cacheKey = `orderLineSnapshots:${orderKey}`;
+                const cached = localStorage.getItem(cacheKey);
+                const parsed = cached ? JSON.parse(cached) : {};
+                parsed.unit = { ...(parsed.unit || {}), ...(manualUnitPriceByGroup || {}) };
+                parsed.items = { ...(parsed.items || {}), ...(manualItemsByGroup || {}) };
+                localStorage.setItem(cacheKey, JSON.stringify(parsed));
+              }
+            } catch {}
             try { window.dispatchEvent(new Event('orders-changed')); } catch {}
 
             const recomputedStatus = normalizeStatus(updated?.status || '');
@@ -3859,7 +4087,7 @@ export default function Orders() {
         }
       } catch {}
 
-      await api.post('/orders/unfulfilled', {
+      const { data: created } = await api.post('/orders/unfulfilled', {
         warehouseId: manualWarehouseId,
         status: 'processing',
         customerEmail: manualCustomerEmail.trim(),
@@ -3873,8 +4101,33 @@ export default function Orders() {
         estDeliveredDate: manualEstDelivered || undefined,
         shippingAddress: manualShippingAddress.trim(),
         notes: manualNotes.trim(),
-        lines: parsed.map((l) => ({ search: l.groupName, qty: l.qty, discountPercent: l.discountPercent, unitPrice: l.unitPrice })),
+        lines: parsed.map((l) => {
+          const g = String(l.groupName || '').trim();
+          const gLower = g.toLowerCase();
+          const snapItems = (manualItemsByGroup as any)?.[gLower];
+          const snapUnit = (manualUnitPriceByGroup as any)?.[gLower];
+          return {
+            search: g,
+            qty: l.qty,
+            discountPercent: l.discountPercent,
+            unitPrice: l.unitPrice,
+            unitPriceAtAdd: Number.isFinite(Number(snapUnit)) ? Number(snapUnit) : undefined,
+            itemsAtAdd: Array.isArray(snapItems) ? snapItems : undefined,
+          } as any;
+        }),
       });
+      // Persist snapshots to local cache for this new order (backend may strip custom fields)
+      try {
+        const orderKey = String((created as any)?.rawId || (created as any)?._id || (created as any)?.id || '').trim();
+        if (orderKey) {
+          const cacheKey = `orderLineSnapshots:${orderKey}`;
+          const cached = localStorage.getItem(cacheKey);
+          const parsedCache = cached ? JSON.parse(cached) : {};
+          parsedCache.unit = { ...(parsedCache.unit || {}), ...(manualUnitPriceByGroup || {}) };
+          parsedCache.items = { ...(parsedCache.items || {}), ...(manualItemsByGroup || {}) };
+          localStorage.setItem(cacheKey, JSON.stringify(parsedCache));
+        }
+      } catch {}
       toast.success('Order created');
       try {
         window.dispatchEvent(new CustomEvent('shipments-changed', { detail: { kind: 'order_created' } }));
@@ -4603,7 +4856,7 @@ export default function Orders() {
             </DialogContent>
             <DialogActions>
               <Button onClick={()=> setManualPickOpen(false)}>Cancel</Button>
-              <Button variant="contained" onClick={()=>{
+              <Button variant="contained" onClick={async ()=>{
                 const idsArr = manualPickSelected?.ids ? Array.from(manualPickSelected.ids) : [];
                 const selected = new Set(idsArr.map((x)=> String(x)));
                 const wid = String(manualWarehouseId || '').trim();
@@ -4617,6 +4870,57 @@ export default function Orders() {
                   }))
                   .filter((x: any) => x.id && selected.has(x.id))
                   .map((x: any) => x.id);
+                // Determine which are newly added (not previously in order)
+                const prevGroups = new Set((Array.isArray(manualOrderGroups) ? manualOrderGroups : []).map((g)=> String(g)));
+                const newGroups = picked.filter((g)=> !prevGroups.has(String(g)));
+
+                // Snapshot unit price and items for newly added groups
+                if (newGroups.length) {
+                  // Build snapshot maps
+                  const unitUpdates: Record<string, number> = {};
+                  const itemsUpdates: Record<string, any[]> = {};
+                  // Unit price snapshot from computed groupPriceByName or row price fallback
+                  for (const id of newGroups) {
+                    const g = String(id);
+                    const gLower = g.toLowerCase();
+                    const row = (manualPickerRows || []).find((r: any)=> String(r?.groupName||'').trim().toLowerCase() === gLower) || {};
+                    const mapUnit = Number((groupPriceByName as any)?.[gLower]);
+                    const fallback = Number((row as any)?.palletPrice ?? (row as any)?.price ?? 0);
+                    const snapUnit = Number.isFinite(mapUnit) ? mapUnit : (Number.isFinite(fallback) ? fallback : NaN);
+                    if (Number.isFinite(snapUnit)) unitUpdates[g] = Number(snapUnit);
+                  }
+                  try {
+                    await Promise.all(newGroups.map(async (g) => {
+                      try {
+                        const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
+                        const list = Array.isArray((data as any)?.items) ? (data as any).items : [];
+                        itemsUpdates[String(g).toLowerCase()] = list;
+                      } catch {
+                        itemsUpdates[String(g).toLowerCase()] = [];
+                      }
+                    }));
+                  } catch {}
+                  // Commit snapshots without overwriting existing ones
+                  setManualUnitPriceByGroup((prev)=> ({ ...(prev||{}), ...unitUpdates }));
+                  setManualItemsByGroup((prev)=> ({ ...(prev||{}), ...itemsUpdates }));
+                  // Persist to localStorage cache for this order (edit mode only)
+                  try {
+                    const orderKey = String((manualEditRow as any)?.rawId || (manualEditRow as any)?.id || '').trim();
+                    if (orderKey) {
+                      const cacheKey = `orderLineSnapshots:${orderKey}`;
+                      const cached = localStorage.getItem(cacheKey);
+                      const parsed = cached ? JSON.parse(cached) : {};
+                      if (parsed && typeof parsed === 'object') {
+                        parsed.unit = { ...(parsed.unit || {}), ...unitUpdates };
+                        parsed.items = { ...(parsed.items || {}), ...itemsUpdates };
+                        localStorage.setItem(cacheKey, JSON.stringify(parsed));
+                      } else {
+                        localStorage.setItem(cacheKey, JSON.stringify({ unit: unitUpdates, items: itemsUpdates }));
+                      }
+                    }
+                  } catch {}
+                }
+
                 setManualOrderGroups((prev)=> {
                   const base = Array.isArray(prev) ? prev : [];
                   const set = new Set(base.map((x)=> String(x)));

@@ -90,6 +90,18 @@ export default function EarlyBuy() {
     return status === 'processing' && isEditable;
   }, [isEditable, status]);
 
+  // Auto-promote form status: if currently PROCESSING and Container Arrival is today or earlier, set to READY TO SHIP
+  useEffect(() => {
+    try {
+      if (status !== 'processing') return;
+      const now = Date.now();
+      if (Number(suppressPromoteUntilRef.current || 0) > now) return; // user is adjusting; don't auto-promote yet
+      const today = new Date().toISOString().slice(0,10);
+      const ca = String(containerArrival || '').slice(0,10);
+      if (ca && ca <= today) setStatus('ready_to_ship');
+    } catch {}
+  }, [status, containerArrival]);
+
   const [originalPrice, setOriginalPrice] = useState('');
   const [shippingPercent, setShippingPercent] = useState('');
   const [discountPercent, setDiscountPercent] = useState('');
@@ -97,12 +109,18 @@ export default function EarlyBuy() {
 
   const numberFmt2 = useMemo(() => new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }), []);
 
+  // When user explicitly sets status to PROCESSING, suppress auto-promote briefly to allow edits
+  const suppressPromoteUntilRef = useRef<number>(0);
+
   const handleStatusChange = useCallback((nextRaw: any) => {
     const extracted = (nextRaw && typeof nextRaw === 'object' && 'target' in nextRaw)
       ? (nextRaw as any)?.target?.value
       : nextRaw;
     const next = String(extracted || '').trim().toLowerCase() as EarlyOrder['status'];
     if (!['processing', 'ready_to_ship', 'shipped', 'completed', 'canceled'].includes(String(next))) return;
+    if (next === 'processing') {
+      try { suppressPromoteUntilRef.current = Date.now() + 15000; } catch {}
+    }
     if (next === 'shipped') {
       const sp = Number(shippingPercent);
       if (!String(shippingPercent || '').trim() || !Number.isFinite(sp) || sp < 0 || sp > 100) {
@@ -156,15 +174,24 @@ export default function EarlyBuy() {
   const [pickerWarehouses, setPickerWarehouses] = useState<any[]>([]);
   const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
 
-  // Lines added
-  const [lines, setLines] = useState<Array<{ groupName: string; lineItem: string; palletName: string; qty: number; discount?: number }>>([]);
+  // Lines added (with snapshots captured at Add time)
+  const [lines, setLines] = useState<Array<{
+    groupName: string;
+    lineItem: string;
+    palletName: string;
+    qty: number;
+    discount?: number;
+    unitPriceAtAdd?: number; // snapshot of pallet price when added
+    itemsAtAdd?: any[];      // snapshot of items under the pallet when added
+  }>>([]);
 
   // Computed totals based on lines
   const computedSubTotal = useMemo(() => {
     let sum = 0;
     for (let i = 0; i < lines.length; i++) {
       const g = String(lines[i]?.groupName || '').trim().toLowerCase();
-      const unit = Number(groupPriceByName?.[g]);
+      const snap = Number(lines[i]?.unitPriceAtAdd);
+      const unit = Number.isFinite(snap) ? snap : Number(groupPriceByName?.[g]);
       if (!Number.isFinite(unit)) continue;
       const disc = Math.max(0, Math.min(100, Number(lines[i]?.discount ?? 0)));
       const qty = Math.max(0, Math.floor(Number(lines[i]?.qty || 0)));
@@ -228,14 +255,22 @@ export default function EarlyBuy() {
     const uniqueDisplays = Array.from(new Set(Array.from(groupLinesMap.values()).map(g => g.display)));
     const itemsByGroup: Record<string, any[]> = {};
     await Promise.all(uniqueDisplays.map(async (g) => {
+      const gLower = String(g || '').toLowerCase();
+      const snap = (Array.isArray(lines) ? lines : []).find(l => String(l?.groupName||'').trim().toLowerCase() === gLower && Array.isArray(l?.itemsAtAdd) && l.itemsAtAdd.length);
+      if (snap) {
+        itemsByGroup[gLower] = snap.itemsAtAdd as any[];
+        return;
+      }
       try {
         const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
-        itemsByGroup[g.toLowerCase()] = Array.isArray((data as any)?.items) ? (data as any).items : [];
-      } catch { itemsByGroup[g.toLowerCase()] = []; }
+        itemsByGroup[gLower] = Array.isArray((data as any)?.items) ? (data as any).items : [];
+      } catch { itemsByGroup[gLower] = []; }
     }));
 
     for (const [gKey, gMeta] of groupLinesMap.entries()) {
-      const unit = Number(groupPriceByName?.[gKey]);
+      const snapLine = (Array.isArray(lines) ? lines : []).find(l => String(l?.groupName||'').trim().toLowerCase() === gKey);
+      const unitSnap = Number(snapLine?.unitPriceAtAdd);
+      const unit = Number.isFinite(unitSnap) ? unitSnap : Number(groupPriceByName?.[gKey]);
 
       rows.push([String(gMeta.palletName || gMeta.display), String(palletDescByGroup?.[gKey] || gMeta.display || ''), String(gMeta.lineItem || '')]);
       const items = itemsByGroup[gKey] || [];
@@ -447,10 +482,17 @@ export default function EarlyBuy() {
     const uniqueDisplays = Array.from(new Set(Array.from(groupLinesMap.values()).map(g => g.display)));
     const itemsByGroup: Record<string, any[]> = {};
     await Promise.all(uniqueDisplays.map(async (g) => {
+      const gLower = String(g || '').toLowerCase();
+      // Prefer snapshot from current lines if available
+      const snap = (Array.isArray(lines) ? lines : []).find(l => String(l?.groupName||'').trim().toLowerCase() === gLower && Array.isArray(l?.itemsAtAdd) && l.itemsAtAdd.length);
+      if (snap) {
+        itemsByGroup[gLower] = snap.itemsAtAdd as any[];
+        return;
+      }
       try {
         const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
-        itemsByGroup[g.toLowerCase()] = Array.isArray((data as any)?.items) ? (data as any).items : [];
-      } catch { itemsByGroup[g.toLowerCase()] = []; }
+        itemsByGroup[gLower] = Array.isArray((data as any)?.items) ? (data as any).items : [];
+      } catch { itemsByGroup[gLower] = []; }
     }));
 
     const content: any[] = [];
@@ -494,7 +536,9 @@ export default function EarlyBuy() {
 
     // Per-pallet sections (header/items once, multiple summary rows)
     for (const [gKey, gMeta] of groupLinesMap.entries()) {
-      const unit = Number(groupPriceByName?.[gKey]);
+      const snapLine = (Array.isArray(lines) ? lines : []).find(l => String(l?.groupName||'').trim().toLowerCase() === gKey);
+      const unitSnap = Number(snapLine?.unitPriceAtAdd);
+      const unit = Number.isFinite(unitSnap) ? unitSnap : Number(groupPriceByName?.[gKey]);
 
       // Group header band (A..F)
       content.push({
@@ -601,6 +645,42 @@ export default function EarlyBuy() {
     return () => { canceled = true; };
   }, []);
 
+  // Compute Pallet Price per group from Items (mirrors Orders page logic)
+  useEffect(() => {
+    let canceled = false;
+    (async () => {
+      try {
+        const [groupsRes, itemsRes] = await Promise.all([
+          api.get<any[]>('/item-groups'),
+          api.get<any[]>('/items', { params: { includeDisabled: 1 } }),
+        ]);
+        if (canceled) return;
+        const groups = Array.isArray(groupsRes.data) ? groupsRes.data : [];
+        const items = Array.isArray(itemsRes.data) ? itemsRes.data : [];
+        const activeSet = new Set(
+          groups
+            .filter((g: any) => (g as any).active !== false)
+            .map((g: any) => String(g?.name || '').trim())
+            .filter((v: string) => v)
+        );
+        const map: Record<string, number> = {};
+        for (const it of items as any[]) {
+          const groupName = String((it as any)?.itemGroup || '').trim();
+          if (!groupName || !activeSet.has(groupName)) continue;
+          const key = groupName.toLowerCase();
+          const prev = map[key] || 0;
+          const pack = Number((it as any).packSize ?? 0) || 0;
+          const price = Number((it as any).price ?? 0) || 0;
+          map[key] = prev + (pack * price);
+        }
+        setGroupPriceByName(map);
+      } catch {
+        if (!canceled) setGroupPriceByName({});
+      }
+    })();
+    return () => { canceled = true; };
+  }, []);
+
   const openPalletItems = useCallback(async ({ groupName }: { groupName: string }) => {
     const g = String(groupName || '').trim();
     if (!g) return;
@@ -609,14 +689,38 @@ export default function EarlyBuy() {
     setPalletItemsRows([]);
     setPalletItemsLoading(true);
     try {
-      const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
-      setPalletItemsRows(Array.isArray((data as any)?.items) ? (data as any).items : []);
+      // Prefer snapshot from current lines if available
+      const snap = (Array.isArray(lines) ? lines : []).find((l)=> String(l?.groupName||'').trim().toLowerCase() === g.toLowerCase() && Array.isArray(l.itemsAtAdd) && l.itemsAtAdd.length);
+      if (snap) {
+        setPalletItemsRows(snap.itemsAtAdd as any[]);
+      } else {
+        // Fallback to local cache by order id
+        let fromCache: any[] | null = null;
+        try {
+          const orderId = String(editingOrder?.id || '').trim();
+          if (orderId) {
+            const cacheKey = `earlyBuyLineSnapshots:${orderId}`;
+            const cached = localStorage.getItem(cacheKey);
+            if (cached) {
+              const parsed = JSON.parse(cached);
+              const items = parsed && parsed.items ? parsed.items[g.toLowerCase()] || parsed.items[g] : null;
+              if (Array.isArray(items) && items.length) fromCache = items as any[];
+            }
+          }
+        } catch {}
+        if (Array.isArray(fromCache) && fromCache.length) {
+          setPalletItemsRows(fromCache);
+        } else {
+          const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
+          setPalletItemsRows(Array.isArray((data as any)?.items) ? (data as any).items : []);
+        }
+      }
     } catch {
       setPalletItemsRows([]);
     } finally {
       setPalletItemsLoading(false);
     }
-  }, []);
+  }, [lines]);
 
   useEffect(() => {
     if (!pickerOpen) return;
@@ -666,24 +770,72 @@ export default function EarlyBuy() {
     });
   }, [pickerRows, pickerQDebounced, palletDescByGroup]);
 
-  const addSelectedToLines = () => {
+  const addSelectedToLines = async () => {
     const rows = Array.isArray(pickerRows) ? pickerRows : [];
-    const set = new Set(selectedGroups.map((g) => String(g)));
-    const added: typeof lines = [];
+    const sel = new Set(selectedGroups.map((g) => String(g)));
+    const chosen: Array<{ groupName: string; lineItem: string; palletName: string }> = [];
     for (const r of rows) {
       const gName = String(r?.groupName || '');
       const lItem = String(r?.lineItem || '');
       const composedId = `${lItem.trim()}::${gName.trim()}`;
-      // Accept selection by composed ID, Pallet ID, or Group Name (for compatibility)
-      if (!set.has(composedId) && !set.has(lItem) && !set.has(gName)) continue;
-      added.push({ groupName: gName, lineItem: lItem, palletName: String(r?.palletName || ''), qty: 0 });
+      if (!sel.has(composedId) && !sel.has(lItem) && !sel.has(gName)) continue;
+      chosen.push({ groupName: gName, lineItem: lItem, palletName: String(r?.palletName || '') });
     }
-    const existing = new Map(lines.map(l => [l.groupName.toLowerCase(), l]));
-    const merged: typeof lines = [...lines];
-    for (const a of added) {
-      if (!existing.has(a.groupName.toLowerCase())) merged.push(a);
-    }
-    setLines(merged);
+    if (!chosen.length) { setPickerOpen(false); setSelectedGroups([]); return; }
+    const existing = new Set(lines.map(l => String(l.groupName).toLowerCase()));
+    const uniqueNew = chosen.filter(a => !existing.has(a.groupName.toLowerCase()));
+    const enriched = await Promise.all(uniqueNew.map(async (a) => {
+      const key = a.groupName.toLowerCase();
+      // Snapshot current unit price
+      const unit = Number(groupPriceByName?.[key]);
+      // Snapshot items list
+      let itemsSnap: any[] = [];
+      try {
+        const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(a.groupName)}`);
+        itemsSnap = Array.isArray((data as any)?.items) ? (data as any).items : [];
+      } catch {}
+      // Fallback unit price from items if group map not ready
+      let fallbackUnit = 0;
+      try {
+        for (const it of (Array.isArray(itemsSnap) ? itemsSnap : [])) {
+          const pack = Number((it as any)?.packSize ?? 0) || 0;
+          const price = Number((it as any)?.price ?? 0) || 0;
+          fallbackUnit += pack * price;
+        }
+      } catch {}
+      const unitAtAdd = Number.isFinite(unit) ? unit : (Number.isFinite(fallbackUnit) && fallbackUnit > 0 ? fallbackUnit : undefined);
+      return { ...a, qty: 0, unitPriceAtAdd: unitAtAdd, itemsAtAdd: itemsSnap } as any;
+    }));
+    setLines(prev => [...prev, ...enriched]);
+    try {
+      const orderId = String(editingOrder?.id || '').trim();
+      if (orderId) {
+        const cacheKey = `earlyBuyLineSnapshots:${orderId}`;
+        const cached = localStorage.getItem(cacheKey);
+        const parsed = cached ? JSON.parse(cached) : {};
+        if (parsed && typeof parsed === 'object') {
+          parsed.unit = parsed.unit && typeof parsed.unit === 'object' ? parsed.unit : {};
+          parsed.items = parsed.items && typeof parsed.items === 'object' ? parsed.items : {};
+          for (const e of enriched) {
+            const k = String(e?.groupName || '').trim().toLowerCase();
+            if (!k) continue;
+            if (Number.isFinite(Number(e?.unitPriceAtAdd))) parsed.unit[k] = Number(e.unitPriceAtAdd);
+            if (Array.isArray(e?.itemsAtAdd)) parsed.items[k] = e.itemsAtAdd;
+          }
+          localStorage.setItem(cacheKey, JSON.stringify(parsed));
+        } else {
+          const unit: Record<string, number> = {};
+          const items: Record<string, any[]> = {};
+          for (const e of enriched) {
+            const k = String(e?.groupName || '').trim().toLowerCase();
+            if (!k) continue;
+            if (Number.isFinite(Number(e?.unitPriceAtAdd))) unit[k] = Number(e.unitPriceAtAdd);
+            if (Array.isArray(e?.itemsAtAdd)) items[k] = e.itemsAtAdd;
+          }
+          localStorage.setItem(cacheKey, JSON.stringify({ unit, items }));
+        }
+      }
+    } catch {}
     setPickerOpen(false);
     setSelectedGroups([]);
   };
@@ -842,7 +994,33 @@ export default function EarlyBuy() {
               setShippingPercent(String(r.shippingPercent||''));
               setDiscountPercent(String(r.discountPercent||''));
               setNotes(String(r.notes||''));
-              setLines(Array.isArray(r.lines) ? r.lines.map((l: any) => ({ ...l })) : []);
+              // Build lines with persisted snapshots preferred
+              try {
+                let base = Array.isArray(r.lines) ? r.lines.map((l: any) => ({ ...l })) : [];
+                const orderId = String(r?.id || '').trim();
+                if (orderId) {
+                  const cacheKey = `earlyBuyLineSnapshots:${orderId}`;
+                  const cached = localStorage.getItem(cacheKey);
+                  if (cached) {
+                    const parsed = JSON.parse(cached);
+                    if (parsed && typeof parsed === 'object') {
+                      const unit = (parsed as any).unit || {};
+                      const items = (parsed as any).items || {};
+                      base = base.map((l: any) => {
+                        const k = String(l?.groupName || '').trim().toLowerCase();
+                        const u = Number((unit || {})[k]);
+                        const it = (items || {})[k];
+                        return {
+                          ...l,
+                          ...(Number.isFinite(u) ? { unitPriceAtAdd: u } : {}),
+                          ...(Array.isArray(it) && it.length ? { itemsAtAdd: it } : {}),
+                        } as any;
+                      });
+                    }
+                  }
+                }
+                setLines(base);
+              } catch { setLines(Array.isArray(r.lines) ? r.lines.map((l: any) => ({ ...l })) : []); }
               setOpen(true);
             }}>
               <OpenInNewIcon fontSize="inherit" />
@@ -876,14 +1054,16 @@ export default function EarlyBuy() {
     } },
     { field: 'lineItem', headerName: 'Pallet ID', width: 160 },
     { field: 'palletPrice', headerName: 'Pallet Price', width: 110, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => {
-      const gLower = String(p?.row?.groupName || '').trim().toLowerCase();
-      const val = Number(groupPriceByName?.[gLower]);
+      const row: any = p?.row || {};
+      const gLower = String(row?.groupName || '').trim().toLowerCase();
+      const snap = Number(row?.unitPriceAtAdd);
+      const val = Number.isFinite(snap) ? snap : Number(groupPriceByName?.[gLower]);
       if (!Number.isFinite(val)) return '';
       return numberFmt2.format(val);
     } },
     { field: 'discount', headerName: 'Discount (%)', width: 120, align: 'right', headerAlign: 'right', renderCell: (p: any) => {
-      const idx = Math.max(0, Number(p?.id) - 1);
-      const v = Math.max(0, Math.min(100, Number(lines[idx]?.discount ?? 0)));
+      const row: any = p?.row || {};
+      const v = Math.max(0, Math.min(100, Number(row?.discount ?? 0)));
       return (
         <TextField
           size="small"
@@ -892,7 +1072,8 @@ export default function EarlyBuy() {
           onChange={(e) => {
             const n = Math.max(0, Math.min(100, Math.floor(Number(e.target.value) || 0)));
             const next = [...lines];
-            if (next[idx]) next[idx] = { ...next[idx], discount: n } as any;
+            const i = Math.max(0, Number(p?.id) - 1);
+            if (next[i]) next[i] = { ...next[i], discount: n } as any;
             setLines(next);
           }}
           inputProps={{ inputMode: 'numeric', pattern: '[0-9]*', min: 0, max: 100 }}
@@ -901,11 +1082,12 @@ export default function EarlyBuy() {
       );
     } },
     { field: 'discountedPrice', headerName: 'Discounted Price', width: 140, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => {
-      const gLower = String(p?.row?.groupName || '').trim().toLowerCase();
-      const unit = Number(groupPriceByName?.[gLower]);
+      const row: any = p?.row || {};
+      const gLower = String(row?.groupName || '').trim().toLowerCase();
+      const snap = Number(row?.unitPriceAtAdd);
+      const unit = Number.isFinite(snap) ? snap : Number(groupPriceByName?.[gLower]);
       if (!Number.isFinite(unit)) return '';
-      const idx = Math.max(0, Number(p?.id) - 1);
-      const disc = Math.max(0, Math.min(100, Number(lines[idx]?.discount ?? 0)));
+      const disc = Math.max(0, Math.min(100, Number(row?.discount ?? 0)));
       const discounted = unit * (1 - disc / 100);
       return Number.isFinite(discounted) ? numberFmt2.format(discounted) : '';
     } },
@@ -916,8 +1098,9 @@ export default function EarlyBuy() {
       align: 'right',
       headerAlign: 'right',
       renderCell: (p: any) => {
-        const idx = Math.max(0, Number(p?.id) - 1);
-        const val = lines[idx]?.qty ?? 0;
+        const row: any = p?.row || {};
+        const i = Math.max(0, Number(p?.id) - 1);
+        const val = Number(row?.qty ?? 0);
         return (
           <TextField
             size="small"
@@ -926,7 +1109,7 @@ export default function EarlyBuy() {
             onChange={(e) => {
               const v = Math.max(0, Math.floor(Number(e.target.value) || 0));
               const next = [...lines];
-              if (next[idx]) next[idx] = { ...next[idx], qty: v };
+              if (next[i]) next[i] = { ...next[i], qty: v };
               setLines(next);
             }}
             inputProps={{ inputMode: 'numeric', pattern: '[0-9]*', min: 0 }}
@@ -936,12 +1119,13 @@ export default function EarlyBuy() {
       },
     },
     { field: 'subTotal', headerName: 'Sub Total', width: 120, type: 'number', align: 'right', headerAlign: 'right', renderCell: (p: any) => {
-      const gLower = String(p?.row?.groupName || '').trim().toLowerCase();
-      const unit = Number(groupPriceByName?.[gLower]);
+      const row: any = p?.row || {};
+      const gLower = String(row?.groupName || '').trim().toLowerCase();
+      const snap = Number(row?.unitPriceAtAdd);
+      const unit = Number.isFinite(snap) ? snap : Number(groupPriceByName?.[gLower]);
       if (!Number.isFinite(unit)) return '';
-      const idx = Math.max(0, Number(p?.id) - 1);
-      const disc = Math.max(0, Math.min(100, Number(lines[idx]?.discount ?? 0)));
-      const qty = Math.max(0, Math.floor(Number(lines[idx]?.qty || 0)));
+      const disc = Math.max(0, Math.min(100, Number(row?.discount ?? 0)));
+      const qty = Math.max(0, Math.floor(Number(row?.qty || 0)));
       const discounted = unit * (1 - disc / 100);
       const subtotal = discounted * qty;
       return Number.isFinite(subtotal) ? numberFmt2.format(subtotal) : '';
@@ -970,6 +1154,28 @@ export default function EarlyBuy() {
             <IconButton size="small" color="error" onClick={() => {
               const next = [...lines];
               next.splice(idx, 1);
+              // If this was the last instance of the group, clear snapshots from localStorage cache
+              try {
+                const removed = lines[idx];
+                const gTrim = String(removed?.groupName || '').trim();
+                const gLower = gTrim.toLowerCase();
+                const remaining = next.filter(l => String(l?.groupName || '').trim().toLowerCase() === gLower).length;
+                if (remaining <= 0) {
+                  const orderId = String(editingOrder?.id || '').trim();
+                  if (orderId) {
+                    const cacheKey = `earlyBuyLineSnapshots:${orderId}`;
+                    const cached = localStorage.getItem(cacheKey);
+                    if (cached) {
+                      const parsed = JSON.parse(cached) || {};
+                      if (parsed && typeof parsed === 'object') {
+                        if (parsed.unit && typeof parsed.unit === 'object') { delete parsed.unit[gLower]; delete parsed.unit[gTrim]; }
+                        if (parsed.items && typeof parsed.items === 'object') { delete parsed.items[gLower]; delete parsed.items[gTrim]; }
+                        localStorage.setItem(cacheKey, JSON.stringify(parsed));
+                      }
+                    }
+                  }
+                }
+              } catch {}
               setLines(next);
             }} title="Remove">
               <DeleteIcon fontSize="small" />
@@ -978,7 +1184,7 @@ export default function EarlyBuy() {
         );
       },
     },
-  ], [lines, palletDescByGroup, groupPriceByName]);
+  ], [lines, palletDescByGroup, groupPriceByName, numberFmt2]);
 
   const refreshOrders = useCallback(async () => {
     try {
@@ -1033,6 +1239,8 @@ export default function EarlyBuy() {
               if (!Number.isFinite(v)) return 0;
               return Math.max(0, Math.min(100, Math.floor(v)));
             })(),
+            unitPriceAtAdd: (Number.isFinite(Number(l?.unitPriceAtAdd)) ? Number(l?.unitPriceAtAdd) : undefined),
+            itemsAtAdd: (Array.isArray(l?.itemsAtAdd) ? l.itemsAtAdd : undefined),
           }));
         })(),
         // Precompute counts for robustness in grid rendering
@@ -1069,6 +1277,55 @@ export default function EarlyBuy() {
   }, []);
 
   useEffect(() => { refreshOrders(); }, [refreshOrders]);
+
+  // Auto-promote: if status is PROCESSING and containerArrival is today or earlier, set to READY TO SHIP
+  const promotingRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const today = new Date().toISOString().slice(0,10);
+    const run = async () => {
+      let didUpdate = false;
+      for (const o of orders) {
+        const st = String(o?.status || '').toLowerCase();
+        const arr = String((o as any)?.containerArrival || '').slice(0,10);
+        if (st === 'processing' && arr && arr <= today && !promotingRef.current.has(o.id)) {
+          promotingRef.current.add(o.id);
+          try {
+            const payload = {
+              status: 'ready_to_ship',
+              createdAt: o.createdAt,
+              containerArrival: arr,
+              estFulfillment: o.estFulfillment,
+              estDelivered: o.estDelivered,
+              customerEmail: o.customerEmail,
+              customerName: o.customerName,
+              customerPhone: o.customerPhone,
+              shippingAddress: o.shippingAddress,
+              originalPrice: o.originalPrice,
+              shippingPercent: o.shippingPercent,
+              discountPercent: o.discountPercent,
+              notes: o.notes,
+              lines: Array.isArray(o.lines) ? o.lines.map(l => ({
+                groupName: String((l as any)?.groupName || ''),
+                lineItem: String((l as any)?.lineItem || ''),
+                palletName: String((l as any)?.palletName || ''),
+                qty: Math.max(0, Math.floor(Number((l as any)?.qty || 0))),
+                discountPercent: (() => {
+                  const v = Number((l as any)?.discount ?? (l as any)?.discountPercent ?? 0);
+                  return Number.isFinite(v) ? Math.max(0, Math.min(100, Math.floor(v))) : 0;
+                })(),
+              })) : [],
+            } as any;
+            await api.put(`/early-buy/${encodeURIComponent(o.id)}`, payload);
+            didUpdate = true;
+          } catch {}
+        }
+      }
+      if (didUpdate) {
+        try { await refreshOrders(); } catch {}
+      }
+    };
+    if (Array.isArray(orders) && orders.length) run();
+  }, [orders, refreshOrders]);
 
   // Load pallet prices by group (exactly mirror Orders page logic):
   // - Build active item-group set
@@ -1131,6 +1388,7 @@ export default function EarlyBuy() {
     // Container Arrival required (processing only)
     if (status === 'processing' && !String(containerArrival || '').trim()) errs.push('Container Arrival is required when status is PROCESSING');
     if (containerArrival && !isYmd(containerArrival)) errs.push('Container Arrival is invalid');
+    if (containerArrival && createdAt && containerArrival < createdAt) errs.push('Container Arrival must be >= Created Order Date');
     if (containerArrival && estFulfillment && containerArrival > estFulfillment) errs.push('Container Arrival must be <= Estimated ShipDate for Customer');
     // If status is SHIPPED, estimated arrival date required
     if (status === 'shipped' && !estDelivered) errs.push('Estimated Arrival Date is required when status is SHIPPED');
@@ -1189,6 +1447,7 @@ export default function EarlyBuy() {
         discountPercent: '',
         notes,
         // multiple aliases for backend compatibility
+        // include snapshots so server may echo them back on subsequent fetches
         lines: normalizedLines,
         items: normalizedLines,
         orderLines: normalizedLines,
@@ -1208,6 +1467,24 @@ export default function EarlyBuy() {
       const doc = data as any;
       setLastUpdatedAt(String(doc?.updatedAt || ''));
       setLastUpdatedBy(String(doc?.updatedBy || ''));
+      // Persist snapshots locally keyed by saved order id
+      try {
+        const orderId = String((doc?.id || (editingOrder && editingOrder.id) || '')).trim();
+        if (orderId) {
+          const cacheKey = `earlyBuyLineSnapshots:${orderId}`;
+          const unit: Record<string, number> = {};
+          const items: Record<string, any[]> = {};
+          for (const l of (Array.isArray(lines) ? lines : [])) {
+            const k = String((l as any)?.groupName || '').trim().toLowerCase();
+            if (!k) continue;
+            const u = Number((l as any)?.unitPriceAtAdd);
+            if (Number.isFinite(u)) unit[k] = u;
+            const it = (l as any)?.itemsAtAdd;
+            if (Array.isArray(it) && it.length) items[k] = it as any[];
+          }
+          localStorage.setItem(cacheKey, JSON.stringify({ unit, items }));
+        }
+      } catch {}
       await refreshOrders();
     } catch (e: any) {
       const msg = e?.response?.data?.message || 'Failed to save Early Buy order';
@@ -1345,7 +1622,33 @@ export default function EarlyBuy() {
               setNotes(row.notes || '');
               setLastUpdatedAt(String(row.updatedAt || ''));
               setLastUpdatedBy(String(row.updatedBy || ''));
-              setLines(Array.isArray(row.lines) ? row.lines : []);
+              // Build lines with persisted snapshots preferred
+              try {
+                let base = Array.isArray(row.lines) ? row.lines.map((l: any) => ({ ...l })) : [];
+                const orderId = String((row?.id || '')).trim();
+                if (orderId) {
+                  const cacheKey = `earlyBuyLineSnapshots:${orderId}`;
+                  const cached = localStorage.getItem(cacheKey);
+                  if (cached) {
+                    const parsed = JSON.parse(cached);
+                    if (parsed && typeof parsed === 'object') {
+                      const unit = (parsed as any).unit || {};
+                      const items = (parsed as any).items || {};
+                      base = base.map((l: any) => {
+                        const k = String(l?.groupName || '').trim().toLowerCase();
+                        const u = Number((unit || {})[k]);
+                        const it = (items || {})[k];
+                        return {
+                          ...l,
+                          ...(Number.isFinite(u) ? { unitPriceAtAdd: u } : {}),
+                          ...(Array.isArray(it) && it.length ? { itemsAtAdd: it } : {}),
+                        } as any;
+                      });
+                    }
+                  }
+                }
+                setLines(base);
+              } catch { setLines(Array.isArray(row.lines) ? row.lines : []); }
               setOpen(true);
             }}
           />
@@ -1381,12 +1684,54 @@ export default function EarlyBuy() {
               <TextField size="small" required label="Phone Number" value={customerPhone} onChange={(e)=> setCustomerPhone(e.target.value)} fullWidth disabled={!isEditable} />
             </Stack>
             <TextField size="small" required label="Shipping Address" value={shippingAddress} onChange={(e)=> setShippingAddress(e.target.value)} fullWidth multiline minRows={2} disabled={!isEditable} />
-            <Stack direction={{ xs:'column', sm:'row' }} spacing={2}>
-              <TextField size="small" required type="date" label="Created Order Date" value={createdAt} onChange={(e)=> setCreatedAt(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isEditable} />
-              <TextField size="small" required type="date" label="Container Arrival" value={containerArrival} onChange={(e)=> setContainerArrival(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isContainerArrivalEditable} />
-              <TextField size="small" required type="date" label="Estimated ShipDate for Customer" value={estFulfillment} onChange={(e)=> setEstFulfillment(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isEditable} />
-              <TextField size="small" type="date" label="Estimated Arrival Date" value={estDelivered} onChange={(e)=> setEstDelivered(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isArrivalDateEditable} />
-            </Stack>
+            {(() => {
+              const isYmd = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(String(s||''));
+              const cA = createdAt && isYmd(createdAt) ? createdAt : '';
+              const cR = containerArrival && isYmd(containerArrival) ? containerArrival : '';
+              const eS = estFulfillment && isYmd(estFulfillment) ? estFulfillment : '';
+              const eD = estDelivered && isYmd(estDelivered) ? estDelivered : '';
+              const errCreatedFuture = Boolean(cA && cA > todayYmd);
+              const errShipLtCreated = Boolean(eS && cA && eS < cA);
+              const errContainerGtShip = Boolean(cR && eS && cR > eS);
+              const errContainerLtCreated = Boolean(cR && cA && cR < cA);
+              const errArrLtShip = Boolean(eD && eS && eD < eS);
+              return (
+                <Stack direction={{ xs:'column', sm:'row' }} spacing={2}>
+                  <TextField
+                    size="small" required type="date" label="Created Order Date" value={createdAt}
+                    onChange={(e)=> setCreatedAt(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isEditable}
+                    inputProps={{ max: todayYmd }}
+                    error={Boolean(cA) && errCreatedFuture}
+                    helperText={Boolean(cA) && errCreatedFuture ? 'Created Order Date cannot be in the future' : ''}
+                  />
+                  <TextField
+                    size="small" required type="date" label="Container Arrival" value={containerArrival}
+                    onChange={(e)=> setContainerArrival(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isContainerArrivalEditable}
+                    inputProps={{ min: cA || undefined, max: eS || undefined }}
+                    error={(Boolean(cR && eS) && errContainerGtShip) || (Boolean(cR && cA) && errContainerLtCreated)}
+                    helperText={
+                      (Boolean(cR && eS) && errContainerGtShip)
+                        ? 'Container Arrival must be ≤ Estimated Shipdate for Customer'
+                        : ((Boolean(cR && cA) && errContainerLtCreated) ? 'Container Arrival must be ≥ Created Order Date' : '')
+                    }
+                  />
+                  <TextField
+                    size="small" required type="date" label="Estimated ShipDate for Customer" value={estFulfillment}
+                    onChange={(e)=> setEstFulfillment(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isEditable}
+                    inputProps={{ min: cA || undefined }}
+                    error={Boolean(eS && cA) && errShipLtCreated}
+                    helperText={Boolean(eS && cA) && errShipLtCreated ? 'Estimated Shipdate must be ≥ Created Order Date' : ''}
+                  />
+                  <TextField
+                    size="small" type="date" label="Estimated Arrival Date" value={estDelivered}
+                    onChange={(e)=> setEstDelivered(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isArrivalDateEditable}
+                    inputProps={{ min: eS || undefined }}
+                    error={Boolean(eD && eS) && errArrLtShip}
+                    helperText={Boolean(eD && eS) && errArrLtShip ? 'Estimated Arrival Date must be ≥ Estimated Shipdate' : ''}
+                  />
+                </Stack>
+              );
+            })()}
             <Stack direction={{ xs:'column', md:'row' }} spacing={2}>
               <TextField size="small" label="Sub Total" value={computedSubTotal} fullWidth disabled />
               <TextField size="small" label="Shipping Charges (%)" value={shippingPercent} onChange={(e)=> setShippingPercent(e.target.value)} fullWidth disabled={!isEditable} />
@@ -1415,10 +1760,31 @@ export default function EarlyBuy() {
             <div style={{ height: 300, width: '100%' }}>
               <DataGrid
                 rows={lines.map((l, idx) => ({ id: idx+1, ...l }))}
-                columns={linesColumns.map(c => c.field === 'actions' ? { ...c, renderCell: (p:any) => (!isEditable ? null : (c as any).renderCell(p)) } : (c.field === 'qty' ? { ...c, renderCell: (p:any) => {
-                  if (!isEditable) return <span>{Number(lines[Math.max(0, Number(p?.id)-1)]?.qty || 0)}</span>;
-                  return (c as any).renderCell(p);
-                } } : c))}
+                columns={linesColumns.map(c =>
+                  c.field === 'actions'
+                    ? { ...c, renderCell: (p:any) => (!isEditable ? null : (c as any).renderCell(p)) }
+                    : c.field === 'qty'
+                      ? {
+                          ...c,
+                          renderCell: (p:any) => {
+                            if (!isEditable) return <span>{Number(lines[Math.max(0, Number(p?.id)-1)]?.qty || 0)}</span>;
+                            return (c as any).renderCell(p);
+                          },
+                        }
+                      : c.field === 'discount'
+                        ? {
+                            ...c,
+                            renderCell: (p:any) => {
+                              if (!isEditable) {
+                                const i = Math.max(0, Number(p?.id) - 1);
+                                const v = Math.max(0, Math.min(100, Number(lines[i]?.discount ?? 0)));
+                                return <span>{v}</span>;
+                              }
+                              return (c as any).renderCell(p);
+                            },
+                          }
+                        : c
+                )}
                 onRowDoubleClick={(p: any) => {
                   const g = String(p?.row?.groupName || '').trim();
                   if (g) openPalletItems({ groupName: g });

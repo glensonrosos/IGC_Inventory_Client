@@ -20,6 +20,7 @@ export default function NavBar() {
   const [due, setDue] = useState(0);
   const [onProcessDue, setOnProcessDue] = useState(0);
   const [ordersDueToday, setOrdersDueToday] = useState(0);
+  const [earlyReadyCount, setEarlyReadyCount] = useState(0);
   const [ordersDeliveredDue, setOrdersDeliveredDue] = useState(0);
   useEffect(() => {
     let alive = true;
@@ -86,6 +87,16 @@ export default function NavBar() {
         setOrdersDueToday(0);
         setOrdersDeliveredDue(0);
       }
+
+      // Early Buy READY TO SHIP count
+      try {
+        const { data } = await api.get<any[]>('/early-buy');
+        const list = Array.isArray(data) ? data : [];
+        const ready = list.filter((o: any) => String(o?.status || '').trim().toLowerCase() === 'ready_to_ship').length;
+        setEarlyReadyCount(ready);
+      } catch {
+        setEarlyReadyCount(0);
+      }
     };
 
     fetchCounts();
@@ -151,7 +162,9 @@ export default function NavBar() {
           <Badge color="error" badgeContent={(ordersDueToday || 0) + (ordersDeliveredDue || 0)} max={99} overlap="circular">
             <Button component={Link} to="/orders" color={loc.pathname === '/orders' ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: loc.pathname === '/orders' ? 1 : 0.85 }}>Orders</Button>
           </Badge>
-          <LinkButton to="/early-buy" label="Early Buy" />
+          <Badge color="error" badgeContent={earlyReadyCount} max={99} overlap="circular">
+            <Button component={Link} to="/early-buy" color={loc.pathname === '/early-buy' ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: loc.pathname === '/early-buy' ? 1 : 0.85 }}>Early Buy</Button>
+          </Badge>
           <Typography component="span" sx={{ color: 'rgba(255,255,255,0.7)', mx: 2, userSelect: 'none' }}>|</Typography>
           {/* Remaining links */}
           <LinkButton to="/pallets" label="PALLETS SUMMARY" />
