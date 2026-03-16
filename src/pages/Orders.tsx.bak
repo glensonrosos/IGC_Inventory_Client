@@ -642,37 +642,9 @@ export default function Orders() {
     setManualCreatedAt(toYmd(row?.createdAtOrder || row?.dateCreated || row?.createdAt));
     setManualLastUpdatedAt(toLocalDateTime((row as any)?.updatedAt || row?.createdAt || ''));
     setManualLastUpdatedBy(String((row as any)?.lastUpdatedBy || '').trim());
-    // Initialize from server. If empty, allow autosuggest to compute immediately in edit mode.
-    const initShip = toYmdLoose(row?.estFulfillmentDate);
-    try {
-      const dbg = (import.meta as any)?.env?.DEV || localStorage.getItem('DEBUG_ORDERS') === '1';
-      if (dbg) console.log('[ORDERS][modal-open]init', { fromRow: row?.estFulfillmentDate, initShip, note: 'toYmdLoose' });
-    } catch {}
-    setManualEstFulfillment(initShip);
-    // Seed high-water mark
-    lastSafeShipdateRef.current = initShip || '';
-    // Trailing safeguard: if async flows clear the value, re-apply shortly after
-    try {
-      if (initShip) {
-        setTimeout(() => {
-          try {
-            const dbg = (import.meta as any)?.env?.DEV || localStorage.getItem('DEBUG_ORDERS') === '1';
-            if (!manualEstFulfillment && dbg) console.log('[ORDERS][modal-open] re-apply init shipdate (t0)', { initShip });
-            if (!manualEstFulfillment) setManualEstFulfillment(initShip);
-          } catch {}
-        }, 0);
-        setTimeout(() => {
-          try {
-            const dbg = (import.meta as any)?.env?.DEV || localStorage.getItem('DEBUG_ORDERS') === '1';
-            if (!manualEstFulfillment && dbg) console.log('[ORDERS][modal-open] re-apply init shipdate (t200)', { initShip });
-            if (!manualEstFulfillment) setManualEstFulfillment(initShip);
-          } catch {}
-        }, 200);
-      }
-    } catch {}
+    setManualEstFulfillment(toYmd(row?.estFulfillmentDate));
     setManualEstDelivered(toYmd((row as any)?.estDeliveredDate));
-    // Mark as touched only if we already have a server value; otherwise allow recompute to run
-    setManualShipdateTouched(Boolean(initShip));
+    setManualShipdateTouched(false);
     setManualShippingAddress(String(row?.shippingAddress || '').trim());
     setManualNotes(String((row as any)?.notes || '').trim());
     setManualOriginalPrice(String((row as any)?.originalPrice ?? '').trim());
@@ -771,23 +743,15 @@ export default function Orders() {
       }
     } catch {}
 
-    // Cache for freshly fetched picker rows to avoid relying on async state before it settles
-    let pickerRowsLocal: any[] = [];
-
     try {
       const wid = String(row?.warehouseId || fixedWarehouseId || '').trim();
       if (wid) {
         setManualPickerLoading(true);
-        const data = await throttledApiGet<any>('/orders/pallet-picker', { warehouseId: wid }, `picker:${wid}`);
-        pickerRowsLocal = Array.isArray(data?.rows) ? data.rows : [];
-        setManualPickerRows(pickerRowsLocal);
+        const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: wid } });
+        setManualPickerRows(Array.isArray(data?.rows) ? data.rows : []);
         setManualPickerWarehouses(Array.isArray(data?.warehouses) ? data.warehouses : []);
         // Ensure grid recomputes once source availability data arrives
         setManualRecalcTick((t) => t + 1);
-        try {
-          const dbg = (import.meta as any)?.env?.DEV || localStorage.getItem('DEBUG_ORDERS') === '1';
-          if (dbg) console.log('[ORDERS][modal-open] picker rows fetched', { wid, rows: pickerRowsLocal.length });
-        } catch {}
       }
     } catch {
       setManualPickerRows([]);
@@ -799,88 +763,18 @@ export default function Orders() {
     try {
       const rawId = String(row?.rawId || '').trim();
       if (rawId) {
-        // One-time gentle rebalance to ensure reserved breakdown is current, then fetch
-        try { await api.post('/orders/unfulfilled/rebalance-processing', {}); } catch {}
+        // Fetch latest allocations and metadata without forcing server-side rebalances
         try { await new Promise((r) => setTimeout(r, 150)); } catch {}
         const { allocations, reserved } = await refreshManualAllocations(rawId);
         setManualAllocations(Array.isArray(allocations) ? allocations : []);
         setManualReservedBreakdown(Array.isArray(reserved) ? reserved : []);
-        // If there is no server-provided shipdate, compute immediately using fresh data
-        if (!initShip && !manualShipdateTouched) {
-          const rows = Array.isArray(pickerRowsLocal) ? pickerRowsLocal : [];
-          const rsv = Array.isArray(reserved) ? reserved : [];
-          const allocs = Array.isArray(allocations) ? allocations : [];
-          let next = '' as string;
-          if (rsv.length) next = suggestShipdateForReservedBreakdown({ rows, reserved: rsv });
-          else if (allocs.length) next = suggestShipdateForProcessingAllocations({ rows, allocations: allocs });
-          try {
-            const dbg = (import.meta as any)?.env?.DEV || localStorage.getItem('DEBUG_ORDERS') === '1';
-            if (dbg) console.log('[ORDERS][modal-open] computed shipdate', { rawId, from: rsv.length ? 'reserved' : (allocs.length ? 'allocations' : 'none'), next, rowsLen: rows.length, rsvLen: rsv.length, allocsLen: allocs.length });
-          } catch {}
-          if (next && next !== manualEstFulfillment) {
-            setManualEstFulfillment(next);
-            lastSafeShipdateRef.current = next;
-          }
-          if (!next) {
-            try {
-              const dbg = (import.meta as any)?.env?.DEV || localStorage.getItem('DEBUG_ORDERS') === '1';
-              if (dbg) console.log('[ORDERS][modal-open] no computed shipdate (inputs empty?)', { rowsLen: rows.length, rsvLen: rsv.length, allocsLen: allocs.length });
-            } catch {}
-            // Schedule a trailing attempt after a short delay in case inputs settle slightly later
-            try {
-              setTimeout(() => {
-                try {
-                  const rows2 = Array.isArray(manualPickerRows) ? manualPickerRows : [];
-                  const rsv2 = Array.isArray(manualReservedBreakdown) ? manualReservedBreakdown : [];
-                  const allocs2 = Array.isArray(manualAllocations) ? manualAllocations : [];
-                  let next2 = '' as string;
-                  if (rsv2.length) next2 = suggestShipdateForReservedBreakdown({ rows: rows2, reserved: rsv2 });
-                  else if (allocs2.length) next2 = suggestShipdateForProcessingAllocations({ rows: rows2, allocations: allocs2 });
-                  const dbg = (import.meta as any)?.env?.DEV || localStorage.getItem('DEBUG_ORDERS') === '1';
-                  if (dbg) console.log('[ORDERS][modal-open] trailing compute', { rawId, next2, rowsLen: rows2.length, rsvLen: rsv2.length, allocsLen: allocs2.length, cur: manualEstFulfillment });
-                  if (!manualShipdateTouched && !initShip && next2 && !manualEstFulfillment) setManualEstFulfillment(next2);
-                } catch {}
-              }, 300);
-            } catch {}
-          }
-        }
         try {
-          const data = await throttledApiGet<any>(`/orders/unfulfilled/${rawId}`, undefined, `unf:${rawId}`);
+          const { data } = await api.get(`/orders/unfulfilled/${rawId}`);
           setManualLastUpdatedAt(toLocalDateTime((data as any)?.updatedAt || (data as any)?.createdAt || ''));
           setManualLastUpdatedBy(String((data as any)?.lastUpdatedBy || '').trim());
           const nextStatus = (normalizeStatus((data as any)?.status || '') as any) || 'processing';
           if (!manualStatusTouched) setManualStatus(nextStatus);
-          const fetched = toYmdLoose((data as any)?.estFulfillmentDate);
-          // Overwrite rules:
-          // - If not actively editing, allow overwrite when server has a value
-          // - If editing and field not touched, only set when server provides a non-empty value or our field is empty
-          const isEditingOpen = manualOpen && manualMode === 'edit' && !manualIsLocked;
-          try {
-            const dbg = (import.meta as any)?.env?.DEV || localStorage.getItem('DEBUG_ORDERS') === '1';
-            if (dbg) console.log('[ORDERS][modal-open] server shipdate fetched', { rawId, fetched, isEditingOpen, touched: manualShipdateTouched, current: manualEstFulfillment });
-          } catch {}
-          if (!isPlaceholderYmd(fetched)) {
-            const laterOf = (a?: string, b?: string) => {
-              const A = String(a || '');
-              const B = String(b || '');
-              if (!A) return B;
-              if (!B) return A;
-              return new Date(A).getTime() >= new Date(B).getTime() ? A : B;
-            };
-            const base = String(lastSafeShipdateRef.current || manualEstFulfillment || '');
-            const better = laterOf(base, fetched);
-            if (!isEditingOpen) {
-              if (better !== cur) setManualEstFulfillment(better);
-            } else if (!manualShipdateTouched) {
-              if (better !== cur) setManualEstFulfillment(better);
-            }
-            if (better) lastSafeShipdateRef.current = better;
-          } else {
-            try {
-              const dbg = (import.meta as any)?.env?.DEV || localStorage.getItem('DEBUG_ORDERS') === '1';
-              if (dbg) console.log('[ORDERS][modal-open] ignoring placeholder shipdate from server', { rawId, fetched });
-            } catch {}
-          }
+          setManualEstFulfillment(toYmd((data as any)?.estFulfillmentDate));
         } catch {}
       }
     } catch {
@@ -890,7 +784,7 @@ export default function Orders() {
     }
 
     try {
-      const data = await throttledApiGet<any[]>('/item-groups', undefined, 'item-groups');
+      const { data } = await api.get<any[]>('/item-groups');
       const palletGroups = (Array.isArray(data) ? data : [])
         .map((g: any) => String(g?.name || '').trim())
         .filter((v: string) => v);
@@ -904,24 +798,6 @@ export default function Orders() {
       setManualPalletGroupOptions([]);
       setManualLineItemOptions([]);
     }
-
-    // If no server-provided shipdate, attempt a one-time compute now that initial data loads have run.
-    try {
-      const hasServerShip = Boolean(initShip);
-      if (!hasServerShip && !manualShipdateTouched) {
-        setTimeout(() => {
-          try {
-            const rsv = Array.isArray(manualReservedBreakdown) ? manualReservedBreakdown : [];
-            const rows = Array.isArray(manualPickerRows) ? manualPickerRows : [];
-            const allocs = Array.isArray(manualAllocations) ? manualAllocations : [];
-            let next = '' as string;
-            if (rsv.length) next = suggestShipdateForReservedBreakdown({ rows, reserved: rsv });
-            else if (allocs.length) next = suggestShipdateForProcessingAllocations({ rows, allocations: allocs });
-            if (next && next !== manualEstFulfillment) setManualEstFulfillment(next);
-          } catch {}
-        }, 0);
-      }
-    } catch {}
   };
 
   const openOnProcessDetails = useCallback(async ({ groupName }: { groupName: string }) => {
@@ -932,42 +808,12 @@ export default function Orders() {
     setOnProcessRows([]);
     setOnProcessLoading(true);
     try {
-      const data = await throttledApiGet<any>('/orders/pallet-picker/on-process', { groupName: g }, `picker:onproc:${g}`);
+      const { data } = await api.get('/orders/pallet-picker/on-process', { params: { groupName: g } });
       setOnProcessRows(Array.isArray(data?.rows) ? data.rows : []);
     } catch {
       setOnProcessRows([]);
     } finally {
       setOnProcessLoading(false);
-    }
-  }, []);
-
-  // Throttle helper: deduplicate and rate-limit hot GET endpoints (5s per key)
-  const fetchCacheRef = useRef<Record<string, any>>({});
-  const fetchTimesRef = useRef<Record<string, number>>({});
-  const fetchPromisesRef = useRef<Record<string, Promise<any> | null>>({});
-  const throttledApiGet = useCallback(async <T,>(url: string, params: any, key: string, ttlMs: number = 5000): Promise<T> => {
-    const now = Date.now();
-    const last = fetchTimesRef.current[key] || 0;
-    const inWindow = (now - last) < ttlMs;
-    if (inWindow && Object.prototype.hasOwnProperty.call(fetchCacheRef.current, key)) {
-      return fetchCacheRef.current[key] as T;
-    }
-    const existing = fetchPromisesRef.current[key];
-    if (existing) {
-      try { return (await existing) as T; } catch {/* fallthrough */}
-    }
-    const p = (async () => {
-      const res = await api.get(url, { params });
-      const data = (res as any)?.data;
-      fetchCacheRef.current[key] = data;
-      fetchTimesRef.current[key] = Date.now();
-      return data as T;
-    })();
-    fetchPromisesRef.current[key] = p;
-    try {
-      return await p;
-    } finally {
-      if (fetchPromisesRef.current[key] === p) fetchPromisesRef.current[key] = null;
     }
   }, []);
 
@@ -982,7 +828,7 @@ export default function Orders() {
     setViewOrderableOpen(true);
     setViewOrderableLoading(true);
     try {
-      const data = await throttledApiGet<any>('/orders/pallet-picker', { warehouseId: wid, q: String(viewOrderableQ || '').trim() || undefined }, `picker:view:${wid}:${String(viewOrderableQ || '').trim()}`);
+      const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: wid, q: String(viewOrderableQ || '').trim() || undefined } });
       setViewOrderableRows(Array.isArray(data?.rows) ? data.rows : []);
       setViewOrderableWarehouses(Array.isArray(data?.warehouses) ? data.warehouses : []);
     } catch {
@@ -1023,7 +869,7 @@ export default function Orders() {
 
     (async () => {
       try {
-        const data = await throttledApiGet<any[]>('/item-groups', undefined, 'item-groups');
+        const { data } = await api.get<any[]>('/item-groups');
         if (canceled) return;
         const map: Record<string, string> = {};
         const descMap: Record<string, string> = {};
@@ -1725,7 +1571,6 @@ export default function Orders() {
               let n = Math.max(1, Math.floor(Number(raw || 0)));
               if (Number.isFinite(maxAllowed)) n = Math.min(n, maxAllowed);
               setManualOrderQtyByGroup((prev)=> ({ ...prev, [rowKey]: String(n) }));
-              setManualShipdateTouched(false);
               setManualRecalcTick((t)=> t + 1);
             }}
             onBlur={(e)=>{
@@ -1733,7 +1578,6 @@ export default function Orders() {
               let n = Math.max(1, Math.floor(Number(raw || 0)));
               if (Number.isFinite(maxAllowed)) n = Math.min(n, maxAllowed);
               setManualOrderQtyByGroup((prev)=> ({ ...prev, [rowKey]: String(n) }));
-              setManualShipdateTouched(false);
               setManualRecalcTick((t)=> t + 1);
             }}
             onKeyDown={(e)=>{
@@ -2034,8 +1878,8 @@ export default function Orders() {
       nameById.get(primaryWarehouseId) ||
       String((manualEditRow as any)?.warehouseName || '').trim() ||
       '';
-    const reserved = Array.isArray(manualReservedBreakdown) ? manualReservedBreakdown : [];
     const allocs = Array.isArray(manualAllocations) ? manualAllocations : [];
+    const reserved = Array.isArray(manualReservedBreakdown) ? manualReservedBreakdown : [];
 
     const secondAlloc = allocs.find((a) => String(a?.source || '').toLowerCase() === 'second') as any;
     const secondWarehouseId = String(secondAlloc?.warehouseId?._id || secondAlloc?.warehouseId || '').trim();
@@ -2673,7 +2517,7 @@ export default function Orders() {
       return /^\d{4}-\d{2}-\d{2}$/.test(slice) ? slice : '';
     };
 
-    const onWaterCompletionYmd = (row: any, neededQty: number, _opts?: { gKey?: string }) => {
+    const onWaterCompletionYmd = (row: any, neededQty: number) => {
       let remaining = Math.max(0, Math.floor(Number(neededQty || 0)));
       if (!Number.isFinite(remaining) || remaining <= 0) return '';
 
@@ -2681,7 +2525,7 @@ export default function Orders() {
       const normalized = ships
         .map((x: any) => ({ edd: toYmd(x?.edd), qty: Math.floor(Number(x?.qty || 0)) }))
         .filter((x: any) => x.edd && Number.isFinite(x.qty) && x.qty > 0)
-        .sort((a: any, b: any) => new Date(String(a.edd)).getTime() - new Date(String(b.edd)).getTime());
+        .sort((a: any, b: any) => String(a.edd).localeCompare(String(b.edd)));
       for (const s of normalized) {
         if (remaining <= 0) break;
         remaining -= Math.min(remaining, Math.max(0, s.qty));
@@ -2709,18 +2553,8 @@ export default function Orders() {
       .filter((v) => v);
 
     let best = '';
-    for (const g of pickedGroups) {      let r: any = rowsByGroup.get(g) || null;
-      if (!r) {
-        // Try without a trailing numeric ID (e.g., "classic urns 25876" -> "classic urns")
-        const noTrailingNum = g.replace(/\s+\d+$/, '').trim();
-        if (noTrailingNum) r = rowsByGroup.get(noTrailingNum) || null;
-      }
-      if (!r) {
-        // Try removing a hyphen-number suffix (e.g., "classic urns - 25876")
-        const noHyphenNum = g.replace(/\s*-\s*\d+$/, '').trim();
-        if (noHyphenNum) r = rowsByGroup.get(noHyphenNum) || null;
-      }
-      r = r || {};
+    for (const g of pickedGroups) {
+      const r: any = rowsByGroup.get(g) || {};
 
       const need = Math.floor(Number((manualOrderQtyByGroup || {})?.[g] || 0));
       if (!Number.isFinite(need) || need <= 0) continue;
@@ -2779,62 +2613,22 @@ export default function Orders() {
     const pickerRows = Array.isArray(opts?.rows) ? opts!.rows : (manualPickerRows || []);
     const allocs = Array.isArray(opts?.allocations) ? opts!.allocations : (Array.isArray(manualAllocations) ? manualAllocations : []);
 
-    // Build a normalized lookup for picker rows by groupName and palletName
-    const norm = (s: any) => {
-      const v = String(s || '')
-        .replace(/[\u2013\u2014]/g, '-') // en/em dashes to hyphen
-        .replace(/\s*[-–—]\s*added\s*$/i, '') // strip trailing "- added" variants
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, ' ') // non-alphanum to space
-        .trim()
-        .replace(/\s+/g, ' '); // collapse spaces
-      return v;
-    };
-    const rowsByGroup = new Map<string, any>();
-    const rowsByLineItem = new Map<string, any>();
-    const rowsByBase = new Map<string, any>();
-    for (const r of (pickerRows || [])) {
-      const gk = norm((r as any)?.groupName);
-      const pk = norm((r as any)?.palletName);
-      const li = String((r as any)?.lineItem || '').trim();
-      if (gk) rowsByGroup.set(gk, r);
-      if (pk && !rowsByGroup.has(pk)) rowsByGroup.set(pk, r);
-      if (li && !rowsByLineItem.has(li)) rowsByLineItem.set(li, r);
-      const base = gk ? gk.replace(/\s*-\s*\d+$/, '').trim() : '';
-      if (base && !rowsByBase.has(base)) rowsByBase.set(base, r);
-    }
+    const rowsByGroup = new Map((pickerRows || []).map((r: any) => [String(r.groupName || ''), r]));
     const toYmd = (s: any) => {
-      const v = String(s || '').trim();
-      const ymd = v.slice(0, 10);
-      if (/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return ymd;
-      // Support mm/dd/yyyy coming from some EDD payloads
-      const mdy = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-      if (mdy) {
-        const mm = String(mdy[1]).padStart(2, '0');
-        const dd = String(mdy[2]).padStart(2, '0');
-        const yyyy = String(mdy[3]);
-        return `${yyyy}-${mm}-${dd}`;
-      }
-      return '';
+      const v = String(s || '');
+      const slice = v.slice(0, 10);
+      return /^\d{4}-\d{2}-\d{2}$/.test(slice) ? slice : '';
     };
 
-    const onWaterCompletionYmd = (row: any, neededQty: number, opts?: { gKey?: string }) => {
+    const onWaterCompletionYmd = (row: any, neededQty: number) => {
       let remaining = Math.max(0, Math.floor(Number(neededQty || 0)));
       if (!Number.isFinite(remaining) || remaining <= 0) return '';
 
-      let ships = Array.isArray(row?.onWaterShipments) ? row.onWaterShipments : [];
-      // Fallback: if picker row has no shipments, try to derive from allocations for the same group
-      if (!ships.length && opts?.gKey) {
-        const allocs = Array.isArray(manualAllocations) ? manualAllocations : [];
-        const groupMatches = allocs.filter((a: any) => String(a?.source || '').toLowerCase() === 'on_water' && norm(a?.groupName || '') === String(opts?.gKey || ''));
-        ships = groupMatches.map((a: any) => ({ edd: toYmd(a?.edd), qty: Math.floor(Number(a?.qty || 0)) }));
-      }
-
-      const normalized = (Array.isArray(ships) ? ships : [])
+      const ships = Array.isArray(row?.onWaterShipments) ? row.onWaterShipments : [];
+      const normalized = ships
         .map((x: any) => ({ edd: toYmd(x?.edd), qty: Math.floor(Number(x?.qty || 0)) }))
         .filter((x: any) => x.edd && Number.isFinite(x.qty) && x.qty > 0)
-        .sort((a: any, b: any) => new Date(String(a.edd)).getTime() - new Date(String(b.edd)).getTime());
-      
+        .sort((a: any, b: any) => String(a.edd).localeCompare(String(b.edd)));
       for (const s of normalized) {
         if (remaining <= 0) break;
         remaining -= Math.min(remaining, Math.max(0, s.qty));
@@ -2867,16 +2661,7 @@ export default function Orders() {
         continue;
       }
 
-      let r: any = rowsByGroup.get(g) || null;
-      if (!r) {
-        const noTrailingNum = g.replace(/\s+\d+$/, '').trim();
-        if (noTrailingNum) r = rowsByGroup.get(noTrailingNum) || null;
-      }
-      if (!r) {
-        const noHyphenNum = g.replace(/\s*-\s*\d+$/, '').trim();
-        if (noHyphenNum) r = rowsByGroup.get(noHyphenNum) || null;
-      }
-      r = r || {};
+      const r: any = rowsByGroup.get(g) || {};
       if (src === 'on_water') {
         const edd = onWaterCompletionYmd(r, qty);
         if (edd && (!best || edd > best)) best = edd;
@@ -2903,40 +2688,14 @@ export default function Orders() {
     const pickerRows = Array.isArray(opts?.rows) ? opts!.rows : (manualPickerRows || []);
     const reserved = Array.isArray(opts?.reserved) ? opts!.reserved : (Array.isArray(manualReservedBreakdown) ? manualReservedBreakdown : []);
 
-    // Normalizer to robustly match group/pallet names between reserved and picker rows
-    const norm = (s: any) => {
-      const v = String(s || '')
-        .replace(/[\u2013\u2014]/g, '-')
-        .replace(/\s*[-–—]\s*added\s*$/i, '')
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, ' ')
-        .trim()
-        .replace(/\s+/g, ' ');
-      return v;
-    };
-
-    const rowsByGroup = new Map<string, any>();
-    for (const r of (pickerRows || [])) {
-      const gk = norm((r as any)?.groupName);
-      const pk = norm((r as any)?.palletName);
-      if (gk) rowsByGroup.set(gk, r);
-      if (pk && !rowsByGroup.has(pk)) rowsByGroup.set(pk, r);
-    }
+    const rowsByGroup = new Map((pickerRows || []).map((r: any) => [String(r.groupName || ''), r]));
     const toYmd = (s: any) => {
-      const v = String(s || '').trim();
-      const ymd = v.slice(0, 10);
-      if (/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return ymd;
-      const m = v.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-      if (m) {
-        const mm = String(m[1]).padStart(2, '0');
-        const dd = String(m[2]).padStart(2, '0');
-        const yyyy = String(m[3]);
-        return `${yyyy}-${mm}-${dd}`;
-      }
-      return '';
+      const v = String(s || '');
+      const slice = v.slice(0, 10);
+      return /^\d{4}-\d{2}-\d{2}$/.test(slice) ? slice : '';
     };
 
-    const onWaterCompletionYmd = (row: any, neededQty: number, _opts?: { gKey?: string }) => {
+    const onWaterCompletionYmd = (row: any, neededQty: number) => {
       let remaining = Math.max(0, Math.floor(Number(neededQty || 0)));
       if (!Number.isFinite(remaining) || remaining <= 0) return '';
 
@@ -2944,7 +2703,7 @@ export default function Orders() {
       const normalized = ships
         .map((x: any) => ({ edd: toYmd(x?.edd), qty: Math.floor(Number(x?.qty || 0)) }))
         .filter((x: any) => x.edd && Number.isFinite(x.qty) && x.qty > 0)
-        .sort((a: any, b: any) => new Date(String(a.edd)).getTime() - new Date(String(b.edd)).getTime());
+        .sort((a: any, b: any) => String(a.edd).localeCompare(String(b.edd)));
       for (const s of normalized) {
         if (remaining <= 0) break;
         remaining -= Math.min(remaining, Math.max(0, s.qty));
@@ -2967,17 +2726,7 @@ export default function Orders() {
     let hasSecond = false;
 
     for (const rr of reserved) {
-      let rawGroup = String((rr as any)?.groupName || (rr as any)?.id || (rr as any)?.g || '').trim();
-      let g = norm(rawGroup);
-      // Fallback: try matching by reserved lineItem if group key is missing
-      const rLine = String((rr as any)?.lineItem || (rr as any)?.li || '').trim();
-      if (!g && rLine) {
-        const rByLi = rowsByLineItem.get(rLine) || null;
-        if (rByLi) {
-          rawGroup = String((rByLi as any)?.groupName || rLine);
-          g = norm(rawGroup);
-        }
-      }
+      const g = String((rr as any)?.groupName || (rr as any)?.id || '').trim();
       if (!g) continue;
       const onWaterQty = Math.floor(Number((rr as any)?.onWater || 0));
       const onProcessQty = Math.floor(Number((rr as any)?.onProcess || 0));
@@ -2987,83 +2736,14 @@ export default function Orders() {
         hasSecond = true;
       }
 
-      let r: any = rowsByGroup.get(g) || null;
-      if (!r) {
-        const noTrailingNum = g.replace(/\s+\d+$/, '').trim();
-        if (noTrailingNum) r = rowsByGroup.get(noTrailingNum) || null;
-      }
-      if (!r) {
-        const noHyphenNum = g.replace(/\s*-\s*\d+$/, '').trim();
-        if (noHyphenNum) r = rowsByGroup.get(noHyphenNum) || null;
-      }
-      if (!r) {
-        // Try matching by numeric lineItem: extract trailing digits from reserved group
-        const m = String(rawGroup).match(/(\d{3,})\s*$/);
-        const lineId = m ? m[1] : '';
-        if (lineId) r = rowsByLineItem.get(lineId) || null;
-      }
-      if (!r) {
-        // Try base-name map
-        const base = g.replace(/\s*-\s*\d+$/, '').trim();
-        if (base) r = rowsByBase.get(base) || null;
-      }
-      // If the matched picker row has no usable on-water shipments, synthesize from allocations
-      let allocFallbackUsed = false;
+      const r: any = rowsByGroup.get(g) || {};
       if (Number.isFinite(onWaterQty) && onWaterQty > 0) {
-        const hasShips = Array.isArray((r as any)?.onWaterShipments) && (r as any).onWaterShipments.some((x: any)=> Math.floor(Number(x?.qty || 0)) > 0);
-        if (!hasShips) {
-          const allocs = Array.isArray(manualAllocations) ? manualAllocations : [];
-          const lineId = String((r as any)?.lineItem || '').trim();
-          const shipsFromAlloc = allocs
-            .filter((a: any)=> String(a?.source || '').toLowerCase() === 'on_water'
-              && (
-                (lineId && String((a as any)?.lineItem || '') === lineId)
-                || norm(String(a?.groupName || '')) === g
-                || norm(String(a?.groupName || '')) === norm(rawGroup)
-              ))
-            .map((a: any)=> ({ edd: toYmd((a as any)?.edd), qty: Math.max(0, Math.floor(Number((a as any)?.qty || 0))) }))
-            .filter((x: any)=> x.edd && Number.isFinite(x.qty) && x.qty > 0)
-            .sort((a: any, b: any)=> new Date(String(a.edd)).getTime() - new Date(String(b.edd)).getTime());
-          if (shipsFromAlloc.length) {
-            r = { ...(r as any), onWaterShipments: shipsFromAlloc };
-            allocFallbackUsed = true;
-          }
-        }
-      }
-
-      
-      r = r || {};
-      if (Number.isFinite(onWaterQty) && onWaterQty > 0) {
-        const edd = onWaterCompletionYmd(r, onWaterQty, { gKey: rawGroup });
-        try {
-          const dbg = (import.meta as any)?.env?.DEV || localStorage.getItem('DEBUG_ORDERS') === '1';
-          if (dbg) console.log('[ORDERS][shipdate][reserved] on-water', { group: rawGroup, g, qty: onWaterQty, edd });
-        } catch {}
+        const edd = onWaterCompletionYmd(r, onWaterQty);
         if (edd && (!best || edd > best)) best = edd;
       }
       if (Number.isFinite(onProcessQty) && onProcessQty > 0) {
-        // Prefer picker row's onProcessEdd; if missing, fallback to allocations with source on_process
-        let base = toYmd(r?.onProcessEdd);
-        if (!base) {
-          try {
-            const allocs = Array.isArray(manualAllocations) ? manualAllocations : [];
-            const lineId = String((r as any)?.lineItem || '').trim();
-            const cand = allocs
-              .filter((a: any) => String((a as any)?.source || '').toLowerCase() === 'on_process'
-                && ((lineId && String((a as any)?.lineItem || '') === lineId)
-                  || norm(String(a?.groupName || '')) === g
-                  || norm(String(a?.groupName || '')) === norm(rawGroup)))
-              .map((a: any) => toYmd((a as any)?.edd))
-              .filter((s: string) => !!s)
-              .sort((a: string, b: string) => new Date(a).getTime() - new Date(b).getTime());
-            base = cand.length ? cand[cand.length - 1] : '';
-          } catch {}
-        }
+        const base = toYmd(r?.onProcessEdd);
         const ready = base ? addMonthsYmd(base, 3) : '';
-        try {
-          const dbg = (import.meta as any)?.env?.DEV || localStorage.getItem('DEBUG_ORDERS') === '1';
-          if (dbg) console.log('[ORDERS][shipdate][reserved] on-process', { group: rawGroup, g, qty: onProcessQty, base, ready });
-        } catch {}
         if (ready && (!best || ready > best)) best = ready;
       }
     }
@@ -3077,13 +2757,8 @@ export default function Orders() {
         out = !out || cutoff > out ? cutoff : out;
       }
     }
-    try {
-      const dbg = (import.meta as any)?.env?.DEV || localStorage.getItem('DEBUG_ORDERS') === '1';
-      if (dbg) console.log('[ORDERS][shipdate][reserved] result', { best, hasSecond, out });
-    } catch {}
-    
     return out || today;
-  }, [manualPickerRows, manualReservedBreakdown, manualAllocations, todayYmd]);
+  }, [manualPickerRows, manualReservedBreakdown, todayYmd]);
 
   const refreshManualAvailable = useCallback(async (warehouseId: string) => {
     const wid = String(warehouseId || '').trim();
@@ -3116,7 +2791,7 @@ export default function Orders() {
         return { rows: [] as any[], warehouses: [] as any[] };
       }
       try {
-        const data = await throttledApiGet<any>('/orders/pallet-picker', { warehouseId: wid }, `picker:${wid}`);
+        const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: wid } });
         const rows = Array.isArray(data?.rows) ? data.rows : [];
         const warehouses = Array.isArray(data?.warehouses) ? data.warehouses : [];
         setManualPickerRows(rows);
@@ -3139,7 +2814,7 @@ export default function Orders() {
       return { allocations: [] as any[], reserved: [] as any[] };
     }
     try {
-      const data = await throttledApiGet<any>(`/orders/unfulfilled/${id}`, undefined, `unf:${id}`);
+      const { data } = await api.get(`/orders/unfulfilled/${id}`, { params: { _ts: Date.now() } });
       const nextAllocs = Array.isArray((data as any)?.allocations) ? (data as any).allocations : [];
       const nextReserved = Array.isArray((data as any)?.reservedBreakdown) ? (data as any).reservedBreakdown : [];
       setManualAllocations(nextAllocs);
@@ -3154,29 +2829,7 @@ export default function Orders() {
         const nextStatus = normalizeStatus((data as any)?.status || '') as any;
         const nextShip = String((data as any)?.estFulfillmentDate || '').slice(0, 10);
         if (nextStatus && !manualStatusTouched) setManualStatus(nextStatus as any);
-        // When editing in the modal and user hasn't touched shipdate, prefer client-side computation
-        // based on reserved breakdown; do not let the polling overwrite it and cause flicker.
-        const isEditingOpen = manualOpen && manualMode === 'edit' && !manualIsLocked && !manualShipdateTouched;
-        // Avoid clearing a non-empty client value with empty/placeholder server value
-        const validNext = toYmdLoose(nextShip);
-        const laterOf = (a?: string, b?: string) => {
-          const A = String(a || '');
-          const B = String(b || '');
-          if (!A) return B;
-          if (!B) return A;
-          return new Date(A).getTime() >= new Date(B).getTime() ? A : B;
-        };
-        const base = String(lastSafeShipdateRef.current || manualEstFulfillment || '');
-        const better = laterOf(base, isPlaceholderYmd(validNext) ? '' : validNext);
-        const shouldUpdate = !isEditingOpen && better !== cur;
-        try {
-          const dbg = (import.meta as any)?.env?.DEV || localStorage.getItem('DEBUG_ORDERS') === '1';
-          if (dbg) console.log('[ORDERS][alloc-refresh] decide update shipdate', { id, isEditingOpen, nextShip, validNext, cur: manualEstFulfillment, better, shouldUpdate });
-        } catch {}
-        if (shouldUpdate) {
-          setManualEstFulfillment(better);
-          if (better) lastSafeShipdateRef.current = better;
-        }
+        setManualEstFulfillment(nextShip || '');
         if (!manualOpen) {
           setOrdersRows((prev) => {
             const rows = Array.isArray(prev) ? prev : [];
@@ -3197,7 +2850,7 @@ export default function Orders() {
       // keep existing allocations if fetch fails
       return { allocations: Array.isArray(manualAllocations) ? manualAllocations : [], reserved: [] as any[] };
     }
-  }, [manualAllocations, manualReservedBreakdown, manualStatusTouched, manualOpen, manualMode, manualIsLocked, manualShipdateTouched]);
+  }, [manualAllocations, manualReservedBreakdown, manualStatusTouched, manualOpen]);
 
   // Return/Damage feature removed
 
@@ -3221,12 +2874,9 @@ export default function Orders() {
     if (!isEditing) return;
     if (manualShipdateTouched) return;
 
-    // Allow recomputation when data refreshes; we'll only update if the new value differs
-
     const rawId = String((manualEditRow as any)?.rawId || '').trim();
 
     const reserved = Array.isArray(manualReservedBreakdown) ? manualReservedBreakdown : [];
-    const allocs = Array.isArray(manualAllocations) ? manualAllocations : [];
     // Build per-group needs by summing quantities across rows that share the same pallet group
     const needByGroup = new Map<string, number>();
     for (const r of (Array.isArray(manualOrderRows) ? manualOrderRows : []) as any[]) {
@@ -3249,20 +2899,13 @@ export default function Orders() {
       return primary >= need && other <= 0;
     });
 
-    // If there are no per-group needs yet (e.g., rows/quantities not populated), do NOT early return.
-    // Only skip recompute when we actually have needs and they are fully covered by primary.
-    const hasNeeds = needByGroup.size > 0;
-    if (hasNeeds && stillFullyPrimary) return;
+    if (stillFullyPrimary) return;
 
-    // Prefer reserved breakdown first; allocations as fallback
-    let next = '';
-    if (reserved.length) {
-      next = suggestShipdateForReservedBreakdown({ rows: manualPickerRows, reserved });
-    } else if (allocs.length) {
-      next = suggestShipdateForProcessingAllocations({ rows: manualPickerRows, allocations: allocs });
-    } else {
-      return;
-    }
+    // Edit mode shipdate must come from the reserved breakdown (system-managed) only.
+    // Do NOT fall back to selection-based logic because reserved breakdown can briefly be empty during refresh,
+    // which causes flip-flopping between two dates.
+    if (!reserved.length) return;
+    const next = suggestShipdateForReservedBreakdown({ rows: manualPickerRows, reserved });
     // Do not override server-computed status here. The server rebalance determines READY TO SHIP vs PROCESSING.
 
     if (next && next !== manualEstFulfillment) {
@@ -3292,7 +2935,7 @@ export default function Orders() {
         });
       }
     }
-  }, [manualOpen, manualMode, manualIsLocked, manualShipdateTouched, manualOrderQtyByGroup, manualReservedBreakdown, manualAllocations, manualPickerRows, suggestShipdateForReservedBreakdown, suggestShipdateForProcessingAllocations, suggestShipdateForSelection, manualEstFulfillment, manualStatus, (manualEditRow as any)?.rawId]);
+  }, [manualOpen, manualMode, manualIsLocked, manualShipdateTouched, manualOrderQtyByGroup, manualReservedBreakdown, manualPickerRows, suggestShipdateForReservedBreakdown, suggestShipdateForSelection, manualEstFulfillment, manualStatus, (manualEditRow as any)?.rawId]);
 
   useEffect(() => {
     const loadAvail = async () => {
@@ -3471,10 +3114,6 @@ export default function Orders() {
 
   const syncSomeOrdersFromServer = useCallback(async (max: number = 15) => {
     try {
-      // While the manual order modal is open, avoid background syncing many rows
-      // to reduce duplicate /orders/unfulfilled calls. The modal handles its own
-      // per-order refresh via throttledApiGet.
-      if (manualOpen) return;
       const list = Array.isArray(ordersRowsRef.current) ? ordersRowsRef.current : [];
       // Prioritize rows that appear as DEFICIT in the grid (processing with empty shipdate)
       const deficitLike = list.filter((r) => String(r.id || '').startsWith('manual:') && normalizeStatus(r.status) === 'processing' && !String(r?.estFulfillmentDate || '').trim());
@@ -3487,7 +3126,7 @@ export default function Orders() {
           const rawId = String((r as any)?.rawId || '').trim();
           if (!rawId) return null as any;
           try {
-            const data = await throttledApiGet<any>(`/orders/unfulfilled/${rawId}`, undefined, `unf:${rawId}`);
+            const { data } = await api.get(`/orders/unfulfilled/${rawId}`, { params: { _ts: Date.now() } });
             const nextStatus = String((data as any)?.status || '').trim();
             const nextShip = String((data as any)?.estFulfillmentDate || '').slice(0, 10);
             return { rawId, nextStatus, nextShip };
@@ -3757,38 +3396,7 @@ export default function Orders() {
 
   };
 
-  const toLocalYmd = useCallback((d: Date): string => {
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
-  }, []);
-
-  const toYmdLoose = useCallback((v: any): string => {
-    const s = normalizeDateValue(v);
-    try {
-      const d = s ? new Date(s) : new Date(v);
-      if (d && !Number.isNaN(d.getTime())) return toLocalYmd(d);
-    } catch {}
-    return '';
-  }, [toLocalYmd]);
-
-  const isPlaceholderYmd = useCallback((ymd?: string | null): boolean => {
-    const s = String(ymd || '').slice(0, 10);
-    return !s || s === '1970-01-01' || s === '0001-01-01' || s === '1900-01-01';
-  }, []);
-
   const ordersColumns: GridColDef[] = useMemo(() => [
-    {
-      field: 'actions',
-      headerName: 'Actions',
-      width: 120,
-      sortable: false,
-      filterable: false,
-      renderCell: (params: any) => (
-        <Button size="small" variant="outlined" onClick={() => openDetailedEdit(params.row as OrdersRow)}>View</Button>
-      )
-    },
     { field: 'orderNumber', headerName: 'Order #', flex: 1, minWidth: 110 },
     {
       field: 'status',
@@ -3889,43 +3497,17 @@ export default function Orders() {
     { field: 'customerName', headerName: 'Customer Name', flex: 1, minWidth: 190, renderCell: (p: any) => String((p?.row as any)?.customerName || '-') },
     { field: 'lineCount', headerName: 'Lines', width: 80, type: 'number' },
     { field: 'totalQty', headerName: 'Qty', width: 80, type: 'number' },
+    {
+      field: 'actions',
+      headerName: 'Actions',
+      width: 120,
+      sortable: false,
+      filterable: false,
+      renderCell: (params: any) => (
+        <Button size="small" variant="outlined" onClick={() => openDetailedEdit(params.row as OrdersRow)}>View</Button>
+      )
+    },
   ], [warehouses]);
-
-  useEffect(() => {
-    try {
-      const dbg = (import.meta as any)?.env?.DEV || localStorage.getItem('DEBUG_ORDERS') === '1';
-      if (dbg && manualOpen) console.log('[ORDERS][modal] shipdate state', { manualEstFulfillment });
-    } catch {}
-  }, [manualOpen, manualEstFulfillment]);
-
-  // Safeguard: prevent unintended regression (earlier/empty) while modal is open and field not touched
-  const lastSafeShipdateRef = useRef<string>('');
-  useEffect(() => {
-    const laterOf = (a?: string, b?: string) => {
-      const A = String(a || '');
-      const B = String(b || '');
-      if (!A) return B;
-      if (!B) return A;
-      return new Date(A).getTime() >= new Date(B).getTime() ? A : B;
-    };
-    if (!manualOpen) {
-      lastSafeShipdateRef.current = '';
-      return;
-    }
-    const cur = String(manualEstFulfillment || '');
-    const prev = String(lastSafeShipdateRef.current || '');
-    const maxSoFar = laterOf(prev, cur);
-    // Update the high-water mark
-    if (maxSoFar !== prev) lastSafeShipdateRef.current = maxSoFar;
-    // If field regressed to earlier/empty without user touch, revert to last safe
-    if (!manualShipdateTouched && prev && (cur === '' || new Date(cur).getTime() < new Date(prev).getTime())) {
-      try {
-        const dbg = (import.meta as any)?.env?.DEV || localStorage.getItem('DEBUG_ORDERS') === '1';
-        if (dbg) console.log('[ORDERS][modal] revert regressed shipdate', { prev, cur });
-      } catch {}
-      setManualEstFulfillment(prev);
-    }
-  }, [manualOpen, manualEstFulfillment, manualShipdateTouched]);
 
   const filteredOrdersRows = useMemo(() => {
     const t = ordersQ.trim().toLowerCase();
