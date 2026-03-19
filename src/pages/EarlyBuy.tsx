@@ -109,6 +109,82 @@ export default function EarlyBuy() {
 
   const numberFmt2 = useMemo(() => new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }), []);
 
+  // Report (Early Buy only)
+  const [ebReportOpen, setEbReportOpen] = useState(false);
+  const [ebReportFrom, setEbReportFrom] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return d.toISOString().slice(0, 10);
+  });
+  const [ebReportTo, setEbReportTo] = useState(() => new Date().toISOString().slice(0, 10));
+  const [ebReportExporting, setEbReportExporting] = useState(false);
+
+  const exportEarlyBuyReportXlsx = useCallback(async () => {
+    const from = String(ebReportFrom || '').slice(0, 10);
+    const to = String(ebReportTo || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) {
+      toast?.error?.('Please select a valid date range');
+      return;
+    }
+    try {
+      setEbReportExporting(true);
+      // Filter in-memory Early Buy orders by createdAt
+      const inRange = (d: string) => {
+        const s = String(d || '').slice(0, 10);
+        if (!s) return false;
+        return (!from || s >= from) && (!to || s <= to);
+      };
+      const list = (Array.isArray(orders) ? orders : [])
+        .filter((o) => inRange(o.createdAt))
+        .filter((o) => String(o?.status || '').toLowerCase() !== 'canceled');
+      // Aggregate pallets ordered by group (and capture palletId and palletName where available)
+      type Agg = { groupKey: string; palletId: string; palletName: string; orderedPallets: number };
+      const map = new Map<string, Agg>();
+      for (const o of list) {
+        const linesArr = Array.isArray(o.lines) ? o.lines : [];
+        for (const l of linesArr) {
+          const gLower = String(l?.groupName || '').trim().toLowerCase();
+          if (!gLower) continue;
+          const prev = map.get(gLower) || { groupKey: gLower, palletId: String(l?.lineItem || ''), palletName: String(l?.palletName || ''), orderedPallets: 0 };
+          prev.orderedPallets += Math.max(0, Math.floor(Number((l as any)?.qty || 0)));
+          if (!prev.palletId) prev.palletId = String(l?.lineItem || '');
+          if (!prev.palletName) prev.palletName = String(l?.palletName || '');
+          map.set(gLower, prev);
+        }
+      }
+      const agg = Array.from(map.values()).sort((a, b) => b.orderedPallets - a.orderedPallets);
+
+      const rows: any[] = [];
+      rows.push(['Early Buy Pallet Orders Report']);
+      rows.push([`Date Range: ${from} to ${to}`]);
+      try { rows.push([`Exported At: ${new Date().toLocaleString()}`]); } catch { rows.push(['']); }
+      rows.push([]);
+      rows.push(['Top Ordered Pallets']);
+      rows.push(['Pallet ID', 'Pallet Name', 'Pallet Description', 'Pallets Ordered']);
+      const top = agg.slice(0, 20);
+      for (const r of top) {
+        rows.push([
+          r.palletId,
+          r.palletName,
+          String(palletDescByGroup?.[r.groupKey] || ''),
+          Number(r.orderedPallets || 0),
+        ]);
+      }
+      if (!top.length) rows.push(['', '', '', 0]);
+
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'EarlyBuy');
+      const safe = (v: any) => String(v ?? '').replace(/[\/\\:*?"<>|]/g, '-');
+      XLSX.writeFile(wb, `early_buy_pallet_orders_${safe(from)}_${safe(to)}.xlsx`);
+    } catch (e: any) {
+      const msg = e?.response?.data?.message || 'Failed to export report';
+      toast?.error?.(msg);
+    } finally {
+      setEbReportExporting(false);
+    }
+  }, [orders, ebReportFrom, ebReportTo, palletDescByGroup, toast]);
+
   // When user explicitly sets status to PROCESSING, suppress auto-promote briefly to allow edits
   const suppressPromoteUntilRef = useRef<number>(0);
 
@@ -1561,6 +1637,8 @@ export default function EarlyBuy() {
       <Paper sx={{ p: 2, mb: 2 }}>
         <Stack direction="row" spacing={1} alignItems="center">
           <Button variant="contained" onClick={() => { resetEarlyBuyForm(); setOpen(true); }}>Add Order</Button>
+          <Button variant="outlined" onClick={() => setEbReportOpen(true)}>Report</Button>
+          <Button variant="text" onClick={() => refreshOrders()}>Refresh List</Button>
         </Stack>
       </Paper>
 
@@ -1655,7 +1733,13 @@ export default function EarlyBuy() {
         </div>
       </Paper>
 
-      <Dialog open={open} onClose={() => { setOpen(false); resetEarlyBuyForm(); }} fullWidth maxWidth="lg">
+      <Dialog
+        open={open}
+        onClose={() => { setOpen(false); resetEarlyBuyForm(); }}
+        fullWidth
+        maxWidth="xl"
+        PaperProps={{ sx: { width: '90%', maxWidth: '90%' } }}
+      >
         <DialogTitle>{editingOrder ? `Edit Order - ${editingOrder.id}` : 'New Early Buy Order'}</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
@@ -1822,6 +1906,37 @@ export default function EarlyBuy() {
           <Button variant="outlined" onClick={exportEarlyBuyXlsx} disabled={!lines.length}>Export .xlsx</Button>
           <Button variant="outlined" onClick={exportEarlyBuyPdf} disabled={!lines.length}>Export .pdf</Button>
           <Button variant="contained" onClick={saveNewOrder}>Save</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={ebReportOpen} onClose={() => setEbReportOpen(false)} fullWidth maxWidth="sm">
+        <DialogTitle>Early Buy - Pallet Orders Report</DialogTitle>
+        <DialogContent>
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              type="date"
+              size="small"
+              label="From"
+              value={ebReportFrom}
+              onChange={(e) => setEbReportFrom(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
+            <TextField
+              type="date"
+              size="small"
+              label="To"
+              value={ebReportTo}
+              onChange={(e) => setEbReportTo(e.target.value)}
+              InputLabelProps={{ shrink: true }}
+              fullWidth
+            />
+          </Stack>
+          {ebReportExporting ? <LinearProgress sx={{ mt: 2 }} /> : null}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEbReportOpen(false)} disabled={ebReportExporting}>Close</Button>
+          <Button variant="outlined" onClick={exportEarlyBuyReportXlsx} disabled={ebReportExporting}>Export .xlsx</Button>
         </DialogActions>
       </Dialog>
 

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Container, TextField, Button, Typography, Box, Paper } from '@mui/material';
 import api from '../api';
+import bgImage from '../backgroundMPG.jpg';
 import { useNavigate } from 'react-router-dom';
 
 export default function Login() {
@@ -24,7 +25,7 @@ export default function Login() {
   return (
     <Box sx={{
       minHeight: '100vh',
-      backgroundImage: 'url(https://images.unsplash.com/photo-1459664018906-085c36f472af?q=80&w=1600&auto=format&fit=crop)',
+      backgroundImage: `url(${bgImage})`,
       backgroundSize: 'cover',
       backgroundPosition: 'center',
       display: 'flex',

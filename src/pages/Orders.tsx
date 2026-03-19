@@ -5075,7 +5075,7 @@ export default function Orders() {
             </Typography>
           ) : null}
 
-          <div style={{ height: 320, width: '100%' }}>
+          <div style={{ height: 480, width: '100%' }}>
             <DataGrid
               rows={manualOrderRows}
               columns={manualOrderColumns as any}
@@ -5102,7 +5102,7 @@ export default function Orders() {
               slotProps={{ toolbar: { showQuickFilter: true, quickFilterProps: { debounceMs: 250 } } as any }}
               pagination
               pageSizeOptions={[5, 10, 20, 50]}
-              initialState={{ pagination: { paginationModel: { page: 0, pageSize: 10 } } }}
+              initialState={{ pagination: { paginationModel: { page: 0, pageSize: 50 } } }}
             />
           </div>
 
