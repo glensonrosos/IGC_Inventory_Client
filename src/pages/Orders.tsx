@@ -2066,7 +2066,9 @@ export default function Orders() {
     const sub = Number(manualOrderSubTotal);
     const sp = Number(manualShippingPercent);
     const ship = Number.isFinite(sp) ? Math.min(100, Math.max(0, sp)) : 0;
-    const grand = Number.isFinite(sub) ? sub * (1 + ship / 100) : NaN;
+    // Match UI/server behavior: round subtotal to cents before applying shipping
+    const subRounded = Number.isFinite(sub) ? Number(Number(sub).toFixed(2)) : NaN;
+    const grand = Number.isFinite(subRounded) ? subRounded * (1 + ship / 100) : NaN;
 
     const pad = (n: number) => n.toString().padStart(2, '0');
     const d = new Date();
@@ -2409,7 +2411,9 @@ export default function Orders() {
     const sub = Number(manualOrderSubTotal);
     const sp = Number(manualShippingPercent);
     const ship = Number.isFinite(sp) ? Math.min(100, Math.max(0, sp)) : 0;
-    const grand = Number.isFinite(sub) ? sub * (1 + ship / 100) : NaN;
+    // Match UI/server behavior: round subtotal to cents before applying shipping
+    const subRounded = Number.isFinite(sub) ? Number(Number(sub).toFixed(2)) : NaN;
+    const grand = Number.isFinite(subRounded) ? subRounded * (1 + ship / 100) : NaN;
 
     const blue = '#DDEBF7';
     const green = '#E2EFDA';
@@ -2655,9 +2659,11 @@ export default function Orders() {
   const manualFinalPrice = useMemo(() => {
     const sub = Number(manualOrderSubTotal);
     if (!Number.isFinite(sub)) return '';
+    // Match table/server behavior: round subtotal to cents before applying shipping
+    const subRounded = Number(Number(sub).toFixed(2));
     const sp = Number(manualShippingPercent);
     const ship = Number.isFinite(sp) ? Math.min(100, Math.max(0, sp)) : 0;
-    const out = sub * (1 + ship / 100);
+    const out = subRounded * (1 + ship / 100);
     if (!Number.isFinite(out)) return '';
     return out.toFixed(2);
   }, [manualOrderSubTotal, manualShippingPercent]);
@@ -3877,7 +3883,9 @@ export default function Orders() {
         const sp = Number(row?.shippingPercent);
         if (Number.isFinite(op)) {
           const ship = Number.isFinite(sp) ? Math.min(100, Math.max(0, sp)) : 0;
-          const calc = op * (1 + ship / 100);
+          // Match modal/server behavior: round subtotal to cents before applying shipping
+          const opRounded = Number(Number(op).toFixed(2));
+          const calc = opRounded * (1 + ship / 100);
           if (Number.isFinite(calc)) {
             return calc.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
           }
