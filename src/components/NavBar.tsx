@@ -8,7 +8,17 @@ const LinkButton = ({ to, label }: { to: string; label: string }) => {
   const loc = useLocation();
   const active = loc.pathname === to;
   return (
-    <Button component={Link} to={to} color={active ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: active ? 1 : 0.85 }}>
+    <Button
+      component={Link}
+      to={to}
+      color={active ? 'inherit' : 'secondary'}
+      sx={{
+        color: '#fff',
+        opacity: active ? 1 : 0.85,
+        borderRadius: 1.5,
+        ...(active ? { backgroundColor: 'warning.main', '&:hover': { backgroundColor: 'warning.dark' } } : {}),
+      }}
+    >
       {label}
     </Button>
   );
@@ -160,22 +170,70 @@ export default function NavBar() {
         <Stack direction="row" spacing={1} alignItems="center">
           {/* Orders and Early Buy first */}
           <Badge color="error" badgeContent={(ordersDueToday || 0) + (ordersDeliveredDue || 0)} max={99} overlap="circular">
-            <Button component={Link} to="/orders" color={loc.pathname === '/orders' ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: loc.pathname === '/orders' ? 1 : 0.85 }}>Orders</Button>
+            <Button
+              component={Link}
+              to="/orders"
+              color={loc.pathname === '/orders' ? 'inherit' : 'secondary'}
+              sx={{
+                color: '#fff',
+                opacity: loc.pathname === '/orders' ? 1 : 0.85,
+                borderRadius: 1.5,
+                ...(loc.pathname === '/orders' ? { backgroundColor: 'warning.main', '&:hover': { backgroundColor: 'warning.dark' } } : {}),
+              }}
+            >
+              Orders
+            </Button>
           </Badge>
           <Badge color="error" badgeContent={earlyReadyCount} max={99} overlap="circular">
-            <Button component={Link} to="/early-buy" color={loc.pathname === '/early-buy' ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: loc.pathname === '/early-buy' ? 1 : 0.85 }}>Early Buy</Button>
+            <Button
+              component={Link}
+              to="/early-buy"
+              color={loc.pathname === '/early-buy' ? 'inherit' : 'secondary'}
+              sx={{
+                color: '#fff',
+                opacity: loc.pathname === '/early-buy' ? 1 : 0.85,
+                borderRadius: 1.5,
+                ...(loc.pathname === '/early-buy' ? { backgroundColor: 'warning.main', '&:hover': { backgroundColor: 'warning.dark' } } : {}),
+              }}
+            >
+              Early Buy
+            </Button>
           </Badge>
           <Typography component="span" sx={{ color: 'rgba(255,255,255,0.7)', mx: 2, userSelect: 'none' }}>|</Typography>
           {/* Remaining links */}
           <LinkButton to="/pallets" label="PALLETS SUMMARY" />
           <LinkButton to="/inventory" label="Inventory" />
           <Badge color="error" badgeContent={onProcessDue} max={99} overlap="circular">
-            <Button component={Link} to="/on-process" color={loc.pathname === '/on-process' ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: loc.pathname === '/on-process' ? 1 : 0.85 }}>On-Process</Button>
+            <Button
+              component={Link}
+              to="/on-process"
+              color={loc.pathname === '/on-process' ? 'inherit' : 'secondary'}
+              sx={{
+                color: '#fff',
+                opacity: loc.pathname === '/on-process' ? 1 : 0.85,
+                borderRadius: 1.5,
+                ...(loc.pathname === '/on-process' ? { backgroundColor: 'warning.main', '&:hover': { backgroundColor: 'warning.dark' } } : {}),
+              }}
+            >
+              On-Process
+            </Button>
           </Badge>
           <LinkButton to="/transfer" label="Transfer" />
           {/* Ship link with notifications badge */}
           <Badge color="error" badgeContent={due} max={99} overlap="circular">
-            <Button component={Link} to="/ship" color={loc.pathname === '/ship' ? 'inherit' : 'secondary'} sx={{ color: '#fff', opacity: loc.pathname === '/ship' ? 1 : 0.85 }}>Ship</Button>
+            <Button
+              component={Link}
+              to="/ship"
+              color={loc.pathname === '/ship' ? 'inherit' : 'secondary'}
+              sx={{
+                color: '#fff',
+                opacity: loc.pathname === '/ship' ? 1 : 0.85,
+                borderRadius: 1.5,
+                ...(loc.pathname === '/ship' ? { backgroundColor: 'warning.main', '&:hover': { backgroundColor: 'warning.dark' } } : {}),
+              }}
+            >
+              Ship
+            </Button>
           </Badge>
           <Typography component="span" sx={{ color: 'rgba(255,255,255,0.7)', mx: 2, userSelect: 'none' }}>|</Typography>
           <LinkButton to="/warehouses" label="Warehouses" />
