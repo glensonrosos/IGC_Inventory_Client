@@ -6,12 +6,14 @@ import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
 import XLSX from 'xlsx-js-style';
+import ExcelJS from 'exceljs';
 import { DataGrid, GridColDef, GridToolbar } from '@mui/x-data-grid';
 import api from '../api';
 import { useToast } from '../components/ToastProvider';
 import { formatDateTimeUS } from '../utils/datetime';
 import pdfMake from 'pdfmake/build/pdfmake';
 import pdfFonts from 'pdfmake/build/vfs_fonts';
+import { Height } from '@mui/icons-material';
 // Support different export shapes between CJS/ESM bundles
 try {
   const anyFonts: any = pdfFonts as any;
@@ -52,6 +54,7 @@ type OrdersRow = {
   estDeliveredDate?: string;
   notes?: string;
   source?: string;
+  paymentTerms?: string;
 };
 
 export default function Orders() {
@@ -94,6 +97,7 @@ export default function Orders() {
   const [manualEstDelivered, setManualEstDelivered] = useState('');
   const [manualShippingAddress, setManualShippingAddress] = useState('');
   const [manualNotes, setManualNotes] = useState('');
+  const [manualPaymentTerms, setManualPaymentTerms] = useState('');
   const [manualOriginalPrice, setManualOriginalPrice] = useState('');
   const [manualShippingPercent, setManualShippingPercent] = useState('');
   const [manualDiscountPercent, setManualDiscountPercent] = useState('');
@@ -674,6 +678,7 @@ export default function Orders() {
     // Mark as touched only if we already have a server value; otherwise allow recompute to run
     setManualShipdateTouched(Boolean(initShip));
     setManualShippingAddress(String(row?.shippingAddress || '').trim());
+    setManualPaymentTerms(String((row as any)?.paymentTerms || '').trim());
     setManualNotes(String((row as any)?.notes || '').trim());
     setManualOriginalPrice(String((row as any)?.originalPrice ?? '').trim());
     setManualShippingPercent(String((row as any)?.shippingPercent ?? '').trim());
@@ -2061,51 +2066,52 @@ export default function Orders() {
   const exportManualOrderXlsx = useCallback(async () => {
     if (manualMode !== 'edit' || !manualEditRow) return;
     const orderNumber = String(manualEditRow?.orderNumber || manualEditRow?.rawId || manualEditRow?.id || '').trim();
-    const sStatus = normalizeStatus(manualStatus || '');
+    const sStatus = String(normalizeStatus(manualStatus || '') || '').toUpperCase();
 
     const sub = Number(manualOrderSubTotal);
     const sp = Number(manualShippingPercent);
     const ship = Number.isFinite(sp) ? Math.min(100, Math.max(0, sp)) : 0;
-    // Match UI/server behavior: round subtotal to cents before applying shipping
     const subRounded = Number.isFinite(sub) ? Number(Number(sub).toFixed(2)) : NaN;
-    const grand = Number.isFinite(subRounded) ? subRounded * (1 + ship / 100) : NaN;
+    const grand = Number.isFinite(subRounded) ? Number((subRounded * (1 + ship / 100)).toFixed(2)) : NaN;
 
     const pad = (n: number) => n.toString().padStart(2, '0');
     const d = new Date();
     const ts = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
-
-    const safe = (v: any) => String(v ?? '').replace(/[/\\:*?"<>|]/g, '-');
+    const safe = (v: any) => String(v ?? '').replace(/[\/\\:*?"<>|]/g, '-');
     const fname = `order-details-${safe(orderNumber || 'order')}-(${safe(sStatus || 'status')})-(${ts}).xlsx`;
 
-    const rows: any[] = [];
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Order Details');
+    ws.properties.defaultRowHeight = 18;
+    // Define only widths (no headers) so row 1 is empty for our custom header
+    ws.columns = [
+      { width: 28 },
+      { width: 28 },
+      { width: 34 },
+      { width: 20 },
+      { width: 16 },
+      { width: 18 },
+    ];
 
-    // Header block (A1..E1 and A2..E2)
-    // A1: ORDER NUMBER value, B1: 'To:', C1: [CUSTOMER NAME], D1: 'Phone:', E1: [PHONE NUMBER]
-    rows.push([orderNumber, 'To:', manualCustomerName, 'Phone:', manualCustomerPhone]);
-    // A2: empty, B2: 'Address:', C2: [SHIPPING ADDRESS], D2: 'Email:', E2: [EMAIL ADDRESS]
-    rows.push(['', 'Address:', manualShippingAddress, 'Email:', manualCustomerEmail]);
+    const bold = { bold: true } as const;
+    const gray = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFD3D3D3' } } as const;
+    const right = { horizontal: 'right' } as const;
 
-    rows.push([]);
-    rows.push(['Status:', (sStatus || '').toUpperCase()]);
-    rows.push(['Estimated Shipdate for Customer:', manualEstFulfillment]);
-    rows.push(['Estimated Arrival Date:', manualEstDelivered]);
-
-    // Helper: resolve pallet metadata and items for a group
+    // Helper: resolve pallet metadata and items for a group (reuse existing logic)
     const pickerRows = Array.isArray(manualPickerRows) ? manualPickerRows : [];
+    // Note: PDF export has its own column widths; see exportManualOrderPdf
     const getPalletMeta = (g: string) => {
-      const byMap = manualPickerRowByGroup?.get ? manualPickerRowByGroup.get(g) : null;
+      const byMap = (manualPickerRowByGroup as any)?.get ? (manualPickerRowByGroup as any).get(g) : null;
       const gLower = g.toLowerCase();
       const hit = pickerRows.find((p: any) => String(p?.groupName || '').trim().toLowerCase() === gLower);
       const palletId = String(byMap?.lineItem || hit?.lineItem || '').trim();
       const palletName = String(byMap?.palletName || hit?.palletName || palletNameByGroup?.[gLower] || '').trim();
       return { palletId, palletName };
     };
-
     const itemsCache = new Map<string, any[]>();
     const getGroupItems = async (g: string) => {
       const k = g.toLowerCase();
       if (itemsCache.has(k)) return itemsCache.get(k)!;
-      // Prefer snapshots: in-memory -> saved order lines -> localStorage -> API
       const snap = (manualItemsByGroup as any)?.[k];
       if (Array.isArray(snap) && snap.length) { itemsCache.set(k, snap); return snap; }
       try {
@@ -2115,18 +2121,6 @@ export default function Orders() {
           const list = (hit as any).itemsAtAdd as any[];
           itemsCache.set(k, list);
           return list;
-        }
-      } catch {}
-      try {
-        const orderKey = String((manualEditRow as any)?.rawId || (manualEditRow as any)?.id || '').trim();
-        if (orderKey) {
-          const cacheKey = `orderLineSnapshots:${orderKey}`;
-          const cached = localStorage.getItem(cacheKey);
-          if (cached) {
-            const parsed = JSON.parse(cached);
-            const list = parsed && parsed.items ? (parsed.items[k] || parsed.items[g]) : null;
-            if (Array.isArray(list) && list.length) { itemsCache.set(k, list); return list; }
-          }
         }
       } catch {}
       try {
@@ -2140,241 +2134,205 @@ export default function Orders() {
       }
     };
 
-    // Per-line pallet blocks (do not merge duplicates so per-line discounts/qty are preserved)
+    // Helpers to fetch public images and convert to base64 (raw, no data URI)
+    const fetchBase64 = async (url: string) => {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
+      const ctype = String(res.headers.get('content-type') || '').toLowerCase();
+      if (!ctype.includes('image/')) throw new Error(`Not an image: ${url} (${ctype})`);
+      const buf = await res.arrayBuffer();
+      let binary = '';
+      const bytes = new Uint8Array(buf);
+      for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+      return btoa(binary);
+    };
+    const fetchImageBase64 = async (paths: string[]) => {
+      let lastErr: any = null;
+      for (const p of paths) {
+        try { return await fetchBase64(p); } catch (e) { lastErr = e; }
+      }
+      throw lastErr || new Error('No valid image path');
+    };
+
+    // Header (logo and contact info)
+    ws.mergeCells('A1:A4');
+    ws.getCell('A1').value = null; // ensure merged block has no stray value
+    // Target size for merged A1:A4: width 2.3in (~221px), height 1.0in (~72pt tall)
+    // Column width is in characters; map ~ (px/7)-5. 2.3in ~ 221px => ~26 chars
+    try { ws.getColumn(1).width = 26; } catch {}
+    // Distribute total height across rows 1-4 to exactly ~1.0in total (72pt)
+    try {
+      ws.getRow(1).height = 18;
+      ws.getRow(2).height = 18;
+      ws.getRow(3).height = 18;
+      ws.getRow(4).height = 18;
+    } catch {}
+    // Add all borders around merged A1:A4 (logo area)
+    try { (ws.getCell('A1') as any).border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } }; } catch {}
+    try {
+      const base64Logo = await fetchImageBase64(['/logo.png','/company-logo.png','/company-logo.jpg','/logo.jpg']);
+      const imgId = wb.addImage({ base64: base64Logo, extension: 'png' });
+      // Place image sized to requested area (2.3in x 1.0in) ~ (221px x 96px)
+      ws.addImage(imgId, { tl: { col: 0, row: 0 }, ext: { width: 221, height: 96 } });
+    } catch {}
+    const lightGreen = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFCCFFCC' } } as const;
+    const lightBlue = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDDEBF7' } } as const;
+    const lightGrey = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } } as const;
+    const darkerGrey = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFBFBFBF' } } as const;
+
+    ws.getCell('B1').value = 'Phone:'; ws.getCell('B1').font = bold; (ws.getCell('B1') as any).fill = lightGreen;
+    ws.getCell('C1').value = '+1 470-812-0762';
+    ws.getCell('D1').value = 'Contact Email:'; ws.getCell('D1').font = bold; (ws.getCell('D1') as any).fill = lightGreen;
+    ws.getCell('E1').value = 'brandon@mpgwholesale.com';
+    ws.getCell('B2').value = 'Location:'; ws.getCell('B2').font = bold; (ws.getCell('B2') as any).fill = lightGreen;
+    ws.getCell('C2').value = '145 Industrial Drive, Thomson, GA 30824';
+    ws.getCell('D2').value = 'Website:'; ws.getCell('D2').font = bold; (ws.getCell('D2') as any).fill = lightGreen;
+    ws.getCell('E2').value = 'www.mpgwholesale.com';
+
+    // Order Information
+    ws.getCell('A5').value = orderNumber || (manualEditRow as any)?.rawId || '';
+    ws.getCell('A5').font = bold; (ws.getCell('A5') as any).fill = lightBlue; (ws.getCell('A5') as any).border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } } as any;
+    ws.getCell('B5').value = 'To:'; ws.getCell('B5').font = bold; (ws.getCell('B5') as any).fill = lightBlue;
+    ws.getCell('C5').value = String(manualCustomerName || '');
+    ws.getCell('D5').value = 'Phone:'; ws.getCell('D5').font = bold; (ws.getCell('D5') as any).fill = lightBlue;
+    ws.getCell('E5').value = String(manualCustomerPhone || '');
+    ws.getCell('B6').value = 'Address:'; ws.getCell('B6').font = bold; (ws.getCell('B6') as any).fill = lightBlue;
+    ws.getCell('C6').value = String(manualShippingAddress || '');
+    ws.getCell('D6').value = 'Email:'; ws.getCell('D6').font = bold; (ws.getCell('D6') as any).fill = lightBlue;
+    ws.getCell('E6').value = String(manualCustomerEmail || '');
+
+    // Borders for C5, C6, E5, E6
+    const thinBorder = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } } as const;
+    ws.getCell('C5').border = thinBorder as any;
+    ws.getCell('C6').border = thinBorder as any;
+    ws.getCell('E5').border = thinBorder as any;
+    ws.getCell('E6').border = thinBorder as any;
+    // Additional borders per spec
+    ;(['B1','C1','D1','E1','B2','C2','D2','E2','B5','B6','D5','D6'] as const).forEach((addr) => {
+      (ws.getCell(addr) as any).border = thinBorder as any;
+    });
+    ws.getCell('A8').value = 'Status:'; ws.getCell('A8').font = bold; (ws.getCell('A8') as any).fill = lightBlue; (ws.getCell('A8') as any).border = thinBorder as any; ws.getCell('B8').value = sStatus; ws.getCell('B8').font = bold; (ws.getCell('B8') as any).border = thinBorder as any;
+    ws.getCell('A9').value = 'Estimated Shipdate for Customer:'; ws.getCell('A9').font = bold; (ws.getCell('A9') as any).fill = lightBlue; (ws.getCell('A9') as any).border = thinBorder as any; ws.getCell('B9').value = String(manualEstFulfillment || ''); ws.getCell('B9').font = bold; (ws.getCell('B9') as any).border = thinBorder as any;
+    ws.getCell('A10').value = 'Estimated Arrival Date:'; ws.getCell('A10').font = bold; (ws.getCell('A10') as any).fill = lightBlue; (ws.getCell('A10') as any).border = thinBorder as any; ws.getCell('B10').value = String(manualEstDelivered || ''); ws.getCell('B10').font = bold; (ws.getCell('B10') as any).border = thinBorder as any;
+
+    // Dynamic Pallet Logic: group by pallet and print details once; add one summary per duplicate line
+    let currentRow = 12;
+    // Return numeric value for currency cells; formatting applies $ via numFmt
+    const encodeMoney = (n: any) => (Number.isFinite(Number(n)) ? Number(n) : '');
     const rowsList = Array.isArray(manualOrderRows) ? manualOrderRows : [];
-    const printedGroups = new Set<string>();
-    let prevGroup: string | null = null;
+    const groups = new Map<string, any[]>();
     for (const r of rowsList as any[]) {
       const g = String(r?.groupName || '').trim();
       if (!g) continue;
-      if (prevGroup && prevGroup !== g) {
-        // separator between different pallet groups
-        rows.push([]);
-      }
-      const rowId = String((r as any)?.id || '').trim();
-      const qtyText = (manualOrderQtyByGroup as any)?.[rowId] ?? (manualOrderQtyByGroup as any)?.[g] ?? (r as any)?.orderQty ?? (r as any)?.qty;
-      const qtyNum = Number(qtyText);
-      const qty = Number.isFinite(qtyNum) ? Math.floor(qtyNum) : NaN;
-      const discount = Math.min(100, Math.max(0, Number((r as any)?.discountPercent ?? 0)));
-      const gLower = g.toLowerCase();
-      const unitSnap = (manualUnitPriceByGroup as any)?.[gLower];
-      const unit = Number.isFinite(Number(unitSnap)) ? Number(unitSnap) : Number((r as any)?.unitPrice ?? (groupPriceByName as any)?.[gLower] ?? 0);
-      const discounted = Number.isFinite(unit) ? unit * (1 - discount / 100) : NaN;
-      const lineSub = (Number.isFinite(discounted) && Number.isFinite(qty)) ? discounted * qty : NaN;
+      const key = g.toLowerCase();
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(r);
+    }
 
+    for (const [key, groupRows] of Array.from(groups.entries())) {
+      const g = String(groupRows[0]?.groupName || '').trim();
       const { palletId, palletName } = getPalletMeta(g);
-      const palletDesc = String(palletDescByGroup?.[g.toLowerCase()] || g || '').trim();
-      if (!printedGroups.has(g)) {
-        // First occurrence of this group: print meta and items list once
-        rows.push([palletName, palletDesc, palletId, '', '', '']);
-        const items = await getGroupItems(g);
-        if (items.length) {
-          for (const it of items) {
-            const code = String((it as any)?.itemCode || '');
-            const desc = String((it as any)?.description || '');
-            const upc = String((it as any)?.upc || '');
-            const pack = (it as any)?.packSize;
-            const price = Number((it as any)?.price);
-            rows.push([
-              '',
-              code,
-              desc,
-              upc,
-              Number.isFinite(Number(pack)) ? Number(pack) : '',
-              Number.isFinite(price) ? price : '',
-            ]);
-          }
-        } else {
-          // No items available; still output a placeholder row with pallet meta
-          rows.push([palletName, palletDesc, palletId, '', '', '']);
-        }
-        printedGroups.add(g);
+      const palletDesc = String(palletDescByGroup?.[key] || g || '').trim();
+
+      // Header for this pallet (once)
+      ws.getRow(currentRow).values = [palletName, palletDesc, `Pallet ID: ${palletId || '-'}`, 'UPC', 'Qty', 'Price'];
+      for (let c = 1; c <= 6; c++) { const cell = ws.getRow(currentRow).getCell(c); cell.font = bold; cell.fill = lightGreen; cell.border = thinBorder as any; }
+
+      // Items (once)
+      const items = await getGroupItems(g);
+      for (const it of items) {
+        currentRow += 1;
+        ws.getRow(currentRow).values = [
+          '',
+          String((it as any)?.itemCode || ''),
+          String((it as any)?.description || (it as any)?.name || ''),
+          String((it as any)?.upc || ''),
+          String((it as any)?.packSize || ''),
+          encodeMoney((it as any)?.price),
+        ];
+        for (let c = 1; c <= 6; c++) { const cell = ws.getRow(currentRow).getCell(c); cell.fill = lightGrey; cell.border = thinBorder as any; }
+        ws.getRow(currentRow).getCell(6).numFmt = '"$"#,##0.00';
+        ws.getRow(currentRow).getCell(6).alignment = { horizontal: 'right' } as any;
       }
 
-      // Summary for this pallet line in one row per spec
-      rows.push([
-        `PALLET PRICE: ${Number.isFinite(unit) ? `$${unit.toFixed(2)}` : ''}`,
-        `DISCOUNT: ${Number.isFinite(Number(discount)) ? `${discount}%` : ''}`,
-        `DISCOUNTED PRICE: ${Number.isFinite(discounted) ? `$${discounted.toFixed(2)}` : ''}`,
-        `QUANTITY: ${Number.isFinite(qty) ? qty : ''}`,
-        'SUB TOTAL',
-        Number.isFinite(lineSub) ? lineSub : '',
-      ]);
-      prevGroup = g;
+      // One summary row per ordered line in this group
+      for (const r of groupRows) {
+        const unitBase = Number((manualUnitPriceByGroup as any)?.[key] ?? (r as any)?.unitPrice ?? 0);
+        const disc = Math.min(100, Math.max(0, Number((r as any)?.discountPercent ?? 0)));
+        const unitDiscounted = Number.isFinite(unitBase) ? unitBase * (1 - disc / 100) : NaN;
+        const rowId = String((r as any)?.id || '').trim();
+        const qtyText = (manualOrderQtyByGroup as any)?.[rowId] ?? (manualOrderQtyByGroup as any)?.[g] ?? (r as any)?.orderQty ?? (r as any)?.qty;
+        const qtyNum = Number(qtyText);
+        const qty = Number.isFinite(qtyNum) ? Math.floor(qtyNum) : 0;
+        const lineSub = (Number.isFinite(unitDiscounted) && Number.isFinite(qty)) ? unitDiscounted * qty : NaN;
+
+        currentRow += 1;
+        ws.getRow(currentRow).values = [
+          `PALLET PRICE: ${Number.isFinite(unitBase) ? `$${unitBase.toFixed(2)}` : ''}`,
+          `DISCOUNT: ${Number.isFinite(disc) ? `${disc}%` : ''}`,
+          `DISCOUNTED PRICE: ${Number.isFinite(unitDiscounted) ? `$${unitDiscounted.toFixed(2)}` : ''}`,
+          `QUANTITY: ${Number.isFinite(qty) ? qty : ''}`,
+          'SUB TOTAL',
+          encodeMoney(lineSub),
+        ];
+        for (let c = 1; c <= 6; c++) { const cell = ws.getRow(currentRow).getCell(c); cell.font = bold; cell.fill = darkerGrey; cell.border = thinBorder as any; }
+        ws.getRow(currentRow).getCell(6).numFmt = '"$"#,##0.00'; ws.getRow(currentRow).getCell(6).alignment = right;
+      }
+
+      // Spacer before next pallet group
+      currentRow += 2;
     }
 
-    rows.push([]);
-    rows.push(['SUB TOTAL', Number.isFinite(sub) ? sub : '']);
-    rows.push(['SHIPPING', Number.isFinite(sp) ? `${sp}%` : '']);
-    rows.push(['GRAND TOTAL', Number.isFinite(grand) ? grand : '']);
+    // Extra space before Totals/Footer
+    currentRow += 1;
+    // Totals and Footer
+    ws.getCell(`A${currentRow}`).value = 'SUB TOTAL'; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any; ws.getCell(`B${currentRow}`).value = Number.isFinite(subRounded) ? subRounded : ''; ws.getCell(`B${currentRow}`).numFmt = '"$"#,##0.00'; ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
+    currentRow += 1;
+    ws.getCell(`A${currentRow}`).value = 'SHIPPING'; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any; ws.getCell(`B${currentRow}`).value = Number.isFinite(sp) ? `${sp}%` : ''; ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
+    currentRow += 1;
+    ws.getCell(`A${currentRow}`).value = 'GRAND TOTAL'; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any; ws.getCell(`B${currentRow}`).value = Number.isFinite(grand) ? grand : ''; ws.getCell(`B${currentRow}`).numFmt = '"$"#,##0.00'; ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
+    currentRow += 1;
+    ws.getCell(`A${currentRow}`).value = 'PAYMENT TERMS'; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any; ws.getCell(`B${currentRow}`).value = String(manualPaymentTerms || ''); ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
+    const totalsEndRow = currentRow;
 
-    const ws = XLSX.utils.aoa_to_sheet(rows);
+    // Confirmation text: 2 rows below totals, merged D:F and the row below it; wrap + centered
+    currentRow += 2;
+    const confirmRow = currentRow;
+    const confirmMerge = `D${confirmRow}:F${confirmRow + 1}`;
+    ws.mergeCells(confirmMerge);
+    ws.getCell(`D${confirmRow}`).value = 'I hereby confirm the order and agree to the payment terms stated in this Proforma Invoice';
+    ws.getCell(`D${confirmRow}`).alignment = { wrapText: true, horizontal: 'center', vertical: 'middle' } as any;
+    // Give the confirmation block a little height
+    try { ws.getRow(confirmRow).height = 28; ws.getRow(confirmRow + 1).height = 22; } catch {}
 
-    // Column widths for readability
-    (ws as any)['!cols'] = [
-      { wch: 22 }, // A
-      { wch: 18 }, // B
-      { wch: 28 }, // C
-      { wch: 16 }, // D
-      { wch: 14 }, // E
-      { wch: 16 }, // F
-    ];
+    // Signature: ~7 rows below totals, column E with top border
+    currentRow = totalsEndRow + 7;
+    const signatureRow = currentRow;
+    ws.getCell(`E${currentRow}`).value = "Customer's Signature";
+    ws.getCell(`E${currentRow}`).border = { top: { style: 'thin' } } as any;
+    ws.getCell(`E${currentRow}`).alignment = { horizontal: 'center' } as any;
 
-    const enc = XLSX.utils.encode_cell;
-    const get = (r: number, c: number) => (ws as any)[enc({ r, c })];
-    const ensure = (r: number, c: number) => {
-      const addr = enc({ r, c });
-      (ws as any)[addr] = (ws as any)[addr] || { t: 's', v: '' };
-      return (ws as any)[addr];
-    };
-    const style = (r: number, c: number, s: any) => {
-      const cell = ensure(r, c);
-      cell.s = { ...(cell.s || {}), ...(s || {}) };
-    };
-    const fill = (rgb: string) => ({ fill: { patternType: 'solid', fgColor: { rgb } } });
-    const bold = { font: { bold: true } };
-    const border = {
-      border: {
-        top: { style: 'thin', color: { rgb: 'FFCCCCCC' } },
-        bottom: { style: 'thin', color: { rgb: 'FFCCCCCC' } },
-        left: { style: 'thin', color: { rgb: 'FFCCCCCC' } },
-        right: { style: 'thin', color: { rgb: 'FFCCCCCC' } },
-      },
-    } as any;
+    // Social media section at the very bottom: place text exactly 7 rows below the signature
+    currentRow = signatureRow + 7;
+    ws.getCell(`D${currentRow}`).value = 'Follow us on social media !';
+    (ws.getCell(`D${currentRow}`) as any).alignment = { horizontal: 'right' } as any;
+    try {
+      const base64Fb = await fetchImageBase64(['/facebook-qr.png','/facebook-qrcode.png']);
+      const base64Ig = await fetchImageBase64(['/instagram-qr.png','/instagram-qrcode.png']);
+      const idFb = wb.addImage({ base64: base64Fb, extension: 'png' });
+      const idIg = wb.addImage({ base64: base64Ig, extension: 'png' });
+      // Place images on the next row, right-side under D, smaller size
+      const imgRow = currentRow + 1;
+      ws.addImage(idFb, { tl: { col: 4.8, row: imgRow }, ext: { width: 70, height: 70 } });
+      ws.addImage(idIg, { tl: { col: 5.5, row: imgRow }, ext: { width: 70, height: 70 } });
+    } catch {}
 
-    // Header rows (0-based indexing): rows 0 and 1
-    for (let c = 0; c <= 4; c++) {
-      style(0, c, { ...bold });
-      style(1, c, {});
-    }
-    // Make order number a bit larger and underlined bottom
-    style(0, 0, { font: { bold: true, sz: 12 }, border: { bottom: { style: 'thin', color: { rgb: 'FFAAAAAA' } } } });
-    // Emphasize labels in row 0 col 1 and 3, row 1 col 1 and 3
-    style(0, 1, { ...bold });
-    style(0, 3, { ...bold });
-    style(1, 1, { ...bold });
-    style(1, 3, { ...bold });
-    // Apply same light-blue highlight as totals to ORDER# (A1), To (B1), Address (B2), Phone (D1), Email (D2)
-    const blue = fill('FFDDEBF7');
-    style(0, 0, { ...blue, ...border }); // ORDER# value cell highlighted
-    style(0, 1, { ...blue, ...border }); // To:
-    style(1, 1, { ...blue, ...border }); // Address:
-    style(0, 3, { ...blue, ...border }); // Phone:
-    style(1, 3, { ...blue, ...border }); // Email:
-
-    // Status and date labels (rows 3..5 in column A)
-    style(3, 0, { ...bold });
-    style(4, 0, { ...bold });
-    style(5, 0, { ...bold });
-
-    // Detect and style pallet meta rows and summary rows; also zebra-strip item rows and group borders
-    const rowCount = rows.length;
-    let groupStart: number | null = null;
-    let inItems = false;
-    let zebra = false;
-    for (let r = 0; r < rowCount; r++) {
-      const a = get(r, 0)?.v;
-      const b = get(r, 1)?.v;
-      const c = get(r, 2)?.v;
-      const d = get(r, 3)?.v;
-      const e = get(r, 4)?.v;
-      const f = get(r, 5)?.v;
-      const aStr = typeof a === 'string' ? a : '';
-
-      // Pallet meta row heuristic: A,B,C non-empty and D,E,F empty
-      if (a && b && c && !d && !e && !f) {
-        // Close previous group box if any
-        if (groupStart !== null && groupStart < r) {
-          for (let rr = groupStart; rr < r; rr++) {
-            for (let cc = 0; cc <= 5; cc++) style(rr, cc, { ...border });
-          }
-        }
-        groupStart = r;
-        inItems = true;
-        zebra = false;
-        for (let col = 0; col <= 5; col++) style(r, col, { ...fill('FFE2EFDA'), ...border }); // light green meta
-        continue;
-      }
-
-      // Summary row starts with 'PALLET PRICE:'
-      if (aStr && aStr.toUpperCase().startsWith('PALLET PRICE')) {
-        for (let col = 0; col <= 5; col++) style(r, col, { ...fill('FFF2F2F2'), ...border }); // light grey
-        style(r, 0, { ...bold });
-        style(r, 1, { ...bold });
-        style(r, 2, { ...bold });
-        style(r, 3, { ...bold });
-        style(r, 4, { ...bold, ...blue }); // highlight per-pallet SUB TOTAL label
-        style(r, 5, { ...blue, alignment: { horizontal: 'right' }, numFmt: '"$"#,##0.00' }); // highlight value
-        // Close current group box at summary row (inclusive)
-        if (groupStart !== null) {
-          for (let rr = groupStart; rr <= r; rr++) {
-            for (let cc = 0; cc <= 5; cc++) style(rr, cc, { ...border });
-          }
-          groupStart = null;
-        }
-        inItems = false;
-        continue;
-      }
-
-      // Item rows: A empty and any of B-F non-empty
-      const isItem = !a && (b || c || d || e || f);
-      if (inItems && isItem) {
-        zebra = !zebra;
-        if (zebra) {
-          for (let col = 0; col <= 5; col++) style(r, col, { ...fill('FFF9F9F9') }); // very light stripe
-        }
-      }
-    }
-    // Ensure final group box closes if file ended without explicit summary (edge case)
-    if (groupStart !== null) {
-      for (let rr = groupStart; rr < rowCount; rr++) {
-        for (let cc = 0; cc <= 5; cc++) style(rr, cc, { ...border });
-      }
-    }
-
-    // Totals section: find labeled rows (SUB TOTAL, SHIPPING, GRAND TOTAL)
-    let totalsStart = -1;
-    let totalsEnd = -1;
-    for (let r = rowCount - 1; r >= 0 && r >= rowCount - 10; r--) {
-      const a = get(r, 0)?.v;
-      const aStr = typeof a === 'string' ? a.toUpperCase() : '';
-      if (aStr === 'GRAND TOTAL' && totalsEnd === -1) totalsEnd = r;
-      if (aStr === 'SUB TOTAL') totalsStart = r;
-      if (aStr === 'SUB TOTAL' || aStr === 'SHIPPING' || aStr === 'GRAND TOTAL') {
-        style(r, 0, { ...bold, ...fill('FFDDEBF7'), ...border }); // light blue label
-        style(r, 1, { ...border });
-      }
-    }
-    if (totalsStart !== -1 && totalsEnd !== -1 && totalsEnd >= totalsStart) {
-      // Apply thin border around the entire totals block A..F
-      for (let r = totalsStart; r <= totalsEnd; r++) {
-        for (let c = 0; c <= 5; c++) {
-          style(r, c, { ...border });
-        }
-      }
-      // Emphasize GRAND TOTAL value (row totalsEnd assumed to be GRAND TOTAL or below it)
-      style(totalsEnd, 1, { font: { bold: true, sz: 12 } });
-      // Apply currency numFmt to SUB TOTAL and GRAND TOTAL values in column B
-      for (let r = totalsStart; r <= totalsEnd; r++) {
-        const a = get(r, 0)?.v;
-        const aStr = typeof a === 'string' ? a.toUpperCase() : '';
-        if (aStr === 'SUB TOTAL' || aStr === 'GRAND TOTAL') {
-          style(r, 1, { alignment: { horizontal: 'right' }, numFmt: '"$"#,##0.00' });
-        }
-      }
-    }
-
-    // Align numeric columns and set basic number formats
-    for (let r = 0; r < rowCount; r++) {
-      // D (UPC column) keep general; E (PACK SIZE) right; F (ITEM PRICE/SUBTOTAL) currency-like
-      ensure(r, 4); ensure(r, 5);
-      style(r, 4, { alignment: { horizontal: 'right' } });
-      style(r, 5, { alignment: { horizontal: 'right' }, numFmt: '"$"#,##0.00' });
-    }
-
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Order Details');
-    XLSX.writeFile(wb, fname);
+    const buffer = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = fname; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
   }, [
     manualMode,
     manualEditRow,
@@ -2392,9 +2350,9 @@ export default function Orders() {
     manualPickerRows,
     manualPickerRowByGroup,
     palletNameByGroup,
-    groupPriceByName,
     manualItemsByGroup,
     manualUnitPriceByGroup,
+    manualPaymentTerms,
   ]);
 
   const isValidEmail = (email: string) => {
@@ -2416,8 +2374,20 @@ export default function Orders() {
     const grand = Number.isFinite(subRounded) ? subRounded * (1 + ship / 100) : NaN;
 
     const blue = '#DDEBF7';
-    const green = '#E2EFDA';
-    const gray = '#F2F2F2';
+    const green = '#CCFFCC';
+    const lightGrey = '#F2F2F2';
+    const darkGrey = '#BFBFBF';
+
+    const fetchBase64 = async (url: string) => {
+      const res = await fetch(url);
+      const buf = await res.arrayBuffer();
+      let binary = '';
+      const bytes = new Uint8Array(buf);
+      for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+      return `data:image/png;base64,${btoa(binary)}`;
+    };
+    // Column widths for pallet tables in PDF: [Name, Description, Pallet ID, UPC, Qty, Price]
+    const palletColWidths: any[] = [160, 220, 120, 100, 50, 70];
 
     const pickerRows = Array.isArray(manualPickerRows) ? manualPickerRows : [];
     const getPalletMeta = (g: string) => {
@@ -2469,119 +2439,257 @@ export default function Orders() {
     };
 
     const content: any[] = [];
+    try {
+      const logo = await fetchBase64('/company-logo.png');
+      const companyPhone = '+1 470-812-0762';
+      const companyEmail = 'brandon@mpgwholesale.com';
+      const companyLocation = '145 Industrial Drive, Thomson, GA 30824';
+      const companyWebsite = 'www.mpgwholesale.com';
+      content.push({
+        table: {
+          // Match Excel-like proportions for A–E: A logo, B label, C value, D label, E value
+          widths: [130, 100, 260, 100, 150],
+          body: [
+            [
+              { image: logo, height:60,width:130, rowSpan: 4, border: [true, true, true, true], alignment: 'center', },
+              { text: 'Phone:', fillColor: green, bold: true, border: [true, true, true, true] },
+              { text: companyPhone, border: [true, true, true, true] },
+              { text: 'Contact Email:', fillColor: green, bold: true, border: [true, true, true, true] },
+              { text: companyEmail, border: [true, true, true, true] },
+            ],
+            [
+              {},
+              { text: 'Location:', fillColor: green, bold: true, border: [true, true, true, true] },
+              { text: companyLocation, border: [true, true, true, true] },
+              { text: 'Website:', fillColor: green, bold: true, border: [true, true, true, true] },
+              { text: companyWebsite, border: [true, true, true, true] },
+            ],
+            // Spacer rows (no borders) between company and customer details, merged under the logo
+            [
+              { text: '', border: [false, false, false, false] },
+              { text: '', border: [false, false, false, false] },
+              { text: '', border: [false, false, false, false] },
+              { text: '', border: [false, false, false, false] },
+              { text: '', border: [false, false, false, false] },
+            ],
+            [
+              { text: '', border: [false, false, false, false] },
+              { text: '', border: [false, false, false, false] },
+              { text: '', border: [false, false, false, false] },
+              { text: '', border: [false, false, false, false] },
+              { text: '', border: [false, false, false, false] },
+            ],
+            [
+              { text: orderNumber, fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: 'To:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: manualCustomerName || '', border: [true, true, true, true] },
+              { text: 'Phone:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: manualCustomerPhone || '', border: [true, true, true, true] },
+            ],
+            [
+              {},
+              { text: 'Address:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: manualShippingAddress || '', border: [true, true, true, true] },
+              { text: 'Email:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: manualCustomerEmail || '', border: [true, true, true, true] },
+            ],
+          ],
+        },
+        layout: 'noHorizontalLines',
+        margin: [0, 0, 0, 8],
+      });
+    } catch {
+      content.push({
+        table: {
+          widths: [160, 40, '*', 55, 120],
+          body: [
+            [
+              { text: orderNumber, fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: 'To:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: manualCustomerName || '', border: [true, true, true, true] },
+              { text: 'Phone:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: manualCustomerPhone || '', border: [true, true, true, true] },
+            ],
+            [
+              { text: '', border: [true, false, true, true] },
+              { text: 'Address:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: manualShippingAddress || '', border: [true, true, true, true] },
+              { text: 'Email:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: manualCustomerEmail || '', border: [true, true, true, true] },
+            ],
+          ],
+        },
+        layout: 'noHorizontalLines',
+        margin: [0, 0, 0, 8],
+      });
+    }
+
     content.push({
       table: {
-        widths: [160, 40, '*', 55, 120],
+        // Third filler column prevents the value cell from spanning full width
+        widths: [240, 200, '*'],
         body: [
-          [
-            { text: orderNumber, fillColor: blue, bold: true, border: [true, true, true, true] },
-            { text: 'To:', fillColor: blue, bold: true, border: [true, true, true, true] },
-            { text: manualCustomerName || '', border: [true, true, true, true] },
-            { text: 'Phone:', fillColor: blue, bold: true, border: [true, true, true, true] },
-            { text: manualCustomerPhone || '', border: [true, true, true, true] },
-          ],
-          [
-            { text: '', border: [true, false, true, true] },
-            { text: 'Address:', fillColor: blue, bold: true, border: [true, true, true, true] },
-            { text: manualShippingAddress || '', border: [true, true, true, true] },
-            { text: 'Email:', fillColor: blue, bold: true, border: [true, true, true, true] },
-            { text: manualCustomerEmail || '', border: [true, true, true, true] },
-          ],
+          [ { text: 'Status:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: sStatus, bold: true, border: [true, true, true, true] }, { text: '', border: [false, false, false, false] } ],
+          [ { text: 'Estimated Shipdate for Customer:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: manualEstFulfillment || '', bold: true, border: [true, true, true, true] }, { text: '', border: [false, false, false, false] } ],
+          [ { text: 'Estimated Arrival Date:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: manualEstDelivered || '', bold: true, border: [true, true, true, true] }, { text: '', border: [false, false, false, false] } ],
         ],
       },
       layout: 'noHorizontalLines',
       margin: [0, 0, 0, 8],
     });
 
-    content.push({ text: 'Status:', bold: true, margin: [0, 2, 0, 0] });
-    content.push({ text: sStatus, margin: [0, 0, 0, 2] });
-    content.push({ text: 'Estimated Shipdate for Customer:', bold: true });
-    content.push({ text: manualEstFulfillment || '', margin: [0, 0, 0, 2] });
-    content.push({ text: 'Estimated Arrival Date:', bold: true });
-    content.push({ text: manualEstDelivered || '', margin: [0, 0, 0, 8] });
-
     const rowsList = Array.isArray(manualOrderRows) ? manualOrderRows : [];
-    const printedGroups = new Set<string>();
-    let prevGroup: string | null = null;
+    const groups = new Map<string, any[]>();
     for (const r of rowsList as any[]) {
       const g = String(r?.groupName || '').trim();
       if (!g) continue;
-      if (prevGroup && prevGroup !== g) content.push({ text: '\n' });
-
-      const rowId = String((r as any)?.id || '').trim();
-      const qtyText = (manualOrderQtyByGroup as any)?.[rowId] ?? (manualOrderQtyByGroup as any)?.[g] ?? (r as any)?.orderQty ?? (r as any)?.qty;
-      const qtyNum = Number(qtyText);
-      const qty = Number.isFinite(qtyNum) ? Math.floor(qtyNum) : NaN;
-      const discount = Math.min(100, Math.max(0, Number((r as any)?.discountPercent ?? 0)));
+      const key = g.toLowerCase();
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(r);
+    }
+    for (const [key, groupRows] of Array.from(groups.entries())) {
+      const g = String(groupRows[0]?.groupName || '').trim();
       const gLower = g.toLowerCase();
-      const unitSnap = (manualUnitPriceByGroup as any)?.[gLower];
-      const unit = Number.isFinite(Number(unitSnap)) ? Number(unitSnap) : Number((r as any)?.unitPrice ?? (groupPriceByName as any)?.[gLower] ?? 0);
-      const discounted = Number.isFinite(unit) ? unit * (1 - discount / 100) : NaN;
-      const lineSub = (Number.isFinite(discounted) && Number.isFinite(qty)) ? discounted * qty : NaN;
+      const unitSnap0 = (manualUnitPriceByGroup as any)?.[gLower];
+      const unit0 = Number.isFinite(Number(unitSnap0)) ? Number(unitSnap0) : Number((groupRows[0] as any)?.unitPrice ?? (groupPriceByName as any)?.[gLower] ?? 0);
 
       const { palletId, palletName, palletDesc } = getPalletMeta(g);
-      if (!printedGroups.has(g)) {
-        content.push({
-          table: {
-            widths: ['*', '*', 120, 60, 60, 80],
-            body: [[
-              { text: palletName, fillColor: green, border: [true, true, true, true] },
-              { text: palletDesc, fillColor: green, border: [true, true, true, true] },
-              { text: palletId, fillColor: green, border: [true, true, true, true] },
-              { text: '', fillColor: green, border: [true, true, true, true] },
-              { text: '', fillColor: green, border: [true, true, true, true] },
-              { text: '', fillColor: green, border: [true, true, true, true] },
-            ]],
-          },
-          layout: 'noHorizontalLines',
-        });
-
-        const items = await getGroupItems(g);
-        if (items.length) {
-          const itemRows = items.map((it: any) => [
-            { text: '', border: [true, true, true, true] },
-            { text: String(it?.itemCode || ''), border: [true, true, true, true] },
-            { text: String(it?.description || ''), border: [true, true, true, true] },
-            { text: String(it?.upc || ''), alignment: 'right', border: [true, true, true, true] },
-            { text: (Number.isFinite(Number(it?.packSize)) ? String(Number(it?.packSize)) : ''), alignment: 'right', border: [true, true, true, true] },
-            { text: (Number.isFinite(Number(it?.price)) ? `$${Number(it?.price).toFixed(2)}` : ''), alignment: 'right', border: [true, true, true, true] },
-          ]);
-          content.push({ table: { widths: ['*', 90, '*', 70, 60, 70], body: itemRows }, layout: 'noHorizontalLines' });
-        }
-        printedGroups.add(g);
-      }
-
       content.push({
         table: {
-          widths: ['*', 90, 150, 90, 90, 80],
+          widths: palletColWidths,
           body: [[
-            { text: `PALLET PRICE: ${Number.isFinite(unit) ? `$${unit.toFixed(2)}` : ''}`, fillColor: gray, bold: true, border: [true, true, true, true] },
-            { text: `DISCOUNT: ${Number.isFinite(Number(discount)) ? `${discount}%` : ''}`, fillColor: gray, bold: true, border: [true, true, true, true] },
-            { text: `DISCOUNTED PRICE: ${Number.isFinite(discounted) ? `$${discounted.toFixed(2)}` : ''}`, fillColor: gray, bold: true, border: [true, true, true, true] },
-            { text: `QUANTITY: ${Number.isFinite(qty) ? qty : ''}`, fillColor: gray, bold: true, border: [true, true, true, true] },
-            { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] },
-            { text: Number.isFinite(lineSub) ? `$${lineSub.toFixed(2)}` : '', alignment: 'right', fillColor: blue, border: [true, true, true, true] },
+            { text: palletName, fillColor: green, bold: true, border: [true, true, true, true] },
+            { text: palletDesc, fillColor: green, bold: true, border: [true, true, true, true] },
+            { text: `Pallet ID: ${palletId || '-'}`, fillColor: green, bold: true, border: [true, true, true, true] },
+            { text: 'UPC', fillColor: green, bold: true, border: [true, true, true, true] },
+            { text: 'Qty', fillColor: green, bold: true, border: [true, true, true, true] },
+            { text: 'Price', fillColor: green, bold: true, border: [true, true, true, true] },
           ]],
         },
         layout: 'noHorizontalLines',
-        margin: [0, 2, 0, 4],
       });
 
-      prevGroup = g;
+      const items = await getGroupItems(g);
+      if (items.length) {
+        const itemRows = items.map((it: any) => [
+          { text: '', fillColor: lightGrey, border: [true, true, true, true] },
+          { text: String(it?.itemCode || ''), fillColor: lightGrey, border: [true, true, true, true] },
+          { text: String(it?.description || ''), fillColor: lightGrey, border: [true, true, true, true] },
+          { text: String(it?.upc || ''), alignment: 'right', fillColor: lightGrey, border: [true, true, true, true] },
+          { text: (Number.isFinite(Number(it?.packSize)) ? String(Number(it?.packSize)) : ''), alignment: 'right', fillColor: lightGrey, border: [true, true, true, true] },
+          { text: (Number.isFinite(Number(it?.price)) ? `$${Number(it?.price).toFixed(2)}` : ''), alignment: 'right', fillColor: lightGrey, border: [true, true, true, true] },
+        ]);
+        content.push({ table: { widths: palletColWidths, body: itemRows }, layout: 'noHorizontalLines' });
+      }
+
+      for (const r of groupRows) {
+        const disc = Math.min(100, Math.max(0, Number((r as any)?.discountPercent ?? 0)));
+        const unitBase = Number((manualUnitPriceByGroup as any)?.[key] ?? (r as any)?.unitPrice ?? unit0 ?? 0);
+        const rowIdEach = String((r as any)?.id || '').trim();
+        const qtyTextEach = (manualOrderQtyByGroup as any)?.[rowIdEach] ?? (manualOrderQtyByGroup as any)?.[g] ?? (r as any)?.orderQty ?? (r as any)?.qty;
+        const qtyNumEach = Number(qtyTextEach);
+        const qtyEach = Number.isFinite(qtyNumEach) ? Math.floor(qtyNumEach) : 0;
+        const unitDisc = Number.isFinite(unitBase) ? unitBase * (1 - disc / 100) : NaN;
+        const lineSubEach = (Number.isFinite(unitDisc) && Number.isFinite(qtyEach)) ? unitDisc * qtyEach : NaN;
+        content.push({
+          table: {
+            widths: palletColWidths,
+            body: [[
+              { text: `PALLET PRICE: ${Number.isFinite(unitBase) ? `$${unitBase.toFixed(2)}` : ''}`, fillColor: darkGrey, bold: true, border: [true, true, true, true] },
+              { text: `DISCOUNT: ${Number.isFinite(disc) ? `${disc}%` : ''}`, fillColor: darkGrey, bold: true, border: [true, true, true, true] },
+              { text: `DISCOUNTED PRICE: ${Number.isFinite(unitDisc) ? `$${unitDisc.toFixed(2)}` : ''}`, fillColor: darkGrey, bold: true, border: [true, true, true, true] },
+              { text: `QUANTITY: ${Number.isFinite(qtyEach) ? qtyEach : ''}`, fillColor: darkGrey, bold: true, border: [true, true, true, true] },
+              { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: Number.isFinite(lineSubEach) ? `$${lineSubEach.toFixed(2)}` : '', alignment: 'right', fillColor: blue, border: [true, true, true, true] },
+            ]],
+          },
+          layout: 'noHorizontalLines',
+          margin: [0, 2, 0, 4],
+        });
+      }
+      content.push({ text: ' ', margin: [0, 2, 0, 2] });
     }
 
     content.push({
       table: {
         widths: [120, 120],
         body: [
-          [ { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(sub) ? `$${sub.toFixed(2)}` : '', alignment: 'right', border: [true, true, true, true] } ],
-          [ { text: 'SHIPPING', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(sp) ? `${sp}%` : '', alignment: 'right', border: [true, true, true, true] } ],
+          [ { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(subRounded) ? `$${subRounded.toFixed(2)}` : '', alignment: 'right', bold: true, border: [true, true, true, true] } ],
+          [ { text: 'SHIPPING', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(sp) ? `${sp}%` : '', alignment: 'right', bold: true, border: [true, true, true, true] } ],
           [ { text: 'GRAND TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(grand) ? `$${grand.toFixed(2)}` : '', alignment: 'right', bold: true, border: [true, true, true, true] } ],
+          [ { text: 'PAYMENT TERMS', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: String(manualPaymentTerms || ''), alignment: 'right', bold: true, border: [true, true, true, true] } ],
         ],
       },
       layout: 'noHorizontalLines',
       margin: [0, 6, 0, 0],
     });
+
+    // Confirmation block merged across right side (no borders)
+    content.push({
+      table: {
+        widths: ['*','*','*','*','*','*'],
+        body: [
+          [ { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: 'I hereby confirm the order and agree to the payment terms stated in this Proforma Invoice', colSpan: 3, alignment: 'center', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] } ],
+        ],
+      },
+      layout: 'noHorizontalLines',
+      margin: [0, 12, 0, 0],
+    });
+
+    // Spacer: 4 rows between confirmation and signature (approximate)
+    content.push({ text: ' ', margin: [0, 40, 0, 0] });
+
+    // Signature line (column E): only top border
+    content.push({
+      table: {
+        widths: ['*','*','*','*','*','*'],
+        body: [
+          [ { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: "Customer's Signature", alignment: 'center', border: [false, true, false, false] }, { text: '', border: [false,false,false,false] } ],
+        ],
+      },
+      layout: 'noHorizontalLines',
+      margin: [0, 0, 0, 0],
+    });
+
+    // Spacer: 7 rows between signature and social media (approximate)
+    content.push({ text: ' ', margin: [0, 70, 0, 0] });
+
+    // Social media footer centered to the confirmation block (columns 4–6)
+    try {
+      const fb = await fetchBase64('/facebook-qrcode.png');
+      const ig = await fetchBase64('/instagram-qrcode.png');
+      // Text row centered across columns 4-6
+      content.push({
+        table: {
+          widths: ['*','*','*','*','*','*'],
+          body: [[
+            { text: '', border: [false,false,false,false] },
+            { text: '', border: [false,false,false,false] },
+            { text: '', border: [false,false,false,false] },
+            { text: 'Follow us on social media !', colSpan: 3, alignment: 'center', border: [false,false,false,false] },
+            {},
+            {},
+          ]],
+        },
+        layout: 'noHorizontalLines',
+        margin: [0, 0, 0, 6],
+      });
+      // Images row centered within columns 4 and 5
+      content.push({
+        table: {
+          widths: ['*','*','*','auto','auto','*'],
+          body: [[
+            { text: '', border: [false,false,false,false] },
+            { text: '', border: [false,false,false,false] },
+            { text: '', border: [false,false,false,false] },
+            { image: fb, fit: [70, 70], alignment: 'center', border: [false,false,false,false], margin: [0,0,12,0] },
+            { image: ig, fit: [70, 70], alignment: 'center', border: [false,false,false,false] },
+            { text: '', border: [false,false,false,false] },
+          ]],
+        },
+        layout: 'noHorizontalLines',
+      });
+    } catch {}
 
     const docDefinition = {
       pageOrientation: 'landscape',
@@ -3424,6 +3532,7 @@ export default function Orders() {
           customerName: String(o?.customerName || ''),
           customerPhone: String(o?.customerPhone || ''),
           shippingAddress: String(o?.shippingAddress || ''),
+          paymentTerms: String(o?.paymentTerms || ''),
           createdAtOrder: normalizeDateValue(o?.createdAtOrder),
           originalPrice: o?.originalPrice,
           shippingPercent: o?.shippingPercent,
@@ -3974,6 +4083,7 @@ export default function Orders() {
     setManualEstDelivered('');
     setManualShipdateTouched(false);
     setManualShippingAddress('');
+    setManualPaymentTerms('');
     setManualNotes('');
     setManualOriginalPrice('');
     setManualShippingPercent('');
@@ -4112,6 +4222,9 @@ export default function Orders() {
     }
     if (!String(manualShippingAddress || '').trim()) {
       errs.push('Shipping Address is required');
+    }
+    if (!String(manualPaymentTerms || '').trim()) {
+      errs.push('Payment Terms is required');
     }
 
     // manualOrderQtyByGroup is keyed by row ID; derive pallet groupName via keyToGroupName
@@ -4296,6 +4409,7 @@ export default function Orders() {
             estFulfillmentDate: manualEstFulfillment || undefined,
             estDeliveredDate: manualEstDelivered || undefined,
             shippingAddress: manualShippingAddress.trim(),
+            paymentTerms: manualPaymentTerms.trim(),
             notes: manualNotes.trim(),
             lines: parsed.map((l) => {
               const g = String(l.groupName || '').trim();
@@ -4339,6 +4453,7 @@ export default function Orders() {
               estFulfillmentDate: manualEstFulfillment || undefined,
               estDeliveredDate: manualEstDelivered || undefined,
               shippingAddress: manualShippingAddress.trim(),
+              paymentTerms: manualPaymentTerms.trim(),
               notes: manualNotes.trim(),
               lines: parsed.map((l) => {
                 const g = String(l.groupName || '').trim();
@@ -4507,6 +4622,7 @@ export default function Orders() {
         estFulfillmentDate: manualEstFulfillment || undefined,
         estDeliveredDate: manualEstDelivered || undefined,
         shippingAddress: manualShippingAddress.trim(),
+        paymentTerms: manualPaymentTerms.trim(),
         notes: manualNotes.trim(),
         lines: parsed.map((l) => {
           const g = String(l.groupName || '').trim();
@@ -4796,6 +4912,17 @@ export default function Orders() {
             <TextField disabled={manualFieldsLocked} label="Customer Email" size="small" value={manualCustomerEmail} onChange={(e)=>setManualCustomerEmail(e.target.value)} error={!isValidEmail(manualCustomerEmail)} helperText={!isValidEmail(manualCustomerEmail) ? 'Required (valid email)' : ''} />
             <TextField disabled={manualFieldsLocked} label="Customer Name" size="small" value={manualCustomerName} onChange={(e)=>setManualCustomerName(e.target.value)} error={!String(manualCustomerName||'').trim()} helperText={!String(manualCustomerName||'').trim() ? 'Required' : ''} />
             <TextField disabled={manualFieldsLocked} label="Phone Number" size="small" value={manualCustomerPhone} onChange={(e)=>setManualCustomerPhone(e.target.value)} error={!String(manualCustomerPhone||'').trim()} helperText={!String(manualCustomerPhone||'').trim() ? 'Required' : ''} />
+            <TextField
+              fullWidth
+              label="Shipping Address"
+              size="small"
+              value={manualShippingAddress}
+              onChange={(e)=>setManualShippingAddress(e.target.value)}
+              error={!String(manualShippingAddress||'').trim()}
+              helperText={!String(manualShippingAddress||'').trim() ? 'Required' : ''}
+              disabled={manualFieldsLocked}
+              sx={{ gridColumn: { xs: '1 / -1', md: '1 / span 4' } }}
+            />
           </Box>
 
           <Typography variant="subtitle2" sx={{ mb: 1 }}>Dates</Typography>
@@ -4889,6 +5016,15 @@ export default function Orders() {
               value={manualFinalPrice}
               disabled
             />
+            <TextField
+              label="Payment Terms"
+              size="small"
+              value={manualPaymentTerms}
+              onChange={(e)=> setManualPaymentTerms(e.target.value)}
+              disabled={manualFieldsLocked}
+              error={!String(manualPaymentTerms||'').trim()}
+              helperText={!String(manualPaymentTerms||'').trim() ? 'Required' : ''}
+            />
           </Box>
 
           {manualMode === 'edit' && manualLastUpdatedAt ? (
@@ -4896,17 +5032,7 @@ export default function Orders() {
               Last Updated: {manualLastUpdatedAt}{manualLastUpdatedBy ? ` (by ${manualLastUpdatedBy})` : ''}
             </Typography>
           ) : null}
-          <TextField
-            fullWidth
-            label="Shipping Address"
-            size="small"
-            value={manualShippingAddress}
-            onChange={(e)=>setManualShippingAddress(e.target.value)}
-            sx={{ mb: 2 }}
-            error={!String(manualShippingAddress||'').trim()}
-            helperText={!String(manualShippingAddress||'').trim() ? 'Required' : ''}
-            disabled={manualFieldsLocked}
-          />
+          
 
           <TextField
             fullWidth
@@ -5391,6 +5517,7 @@ export default function Orders() {
               // Only require shipdate when creating a new order; in edit mode allow saving without shipdate
               ((manualMode !== 'edit') && (!manualEstFulfillment)) ||
               !String(manualShippingAddress||'').trim() ||
+              !String(manualPaymentTerms||'').trim() ||
               manualIsLocked ||
               ((manualMode !== 'edit') && (manualOrderGroups.length === 0)) ||
               ((manualMode !== 'edit') && (Object.entries(manualOrderQtyByGroup || {}).filter(([g, q]) => manualOrderGroups.includes(g) && Number(q) > 0).length === 0))

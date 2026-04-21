@@ -15,6 +15,7 @@
     "@mui/material": "^5.16.7",
     "@mui/x-data-grid": "^8.18.0",
     "axios": "^1.7.7",
+    "exceljs": "^4.4.0",
     "pdfmake": "^0.2.23",
     "react": "19.2.0",
     "react-dom": "19.2.0",
@@ -23,6 +24,7 @@
     "xlsx-js-style": "^1.2.0"
   },
   "devDependencies": {
+    "@types/exceljs": "^0.5.3",
     "@types/react": "^19.0.6",
     "@types/react-dom": "^19.0.3",
     "@vitejs/plugin-react": "^4.3.4",
