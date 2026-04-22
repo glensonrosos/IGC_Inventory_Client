@@ -2134,8 +2134,8 @@ export default function Orders() {
       }
     };
 
-    // Helpers to fetch public images and convert to base64 (raw, no data URI)
-    const fetchBase64 = async (url: string) => {
+    // Helpers to fetch public images and convert to base64 (raw, no data URI) with correct extension
+    const fetchBase64WithExt = async (url: string) => {
       const res = await fetch(url);
       if (!res.ok) throw new Error(`Failed to fetch ${url}: ${res.status}`);
       const ctype = String(res.headers.get('content-type') || '').toLowerCase();
@@ -2144,12 +2144,16 @@ export default function Orders() {
       let binary = '';
       const bytes = new Uint8Array(buf);
       for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-      return btoa(binary);
+      const base64 = btoa(binary);
+      let ext: 'png' | 'jpeg' | 'jpg' = 'png';
+      if (ctype.includes('jpeg') || ctype.includes('jpg')) ext = 'jpeg';
+      else if (ctype.includes('png')) ext = 'png';
+      return { base64, ext } as const;
     };
     const fetchImageBase64 = async (paths: string[]) => {
       let lastErr: any = null;
       for (const p of paths) {
-        try { return await fetchBase64(p); } catch (e) { lastErr = e; }
+        try { return await fetchBase64WithExt(p); } catch (e) { lastErr = e; }
       }
       throw lastErr || new Error('No valid image path');
     };
@@ -2170,8 +2174,8 @@ export default function Orders() {
     // Add all borders around merged A1:A4 (logo area)
     try { (ws.getCell('A1') as any).border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } }; } catch {}
     try {
-      const base64Logo = await fetchImageBase64(['/logo.png','/company-logo.png','/company-logo.jpg','/logo.jpg']);
-      const imgId = wb.addImage({ base64: base64Logo, extension: 'png' });
+      const logoImg = await fetchImageBase64(['/logo.png','/company-logo.png','/company-logo.jpg','/logo.jpg']);
+      const imgId = wb.addImage({ base64: logoImg.base64, extension: logoImg.ext });
       // Place image sized to requested area (2.3in x 1.0in) ~ (221px x 96px)
       ws.addImage(imgId, { tl: { col: 0, row: 0 }, ext: { width: 221, height: 96 } });
     } catch {}
@@ -2314,17 +2318,22 @@ export default function Orders() {
 
     // Social media section at the very bottom: place text exactly 7 rows below the signature
     currentRow = signatureRow + 7;
-    ws.getCell(`D${currentRow}`).value = 'Follow us on social media !';
-    (ws.getCell(`D${currentRow}`) as any).alignment = { horizontal: 'right' } as any;
+    ws.getCell(`E${currentRow}`).value = 'Follow us on social media !';
+    (ws.getCell(`E${currentRow}`) as any).alignment = { horizontal: 'left' } as any;
     try {
-      const base64Fb = await fetchImageBase64(['/facebook-qr.png','/facebook-qrcode.png']);
-      const base64Ig = await fetchImageBase64(['/instagram-qr.png','/instagram-qrcode.png']);
-      const idFb = wb.addImage({ base64: base64Fb, extension: 'png' });
-      const idIg = wb.addImage({ base64: base64Ig, extension: 'png' });
-      // Place images on the next row, right-side under D, smaller size
+      const socialImg = await fetchImageBase64(['/socialmedia-qrcode.png']);
+      const idSocial = wb.addImage({ base64: socialImg.base64, extension: socialImg.ext });
+      // Place combined QR image on the next row, left-aligned under E, compact size
       const imgRow = currentRow + 1;
-      ws.addImage(idFb, { tl: { col: 4.8, row: imgRow }, ext: { width: 70, height: 70 } });
-      ws.addImage(idIg, { tl: { col: 5.5, row: imgRow }, ext: { width: 70, height: 70 } });
+      ws.addImage(idSocial, { tl: { col: 4.2, row: imgRow }, ext: { width: 130, height: 60 } });
+
+      // Add company logo at the bottom left area, anchored at Column B with size 5.69" x 1.0"
+      try {
+        const bigLogo = await fetchImageBase64(['/logo.png','/company-logo.png','/company-logo.jpg','/logo.jpg']);
+        const idBigLogo = wb.addImage({ base64: bigLogo.base64, extension: bigLogo.ext });
+        // 5.69in (~546px) wide by 1in (~96px) tall, placed at Column B (index 1)
+        ws.addImage(idBigLogo, { tl: { col: 1, row: imgRow - 1 }, ext: { width: 546, height: 96 } });
+      } catch {}
     } catch {}
 
     const buffer = await wb.xlsx.writeBuffer();
@@ -2387,7 +2396,8 @@ export default function Orders() {
       return `data:image/png;base64,${btoa(binary)}`;
     };
     // Column widths for pallet tables in PDF: [Name, Description, Pallet ID, UPC, Qty, Price]
-    const palletColWidths: any[] = [160, 220, 120, 100, 50, 70];
+    // Make item code (2nd col in item rows) narrower and description (3rd col) wider, preserving total width
+    const palletColWidths: any[] = [160, 120, 210, 100, 50, 70];
 
     const pickerRows = Array.isArray(manualPickerRows) ? manualPickerRows : [];
     const getPalletMeta = (g: string) => {
@@ -2575,8 +2585,8 @@ export default function Orders() {
           { text: '', fillColor: lightGrey, border: [true, true, true, true] },
           { text: String(it?.itemCode || ''), fillColor: lightGrey, border: [true, true, true, true] },
           { text: String(it?.description || ''), fillColor: lightGrey, border: [true, true, true, true] },
-          { text: String(it?.upc || ''), alignment: 'right', fillColor: lightGrey, border: [true, true, true, true] },
-          { text: (Number.isFinite(Number(it?.packSize)) ? String(Number(it?.packSize)) : ''), alignment: 'right', fillColor: lightGrey, border: [true, true, true, true] },
+          { text: String(it?.upc || ''), alignment: 'left', fillColor: lightGrey, border: [true, true, true, true] },
+          { text: (Number.isFinite(Number(it?.packSize)) ? String(Number(it?.packSize)) : ''), alignment: 'left', fillColor: lightGrey, border: [true, true, true, true] },
           { text: (Number.isFinite(Number(it?.price)) ? `$${Number(it?.price).toFixed(2)}` : ''), alignment: 'right', fillColor: lightGrey, border: [true, true, true, true] },
         ]);
         content.push({ table: { widths: palletColWidths, body: itemRows }, layout: 'noHorizontalLines' });
@@ -2654,38 +2664,45 @@ export default function Orders() {
     // Spacer: 7 rows between signature and social media (approximate)
     content.push({ text: ' ', margin: [0, 70, 0, 0] });
 
-    // Social media footer centered to the confirmation block (columns 4–6)
+    // Social media footer aligned to column E (text left-aligned)
     try {
-      const fb = await fetchBase64('/facebook-qrcode.png');
-      const ig = await fetchBase64('/instagram-qrcode.png');
-      // Text row centered across columns 4-6
+      const social = await fetchBase64('/socialmedia-qrcode.png');
+      const bottomLogo = await fetchBase64('/company-logo.png');
+      // Text row: put the text in column E
+   
+      // Row with logo (column B) and combined social QR (column E) side-by-side
       content.push({
         table: {
-          widths: ['*','*','*','*','*','*'],
-          body: [[
-            { text: '', border: [false,false,false,false] },
-            { text: '', border: [false,false,false,false] },
-            { text: '', border: [false,false,false,false] },
-            { text: 'Follow us on social media !', colSpan: 3, alignment: 'center', border: [false,false,false,false] },
-            {},
-            {},
-          ]],
+          widths: ['*','auto','*','*','auto','*'],
+        body: [[
+        { text: '', border: [false, false, false, false] }, // A
+        { 
+          // Column B: Company Logo
+          image: bottomLogo, 
+          fit: [410, 72], 
+          alignment: 'left', 
+          border: [false, false, false, false] 
         },
-        layout: 'noHorizontalLines',
-        margin: [0, 0, 0, 6],
-      });
-      // Images row centered within columns 4 and 5
-      content.push({
-        table: {
-          widths: ['*','*','*','auto','auto','*'],
-          body: [[
-            { text: '', border: [false,false,false,false] },
-            { text: '', border: [false,false,false,false] },
-            { text: '', border: [false,false,false,false] },
-            { image: fb, fit: [70, 70], alignment: 'center', border: [false,false,false,false], margin: [0,0,12,0] },
-            { image: ig, fit: [70, 70], alignment: 'center', border: [false,false,false,false] },
-            { text: '', border: [false,false,false,false] },
-          ]],
+        { text: '', border: [false, false, false, false] }, // C
+        { text: '', border: [false, false, false, false] }, // D
+        { 
+          // Column E: Text AND QR Codes stacked together
+          stack: [
+            { 
+              text: 'Follow us on social media !', 
+              alignment: 'center', 
+              margin: [0, 0, 0, 4] // Bottom margin to space text from QR
+            },
+            { 
+              image: social, 
+              fit: [120, 60], 
+              alignment: 'center' 
+            }
+          ],
+          border: [false, false, false, false]
+        },
+        { text: '', border: [false, false, false, false] }, // F
+      ]],
         },
         layout: 'noHorizontalLines',
       });

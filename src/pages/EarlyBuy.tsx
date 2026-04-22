@@ -6,6 +6,7 @@ import DownloadIcon from '@mui/icons-material/Download';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import XLSX from 'xlsx-js-style';
+import ExcelJS from 'exceljs';
 import pdfMake from 'pdfmake/build/pdfmake';
 import pdfFonts from 'pdfmake/build/vfs_fonts';
 try {
@@ -35,6 +36,7 @@ type EarlyOrder = {
   originalPrice?: string;
   shippingPercent?: string;
   discountPercent?: string;
+  paymentTerms?: string;
   notes?: string;
   lines: Array<{ groupName: string; lineItem: string; palletName: string; qty: number }>;
 };
@@ -70,6 +72,7 @@ export default function EarlyBuy() {
   const [shippingAddress, setShippingAddress] = useState('');
   const [lastUpdatedAt, setLastUpdatedAt] = useState('');
   const [lastUpdatedBy, setLastUpdatedBy] = useState('');
+  const [paymentTerms, setPaymentTerms] = useState('');
 
   const isEditable = useMemo(() => {
     // Editable when creating (no editingOrder) OR when status is processing/ready_to_ship
@@ -302,240 +305,156 @@ export default function EarlyBuy() {
   const safe = (v: any) => String(v ?? '').replace(/[\/\\:*?"<>|]/g, '-');
 
   const exportEarlyBuyXlsx = useCallback(async () => {
-    const orderNo = safe(String(editingOrder?.id || 'EORD'));
-    const wb = XLSX.utils.book_new();
+    const orderNumber = String(editingOrder?.id || 'EORD');
+    const sStatus = String(status || '').toUpperCase();
 
-    const rows: any[][] = [];
-    rows.push([String(orderNo || ''), 'To:', String(customerName || ''), 'Phone:', String(customerPhone || '')]);
-    rows.push(['', 'Address:', String(shippingAddress || ''), 'Email:', String(customerEmail || '')]);
-    rows.push([]);
-    rows.push(['Status:', String(status || '').toUpperCase()]);
-    rows.push(['Estimated Shipdate for Customer:', String(estFulfillment || '')]);
-    rows.push(['Estimated Arrival Date:', String(estDelivered || '')]);
-    rows.push([]);
+    const sub = Number(computedSubTotal);
+    const sp = Number(shippingPercent);
+    const ship = Number.isFinite(sp) ? Math.min(100, Math.max(0, sp)) : 0;
+    const subRounded = Number.isFinite(sub) ? Number(Number(sub).toFixed(2)) : NaN;
+    const grand = Number.isFinite(subRounded) ? Number((subRounded * (1 + ship / 100)).toFixed(2)) : NaN;
 
-    // Group lines by pallet group so we don't duplicate header/items for duplicates
-    const groupLinesMap = new Map<string, { display: string; palletName: string; lineItem: string; lines: Array<{ discount: number; qty: number }> }>();
-    for (const l of lines) {
-      const key = String(l?.groupName || '').trim().toLowerCase();
-      if (!key) continue;
-      const display = String(l?.groupName || '');
-      const palletName = String(l?.palletName || '');
-      const lineItem = String(l?.lineItem || '');
-      const discount = Math.max(0, Math.min(100, Number(l?.discount ?? 0)));
-      const qty = Math.max(0, Math.floor(Number(l?.qty || 0)));
-      if (!groupLinesMap.has(key)) groupLinesMap.set(key, { display, palletName, lineItem, lines: [] });
-      groupLinesMap.get(key)!.lines.push({ discount, qty });
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const d = new Date();
+    const ts = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+    const fname = `early-buy-${safe(orderNumber)}-(${safe(sStatus)})-(${ts}).xlsx`;
+
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Order Details');
+    ws.properties.defaultRowHeight = 18;
+    ws.columns = [ { width: 28 }, { width: 28 }, { width: 34 }, { width: 20 }, { width: 16 }, { width: 18 } ];
+
+    const bold = { bold: true } as const;
+    const lightGreen = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFCCFFCC' } } as const;
+    const lightBlue = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDDEBF7' } } as const;
+    const lightGrey = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } } as const;
+    const darkerGrey = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFBFBFBF' } } as const;
+    const right = { horizontal: 'right' } as const;
+    const thinBorder = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } } as const;
+
+    const fetchBase64WithExt = async (url: string) => {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Failed to fetch ${url}`);
+      const ctype = String(res.headers.get('content-type') || '').toLowerCase();
+      if (!ctype.includes('image/')) throw new Error(`Not an image: ${url} (${ctype})`);
+      const buf = await res.arrayBuffer();
+      let binary = ''; const bytes = new Uint8Array(buf);
+      for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+      const base64 = btoa(binary);
+      let ext: 'png' | 'jpeg' | 'jpg' = 'png';
+      if (ctype.includes('jpeg') || ctype.includes('jpg')) ext = 'jpeg';
+      else if (ctype.includes('png')) ext = 'png';
+      return { base64, ext } as const;
+    };
+    const fetchImageBase64 = async (paths: string[]) => { let last: any=null; for (const p of paths){ try{return await fetchBase64WithExt(p);}catch(e){last=e;} } throw last||new Error('No image'); };
+
+    // Header with logo + contact
+    ws.mergeCells('A1:A4');
+    try { ws.getColumn(1).width = 26; } catch {}
+    try { ws.getRow(1).height = 18; ws.getRow(2).height = 18; ws.getRow(3).height = 18; ws.getRow(4).height = 18; } catch {}
+    try { (ws.getCell('A1') as any).border = thinBorder as any; } catch {}
+    try {
+      const logoImg = await fetchImageBase64(['/logo.png','/company-logo.png','/company-logo.jpg','/logo.jpg']);
+      const imgId = wb.addImage({ base64: logoImg.base64, extension: logoImg.ext });
+      ws.addImage(imgId, { tl: { col: 0, row: 0 }, ext: { width: 221, height: 96 } });
+    } catch {}
+    ws.getCell('B1').value = 'Phone:'; ws.getCell('B1').font = bold; (ws.getCell('B1') as any).fill = lightGreen; ws.getCell('C1').value = '+1 470-812-0762';
+    ws.getCell('D1').value = 'Contact Email:'; ws.getCell('D1').font = bold; (ws.getCell('D1') as any).fill = lightGreen; ws.getCell('E1').value = 'brandon@mpgwholesale.com';
+    ws.getCell('B2').value = 'Location:'; ws.getCell('B2').font = bold; (ws.getCell('B2') as any).fill = lightGreen; ws.getCell('C2').value = '145 Industrial Drive, Thomson, GA 30824';
+    ws.getCell('D2').value = 'Website:'; ws.getCell('D2').font = bold; (ws.getCell('D2') as any).fill = lightGreen; ws.getCell('E2').value = 'www.mpgwholesale.com';
+    ;(['B1','C1','D1','E1','B2','C2','D2','E2'] as const).forEach((addr)=>{ (ws.getCell(addr) as any).border = thinBorder as any; });
+
+    // Order info
+    ws.getCell('A5').value = orderNumber; ws.getCell('A5').font = bold; (ws.getCell('A5') as any).fill = lightBlue; (ws.getCell('A5') as any).border = thinBorder as any;
+    ws.getCell('B5').value = 'To:'; ws.getCell('B5').font = bold; (ws.getCell('B5') as any).fill = lightBlue; ws.getCell('C5').value = String(customerName || '');
+    ws.getCell('D5').value = 'Phone:'; ws.getCell('D5').font = bold; (ws.getCell('D5') as any).fill = lightBlue; ws.getCell('E5').value = String(customerPhone || '');
+    ws.getCell('B6').value = 'Address:'; ws.getCell('B6').font = bold; (ws.getCell('B6') as any).fill = lightBlue; ws.getCell('C6').value = String(shippingAddress || '');
+    ws.getCell('D6').value = 'Email:'; ws.getCell('D6').font = bold; (ws.getCell('D6') as any).fill = lightBlue; ws.getCell('E6').value = String(customerEmail || '');
+    ;(['B5','C5','D5','E5','B6','C6','D6','E6'] as const).forEach((addr)=>{ (ws.getCell(addr) as any).border = thinBorder as any; });
+
+    ws.getCell('A8').value = 'Status:'; ws.getCell('A8').font = bold; (ws.getCell('A8') as any).fill = lightBlue; (ws.getCell('A8') as any).border = thinBorder as any; ws.getCell('B8').value = sStatus; ws.getCell('B8').font = bold; (ws.getCell('B8') as any).border = thinBorder as any;
+    ws.getCell('A9').value = 'Estimated Shipdate for Customer:'; ws.getCell('A9').font = bold; (ws.getCell('A9') as any).fill = lightBlue; (ws.getCell('A9') as any).border = thinBorder as any; ws.getCell('B9').value = String(estFulfillment || ''); ws.getCell('B9').font = bold; (ws.getCell('B9') as any).border = thinBorder as any;
+    ws.getCell('A10').value = 'Estimated Arrival Date:'; ws.getCell('A10').font = bold; (ws.getCell('A10') as any).fill = lightBlue; (ws.getCell('A10') as any).border = thinBorder as any; ws.getCell('B10').value = String(estDelivered || ''); ws.getCell('B10').font = bold; (ws.getCell('B10') as any).border = thinBorder as any;
+
+    // Grouped pallets
+    let currentRow = 12;
+    const encodeMoney = (n: any) => (Number.isFinite(Number(n)) ? Number(n) : '');
+    const groups = new Map<string, any[]>();
+    for (const r of (Array.isArray(lines) ? lines : [])) {
+      const g = String(r?.groupName || '').trim(); if (!g) continue; const k = g.toLowerCase(); if (!groups.has(k)) groups.set(k, []); groups.get(k)!.push(r);
     }
-
-    const uniqueDisplays = Array.from(new Set(Array.from(groupLinesMap.values()).map(g => g.display)));
-    const itemsByGroup: Record<string, any[]> = {};
-    await Promise.all(uniqueDisplays.map(async (g) => {
-      const gLower = String(g || '').toLowerCase();
-      const snap = (Array.isArray(lines) ? lines : []).find(l => String(l?.groupName||'').trim().toLowerCase() === gLower && Array.isArray(l?.itemsAtAdd) && l.itemsAtAdd.length);
-      if (snap) {
-        itemsByGroup[gLower] = snap.itemsAtAdd as any[];
-        return;
-      }
-      try {
-        const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
-        itemsByGroup[gLower] = Array.isArray((data as any)?.items) ? (data as any).items : [];
-      } catch { itemsByGroup[gLower] = []; }
-    }));
-
-    for (const [gKey, gMeta] of groupLinesMap.entries()) {
-      const snapLine = (Array.isArray(lines) ? lines : []).find(l => String(l?.groupName||'').trim().toLowerCase() === gKey);
-      const unitSnap = Number(snapLine?.unitPriceAtAdd);
-      const unit = Number.isFinite(unitSnap) ? unitSnap : Number(groupPriceByName?.[gKey]);
-
-      rows.push([String(gMeta.palletName || gMeta.display), String(palletDescByGroup?.[gKey] || gMeta.display || ''), String(gMeta.lineItem || '')]);
-      const items = itemsByGroup[gKey] || [];
+    const itemsCache = new Map<string, any[]>();
+    const getGroupItems = async (g: string) => {
+      const k = g.toLowerCase(); if (itemsCache.has(k)) return itemsCache.get(k)!;
+      const snap = (Array.isArray(lines) ? lines : []).find(l => String(l?.groupName||'').trim().toLowerCase()===k && Array.isArray((l as any)?.itemsAtAdd) && (l as any).itemsAtAdd.length);
+      if (snap) { const list = (snap as any).itemsAtAdd as any[]; itemsCache.set(k, list); return list; }
+      try { const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`); const list = Array.isArray((data as any)?.items) ? (data as any).items : []; itemsCache.set(k, list); return list; } catch { itemsCache.set(k, []); return []; }
+    };
+    const getPalletMeta = (g: string) => {
+      const gl = g.toLowerCase(); const hit = (Array.isArray(lines) ? lines : []).find(l=> String(l?.groupName||'').trim().toLowerCase()===gl);
+      const palletId = String((hit as any)?.lineItem || '').trim(); const palletName = String((hit as any)?.palletName || g).trim(); return { palletId, palletName };
+    };
+    for (const [key, groupRows] of Array.from(groups.entries())) {
+      const g = String(groupRows[0]?.groupName || '').trim();
+      const { palletId, palletName } = getPalletMeta(g);
+      const palletDesc = String(palletDescByGroup?.[key] || g || '').trim();
+      ws.getRow(currentRow).values = [palletName, palletDesc, `Pallet ID: ${palletId || '-'}`, 'UPC', 'Qty', 'Price'];
+      for (let c = 1; c <= 6; c++) { const cell = ws.getRow(currentRow).getCell(c); cell.font = bold; cell.fill = lightGreen; cell.border = thinBorder as any; }
+      const items = await getGroupItems(g);
       for (const it of items) {
-        rows.push([
-          '',
-          String((it as any)?.itemCode || ''),
-          String((it as any)?.description || ''),
-          String((it as any)?.upc || ''),
-          Number((it as any)?.packSize ?? 0) || '',
-          Number.isFinite(Number((it as any)?.price ?? 0)) ? Number(Number((it as any)?.price ?? 0).toFixed(2)) : '',
-        ]);
+        currentRow += 1;
+        ws.getRow(currentRow).values = ['', String((it as any)?.itemCode || ''), String((it as any)?.description || (it as any)?.name || ''), String((it as any)?.upc || ''), String((it as any)?.packSize || ''), encodeMoney((it as any)?.price)];
+        for (let c = 1; c <= 6; c++) { const cell = ws.getRow(currentRow).getCell(c); cell.fill = lightGrey; cell.border = thinBorder as any; }
+        ws.getRow(currentRow).getCell(6).numFmt = '"$"#,##0.00'; (ws.getRow(currentRow).getCell(6) as any).alignment = right;
       }
-      // One summary line per occurrence in the order for this group
-      for (const ln of gMeta.lines) {
-        const discounted = Number.isFinite(unit) ? unit * (1 - ln.discount/100) : NaN;
-        const subtotal = Number.isFinite(discounted) ? discounted * ln.qty : NaN;
-        rows.push([
-          `PALLET PRICE: ${Number.isFinite(unit) ? `$${Number(unit.toFixed(2))}` : ''}`,
-          `DISCOUNT: ${Number.isFinite(ln.discount) ? `${ln.discount}%` : ''}`,
-          `DISCOUNTED PRICE: ${Number.isFinite(discounted) ? `$${Number(discounted.toFixed(2))}` : ''}`,
-          `QUANTITY: ${ln.qty || ''}`,
+      for (const r of groupRows) {
+        const unitBase = Number(groupPriceByName?.[key] ?? (r as any)?.unitPriceAtAdd ?? 0);
+        const disc = Math.min(100, Math.max(0, Number((r as any)?.discount ?? (r as any)?.discountPercent ?? 0)));
+        const unitDiscounted = Number.isFinite(unitBase) ? unitBase * (1 - disc/100) : NaN;
+        const qty = Math.max(0, Math.floor(Number((r as any)?.qty || 0)));
+        const lineSub = (Number.isFinite(unitDiscounted) && Number.isFinite(qty)) ? unitDiscounted * qty : NaN;
+        currentRow += 1;
+        ws.getRow(currentRow).values = [
+          `PALLET PRICE: ${Number.isFinite(unitBase) ? `$${unitBase.toFixed(2)}` : ''}`,
+          `DISCOUNT: ${Number.isFinite(disc) ? `${disc}%` : ''}`,
+          `DISCOUNTED PRICE: ${Number.isFinite(unitDiscounted) ? `$${unitDiscounted.toFixed(2)}` : ''}`,
+          `QUANTITY: ${Number.isFinite(qty) ? qty : ''}`,
           'SUB TOTAL',
-          Number.isFinite(subtotal) ? Number(subtotal.toFixed(2)) : '',
-        ]);
+          encodeMoney(lineSub),
+        ];
+        for (let c = 1; c <= 6; c++) { const cell = ws.getRow(currentRow).getCell(c); cell.font = bold; cell.fill = darkerGrey; cell.border = thinBorder as any; }
+        ws.getRow(currentRow).getCell(6).numFmt = '"$"#,##0.00'; (ws.getRow(currentRow).getCell(6) as any).alignment = right;
       }
-      rows.push([]);
+      currentRow += 2;
     }
 
-    rows.push(['SUB TOTAL', Number.isFinite(Number(computedSubTotal)) ? Number(Number(computedSubTotal).toFixed(2)) : '']);
-    rows.push(['SHIPPING', (shippingPercent !== undefined && shippingPercent !== null && String(shippingPercent) !== '') ? `${shippingPercent}%` : '']);
-    rows.push(['GRAND TOTAL', Number.isFinite(Number(computedGrandTotal)) ? Number(Number(computedGrandTotal).toFixed(2)) : '']);
+    ws.getCell(`A${currentRow}`).value = 'SUB TOTAL'; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any; ws.getCell(`B${currentRow}`).value = Number.isFinite(subRounded) ? subRounded : ''; ws.getCell(`B${currentRow}`).numFmt = '"$"#,##0.00'; ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
+    currentRow += 1;
+    ws.getCell(`A${currentRow}`).value = 'SHIPPING'; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any; ws.getCell(`B${currentRow}`).value = Number.isFinite(sp) ? `${sp}%` : ''; ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
+    currentRow += 1;
+    ws.getCell(`A${currentRow}`).value = 'GRAND TOTAL'; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any; ws.getCell(`B${currentRow}`).value = Number.isFinite(grand) ? grand : ''; ws.getCell(`B${currentRow}`).numFmt = '"$"#,##0.00'; ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
+    currentRow += 1;
+    ws.getCell(`A${currentRow}`).value = 'PAYMENT TERMS'; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any; ws.getCell(`B${currentRow}`).value = String(paymentTerms || ''); ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
+    const totalsEndRow = currentRow;
 
-    const ws = XLSX.utils.aoa_to_sheet(rows);
-    // Column widths for readability
-    (ws as any)['!cols'] = [
-      { wch: 28 }, // A
-      { wch: 22 }, // B
-      { wch: 30 }, // C
-      { wch: 16 }, // D
-      { wch: 14 }, // E
-      { wch: 16 }, // F
-    ];
+    currentRow += 2; const confirmRow = currentRow; const confirmMerge = `D${confirmRow}:F${confirmRow + 1}`; ws.mergeCells(confirmMerge);
+    ws.getCell(`D${confirmRow}`).value = 'I hereby confirm the order and agree to the payment terms stated in this Proforma Invoice'; (ws.getCell(`D${confirmRow}`) as any).alignment = { wrapText: true, horizontal: 'center', vertical: 'middle' } as any;
+    try { ws.getRow(confirmRow).height = 28; ws.getRow(confirmRow + 1).height = 22; } catch {}
 
-    // Styling helpers and constants
-    const enc = XLSX.utils.encode_cell;
-    const get = (r: number, c: number) => (ws as any)[enc({ r, c })];
-    const ensure = (r: number, c: number) => {
-      const addr = enc({ r, c });
-      (ws as any)[addr] = (ws as any)[addr] || { t: 's', v: '' };
-      return (ws as any)[addr];
-    };
-    const style = (r: number, c: number, s: any) => {
-      const cell = ensure(r, c);
-      cell.s = { ...(cell.s || {}), ...(s || {}) };
-    };
-    const fill = (rgb: string) => ({ fill: { patternType: 'solid', fgColor: { rgb } } });
-    const bold = { font: { bold: true } };
-    const border = {
-      border: {
-        top: { style: 'thin', color: { rgb: 'FFCCCCCC' } },
-        bottom: { style: 'thin', color: { rgb: 'FFCCCCCC' } },
-        left: { style: 'thin', color: { rgb: 'FFCCCCCC' } },
-        right: { style: 'thin', color: { rgb: 'FFCCCCCC' } },
-      },
-    } as any;
+    currentRow = totalsEndRow + 7; const signatureRow = currentRow; ws.getCell(`E${currentRow}`).value = "Customer's Signature"; ws.getCell(`E${currentRow}`).border = { top: { style: 'thin' } } as any; (ws.getCell(`E${currentRow}`) as any).alignment = { horizontal: 'center' } as any;
 
-    // Header rows styling (rows 0 and 1)
-    const blue = fill('FFDDEBF7');
-    for (let c = 0; c <= 4; c++) style(0, c, { ...bold });
-    style(0, 0, { ...blue, ...border, font: { bold: true, sz: 12 } }); // ORDER #
-    style(0, 1, { ...blue, ...border, ...bold }); // To:
-    style(0, 3, { ...blue, ...border, ...bold }); // Phone:
-    style(1, 1, { ...blue, ...border, ...bold }); // Address:
-    style(1, 2, { ...bold }); // Shipping Address value bold
-    style(1, 3, { ...blue, ...border, ...bold }); // Email:
-    style(1, 4, { ...bold }); // Email value bold
+    currentRow = signatureRow + 7; ws.getCell(`E${currentRow}`).value = 'Follow us on social media !'; (ws.getCell(`E${currentRow}`) as any).alignment = { horizontal: 'left' } as any;
+    try {
+      const socialImg = await fetchImageBase64(['/socialmedia-qrcode.png']); const idSocial = wb.addImage({ base64: socialImg.base64, extension: socialImg.ext }); const imgRow = currentRow + 1; ws.addImage(idSocial, { tl: { col: 4.2, row: imgRow }, ext: { width: 130, height: 60 } });
+      try { const bigLogo = await fetchImageBase64(['/logo.png','/company-logo.png','/company-logo.jpg','/logo.jpg']); const idBigLogo = wb.addImage({ base64: bigLogo.base64, extension: bigLogo.ext }); ws.addImage(idBigLogo, { tl: { col: 1, row: imgRow - 1 }, ext: { width: 546, height: 96 } }); } catch {}
+    } catch {}
 
-    // Status and dates labels bold (rows 3..5 col A)
-    style(3, 0, { ...bold });
-    style(4, 0, { ...bold });
-    style(5, 0, { ...bold });
-
-    // Walk rows to style group headers, item rows, and summary rows
-    const rowCount = rows.length;
-    let groupStart: number | null = null;
-    let inItems = false;
-    let zebra = false;
-    for (let r = 0; r < rowCount; r++) {
-      const a = get(r, 0)?.v;
-      const b = get(r, 1)?.v;
-      const c = get(r, 2)?.v;
-      const d = get(r, 3)?.v;
-      const e = get(r, 4)?.v;
-      const f = get(r, 5)?.v;
-      const aStr = typeof a === 'string' ? a : '';
-
-      // Pallet meta row: A,B,C have values; D,E,F empty
-      if (a && b && c && !d && !e && !f) {
-        // close previous group box
-        if (groupStart !== null && groupStart < r) {
-          for (let rr = groupStart; rr < r; rr++) {
-            for (let cc = 0; cc <= 5; cc++) style(rr, cc, { ...border });
-          }
-        }
-        groupStart = r;
-        inItems = true;
-        zebra = false;
-        for (let col = 0; col <= 5; col++) style(r, col, { ...fill('FFE2EFDA'), ...border }); // light green
-        continue;
-      }
-
-      // Summary row starts with 'PALLET PRICE:'
-      if (aStr && aStr.toUpperCase().startsWith('PALLET PRICE')) {
-        for (let col = 0; col <= 5; col++) style(r, col, { ...fill('FFF2F2F2'), ...border }); // gray
-        style(r, 0, { ...bold });
-        style(r, 1, { ...bold });
-        style(r, 2, { ...bold });
-        style(r, 3, { ...bold });
-        style(r, 4, { ...bold, ...blue });
-        style(r, 5, { ...blue, alignment: { horizontal: 'right' }, numFmt: '"$"#,##0.00' });
-        // close the current group box
-        if (groupStart !== null) {
-          for (let rr = groupStart; rr <= r; rr++) {
-            for (let cc = 0; cc <= 5; cc++) style(rr, cc, { ...border });
-          }
-          groupStart = null;
-        }
-        inItems = false;
-        continue;
-      }
-
-      // Item rows: A empty and any of B-F non-empty
-      const isItem = !a && (b || c || d || e || f);
-      if (inItems && isItem) {
-        zebra = !zebra;
-        if (zebra) {
-          for (let col = 0; col <= 5; col++) style(r, col, { ...fill('FFF9F9F9') });
-        }
-      }
-    }
-    // Ensure last open group gets bordered
-    if (groupStart !== null) {
-      for (let rr = groupStart; rr < rowCount; rr++) {
-        for (let cc = 0; cc <= 5; cc++) style(rr, cc, { ...border });
-      }
-    }
-
-    // Totals block styling: find SUB TOTAL..GRAND TOTAL
-    let totalsStart = -1;
-    let totalsEnd = -1;
-    for (let r = rowCount - 1; r >= 0 && r >= rowCount - 12; r--) {
-      const a = get(r, 0)?.v;
-      const aStr = typeof a === 'string' ? a.toUpperCase() : '';
-      if (aStr === 'GRAND TOTAL' && totalsEnd === -1) totalsEnd = r;
-      if (aStr === 'SUB TOTAL') totalsStart = r;
-      if (aStr === 'SUB TOTAL' || aStr === 'SHIPPING' || aStr === 'GRAND TOTAL') {
-        style(r, 0, { ...bold, ...blue, ...border });
-        style(r, 1, { ...border });
-      }
-    }
-    if (totalsStart !== -1 && totalsEnd !== -1 && totalsEnd >= totalsStart) {
-      for (let r = totalsStart; r <= totalsEnd; r++) {
-        for (let c = 0; c <= 5; c++) style(r, c, { ...border });
-      }
-      // Right-align and currency format for monetary rows
-      for (let r = totalsStart; r <= totalsEnd; r++) {
-        const a = get(r, 0)?.v;
-        const aStr = typeof a === 'string' ? a.toUpperCase() : '';
-        if (aStr === 'SUB TOTAL' || aStr === 'GRAND TOTAL') style(r, 1, { alignment: { horizontal: 'right' }, numFmt: '"$"#,##0.00' });
-      }
-      // Emphasize GRAND TOTAL value
-      style(totalsEnd, 1, { font: { bold: true, sz: 12 } });
-    }
-
-    // Align numeric columns (E: pack size, F: price/subtotal)
-    for (let r = 0; r < rowCount; r++) {
-      ensure(r, 4); ensure(r, 5);
-      style(r, 4, { alignment: { horizontal: 'right' } });
-      style(r, 5, { alignment: { horizontal: 'right' }, numFmt: '"$"#,##0.00' });
-    }
-
-    XLSX.utils.book_append_sheet(wb, ws, 'Order Details');
-    const fname = `early-buy-${orderNo}.xlsx`;
-    XLSX.writeFile(wb, fname);
-  }, [editingOrder, customerName, customerPhone, shippingAddress, customerEmail, status, estFulfillment, estDelivered, lines, groupPriceByName, palletDescByGroup, computedSubTotal, shippingPercent, computedGrandTotal]);
+    const buffer = await wb.xlsx.writeBuffer(); const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = fname; a.click(); setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }, [editingOrder, status, customerName, customerPhone, shippingAddress, customerEmail, estFulfillment, estDelivered, lines, groupPriceByName, palletDescByGroup, computedSubTotal, shippingPercent, paymentTerms]);
 
   const exportEarlyBuyPdf = useCallback(async () => {
     const orderNo = safe(String(editingOrder?.id || 'EORD'));
+    const orderNumber = String(editingOrder?.id || '').trim();
     const number = (n: any) => {
       const v = Number(n);
       return Number.isFinite(v) ? numberFmt2.format(v) : '';
@@ -571,124 +490,218 @@ export default function EarlyBuy() {
       } catch { itemsByGroup[gLower] = []; }
     }));
 
-    const content: any[] = [];
-
-    // Header block (two rows) with blue label fill and borders
+    // Colors and widths matching Orders PDF
     const blue = '#DDEBF7';
-    const green = '#E2EFDA';
-    const gray = '#F2F2F2';
+    const green = '#CCFFCC';
+    const lightGrey = '#F2F2F2';
+    const darkGrey = '#BFBFBF';
+    const palletColWidths: any[] = [160, 120, 210, 100, 50, 70];
+
+    // Helper to fetch image as data URI for pdfMake
+    const fetchBase64 = async (url: string) => {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Failed to fetch ${url}`);
+      const ctype = String(res.headers.get('content-type') || '').toLowerCase();
+      const buf = await res.arrayBuffer();
+      let binary = '';
+      const bytes = new Uint8Array(buf);
+      for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+      const prefix = ctype.includes('jpeg') || ctype.includes('jpg') ? 'data:image/jpeg;base64,' : 'data:image/png;base64,';
+      return `${prefix}${btoa(binary)}`;
+    };
+
+    const content: any[] = [];
+    // Header with logo and company info (fallback without logo if fetch fails)
+    try {
+      const logo = await fetchBase64('/company-logo.png');
+      const companyPhone = '+1 470-812-0762';
+      const companyEmail = 'brandon@mpgwholesale.com';
+      const companyLocation = '145 Industrial Drive, Thomson, GA 30824';
+      const companyWebsite = 'www.mpgwholesale.com';
+      content.push({
+        table: {
+          widths: [130, 100, 260, 100, 150],
+          body: [
+            [
+              { image: logo, height:60,width:130, rowSpan: 4, border: [true, true, true, true], alignment: 'center' },
+              { text: 'Phone:', fillColor: green, bold: true, border: [true, true, true, true] },
+              { text: companyPhone, border: [true, true, true, true] },
+              { text: 'Contact Email:', fillColor: green, bold: true, border: [true, true, true, true] },
+              { text: companyEmail, border: [true, true, true, true] },
+            ],
+            [
+              {},
+              { text: 'Location:', fillColor: green, bold: true, border: [true, true, true, true] },
+              { text: companyLocation, border: [true, true, true, true] },
+              { text: 'Website:', fillColor: green, bold: true, border: [true, true, true, true] },
+              { text: companyWebsite, border: [true, true, true, true] },
+            ],
+            [ { text: '', border: [false, false, false, false] }, { text: '', border: [false, false, false, false] }, { text: '', border: [false, false, false, false] }, { text: '', border: [false, false, false, false] }, { text: '', border: [false, false, false, false] } ],
+            [ { text: '', border: [false, false, false, false] }, { text: '', border: [false, false, false, false] }, { text: '', border: [false, false, false, false] }, { text: '', border: [false, false, false, false] }, { text: '', border: [false, false, false, false] } ],
+            [
+              { text: orderNumber, fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: 'To:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: customerName || '', border: [true, true, true, true] },
+              { text: 'Phone:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: customerPhone || '', border: [true, true, true, true] },
+            ],
+            [
+              {},
+              { text: 'Address:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: shippingAddress || '', border: [true, true, true, true] },
+              { text: 'Email:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: customerEmail || '', border: [true, true, true, true] },
+            ],
+          ],
+        },
+        layout: 'noHorizontalLines',
+        margin: [0, 0, 0, 8],
+      });
+    } catch {
+      // Fallback header without logo
+      content.push({
+        table: {
+          widths: [160, 40, '*', 55, 120],
+          body: [
+            [ { text: orderNumber, fillColor: blue, bold: true, border: [true, true, true, true] }, { text: 'To:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: customerName || '', border: [true, true, true, true] }, { text: 'Phone:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: customerPhone || '', border: [true, true, true, true] } ],
+            [ { text: '', border: [true, false, true, true] }, { text: 'Address:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: shippingAddress || '', border: [true, true, true, true] }, { text: 'Email:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: customerEmail || '', border: [true, true, true, true] } ],
+          ],
+        },
+        layout: 'noHorizontalLines',
+        margin: [0, 0, 0, 8],
+      });
+    }
+
+    // Status and dates block (table matching Orders proportions)
+    const sStatus = String(status || '').toUpperCase();
     content.push({
       table: {
-        widths: [160, 40, '*', 55, 120],
+        widths: [240, 200, '*'],
         body: [
-          [
-            { text: String(orderNo || ''), fillColor: blue, bold: true, border: [true, true, true, true] },
-            { text: 'To:', fillColor: blue, bold: true, border: [true, true, true, true] },
-            { text: String(customerName || ''), border: [true, true, true, true] },
-            { text: 'Phone:', fillColor: blue, bold: true, border: [true, true, true, true] },
-            { text: String(customerPhone || ''), border: [true, true, true, true] },
-          ],
-          [
-            { text: '', border: [true, false, true, true] },
-            { text: 'Address:', fillColor: blue, bold: true, border: [true, true, true, true] },
-            { text: String(shippingAddress || ''), bold: true, border: [true, true, true, true] },
-            { text: 'Email:', fillColor: blue, bold: true, border: [true, true, true, true] },
-            { text: String(customerEmail || ''), bold: true, border: [true, true, true, true] },
-          ],
+          [ { text: 'Status:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: sStatus, bold: true, border: [true, true, true, true] }, { text: '', border: [false, false, false, false] } ],
+          [ { text: 'Estimated Shipdate for Customer:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: estFulfillment || '', bold: true, border: [true, true, true, true] }, { text: '', border: [false, false, false, false] } ],
+          [ { text: 'Estimated Arrival Date:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: estDelivered || '', bold: true, border: [true, true, true, true] }, { text: '', border: [false, false, false, false] } ],
         ],
       },
       layout: 'noHorizontalLines',
-      margin: [0,0,0,8],
+      margin: [0, 0, 0, 8],
     });
 
-    // Status and dates (match Orders formatting)
-    const sStatus = String(status || '').toUpperCase();
-    content.push({ text: 'Status:', bold: true, margin: [0, 2, 0, 0] });
-    content.push({ text: sStatus, margin: [0, 0, 0, 2] });
-    content.push({ text: 'Estimated Shipdate for Customer:', bold: true });
-    content.push({ text: String(estFulfillment || ''), margin: [0, 0, 0, 2] });
-    content.push({ text: 'Estimated Arrival Date:', bold: true });
-    content.push({ text: String(estDelivered || ''), margin: [0, 0, 0, 8] });
-
-    // Per-pallet sections (header/items once, multiple summary rows)
+    // Per-pallet sections
     for (const [gKey, gMeta] of groupLinesMap.entries()) {
-      const snapLine = (Array.isArray(lines) ? lines : []).find(l => String(l?.groupName||'').trim().toLowerCase() === gKey);
-      const unitSnap = Number(snapLine?.unitPriceAtAdd);
-      const unit = Number.isFinite(unitSnap) ? unitSnap : Number(groupPriceByName?.[gKey]);
+      const unitSnap = Number((lines.find(l => String(l?.groupName || '').trim().toLowerCase() === gKey) as any)?.unitPriceAtAdd);
+      const unit0 = Number.isFinite(unitSnap) ? unitSnap : Number(groupPriceByName?.[gKey] ?? 0);
 
-      // Group header band (A..F)
       content.push({
         table: {
-          widths: ['*', '*', 120, 60, 60, 80],
+          widths: palletColWidths,
           body: [[
-            { text: String(gMeta.palletName || gMeta.display), fillColor: green, bold: true, border: [true, true, true, true] },
-            { text: String(palletDescByGroup?.[gKey] || gMeta.display || ''), fillColor: green, border: [true, true, true, true] },
-            { text: String(gMeta.lineItem || ''), fillColor: green, border: [true, true, true, true] },
-            { text: '', fillColor: green, border: [true, true, true, true] },
-            { text: '', fillColor: green, border: [true, true, true, true] },
-            { text: '', fillColor: green, border: [true, true, true, true] },
+            { text: gMeta.palletName || gMeta.display, fillColor: green, bold: true, border: [true, true, true, true] },
+            { text: String(palletDescByGroup?.[gKey] || gMeta.display || ''), fillColor: green, bold: true, border: [true, true, true, true] },
+            { text: `Pallet ID: ${gMeta.lineItem || '-'}`, fillColor: green, bold: true, border: [true, true, true, true] },
+            { text: 'UPC', fillColor: green, bold: true, border: [true, true, true, true] },
+            { text: 'Qty', fillColor: green, bold: true, border: [true, true, true, true] },
+            { text: 'Price', fillColor: green, bold: true, border: [true, true, true, true] },
           ]],
         },
         layout: 'noHorizontalLines',
       });
 
-      // Item table (no header row), bordered
       const items = itemsByGroup[gKey] || [];
       if (items.length) {
         const itemRows = items.map((it: any) => ([
-          { text: '', border: [true, true, true, true] },
-          { text: String(it?.itemCode || ''), border: [true, true, true, true] },
-          { text: String(it?.description || ''), border: [true, true, true, true] },
-          { text: String(it?.upc || ''), alignment: 'right', border: [true, true, true, true] },
-          { text: (Number.isFinite(Number(it?.packSize)) ? String(Number(it?.packSize)) : ''), alignment: 'right', border: [true, true, true, true] },
-          { text: (Number.isFinite(Number(it?.price)) ? `$${Number(it?.price).toFixed(2)}` : ''), alignment: 'right', border: [true, true, true, true] },
+          { text: '', fillColor: lightGrey, border: [true, true, true, true] },
+          { text: String(it?.itemCode || ''), fillColor: lightGrey, border: [true, true, true, true] },
+          { text: String(it?.description || ''), fillColor: lightGrey, border: [true, true, true, true] },
+          { text: String(it?.upc || ''), alignment: 'left', fillColor: lightGrey, border: [true, true, true, true] },
+          { text: (Number.isFinite(Number(it?.packSize)) ? String(Number(it?.packSize)) : ''), alignment: 'left', fillColor: lightGrey, border: [true, true, true, true] },
+          { text: (Number.isFinite(Number(it?.price)) ? `$${Number(it?.price).toFixed(2)}` : ''), alignment: 'right', fillColor: lightGrey, border: [true, true, true, true] },
         ]));
-        content.push({ table: { widths: ['*', 90, '*', 70, 60, 70], body: itemRows }, layout: 'noHorizontalLines' });
+        content.push({ table: { widths: palletColWidths, body: itemRows }, layout: 'noHorizontalLines' });
       }
 
-      // One summary row per occurrence
       for (const ln of gMeta.lines) {
-        const discounted = Number.isFinite(unit) ? unit * (1 - ln.discount/100) : NaN;
-        const subtotal = Number.isFinite(discounted) ? discounted * ln.qty : NaN;
+        const unitBase = unit0;
+        const disc = Math.min(100, Math.max(0, Number(ln.discount)));
+        const unitDisc = Number.isFinite(unitBase) ? unitBase * (1 - disc / 100) : NaN;
+        const qtyEach = Math.max(0, Math.floor(Number(ln.qty || 0)));
+        const lineSubEach = (Number.isFinite(unitDisc) && Number.isFinite(qtyEach)) ? unitDisc * qtyEach : NaN;
         content.push({
           table: {
-            widths: ['*', 90, 150, 90, 90, 80],
+            widths: palletColWidths,
             body: [[
-              { text: `PALLET PRICE: ${Number.isFinite(unit) ? `$${unit.toFixed(2)}` : ''}`, fillColor: gray, bold: true, border: [true, true, true, true] },
-              { text: `DISCOUNT: ${Number.isFinite(ln.discount) ? `${ln.discount}%` : ''}`, fillColor: gray, bold: true, border: [true, true, true, true] },
-              { text: `DISCOUNTED PRICE: ${Number.isFinite(discounted) ? `$${discounted.toFixed(2)}` : ''}`, fillColor: gray, bold: true, border: [true, true, true, true] },
-              { text: `QUANTITY: ${ln.qty || ''}`, fillColor: gray, bold: true, border: [true, true, true, true] },
+              { text: `PALLET PRICE: ${Number.isFinite(unitBase) ? `$${unitBase.toFixed(2)}` : ''}`, fillColor: darkGrey, bold: true, border: [true, true, true, true] },
+              { text: `DISCOUNT: ${Number.isFinite(disc) ? `${disc}%` : ''}`, fillColor: darkGrey, bold: true, border: [true, true, true, true] },
+              { text: `DISCOUNTED PRICE: ${Number.isFinite(unitDisc) ? `$${unitDisc.toFixed(2)}` : ''}`, fillColor: darkGrey, bold: true, border: [true, true, true, true] },
+              { text: `QUANTITY: ${Number.isFinite(qtyEach) ? qtyEach : ''}`, fillColor: darkGrey, bold: true, border: [true, true, true, true] },
               { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] },
-              { text: Number.isFinite(subtotal) ? `$${subtotal.toFixed(2)}` : '', alignment: 'right', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: Number.isFinite(lineSubEach) ? `$${lineSubEach.toFixed(2)}` : '', alignment: 'right', fillColor: blue, border: [true, true, true, true] },
             ]],
           },
           layout: 'noHorizontalLines',
-          margin: [0, 2, 0, 6],
+          margin: [0, 2, 0, 4],
         });
       }
+      content.push({ text: ' ', margin: [0, 2, 0, 2] });
     }
 
-    // Footer totals (blue fill + borders and bold like Orders PDF)
-    const subText = Number.isFinite(Number(computedSubTotal)) ? `$${Number(computedSubTotal).toFixed(2)}` : '';
-    const grandText = Number.isFinite(Number(computedGrandTotal)) ? `$${Number(computedGrandTotal).toFixed(2)}` : '';
-    const shipText = `${String(shippingPercent||'')}%`;
+    // Totals including Payment Terms
+    const subN = Number(computedSubTotal);
+    const subRounded = Number.isFinite(subN) ? Number(Number(subN).toFixed(2)) : NaN;
+    const sp = Number(shippingPercent);
+    const ship = Number.isFinite(sp) ? sp : NaN;
+    const grandN = Number(computedGrandTotal);
+    const grandRounded = Number.isFinite(grandN) ? Number(Number(grandN).toFixed(2)) : NaN;
     content.push({
       table: {
         widths: [120, 120],
         body: [
-          [ { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true,true,true,true] }, { text: subText, alignment: 'right', border: [true,true,true,true] } ],
-          [ { text: 'SHIPPING', fillColor: blue, bold: true, border: [true,true,true,true] }, { text: shipText, alignment: 'right', border: [true,true,true,true] } ],
-          [ { text: 'GRAND TOTAL', fillColor: blue, bold: true, border: [true,true,true,true] }, { text: grandText, alignment: 'right', bold: true, border: [true,true,true,true] } ],
+          [ { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(subRounded) ? `$${subRounded.toFixed(2)}` : '', alignment: 'right', bold: true, border: [true, true, true, true] } ],
+          [ { text: 'SHIPPING', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(ship) ? `${ship}%` : '', alignment: 'right', bold: true, border: [true, true, true, true] } ],
+          [ { text: 'GRAND TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(grandRounded) ? `$${grandRounded.toFixed(2)}` : '', alignment: 'right', bold: true, border: [true, true, true, true] } ],
+          [ { text: 'PAYMENT TERMS', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: String(paymentTerms || ''), alignment: 'right', bold: true, border: [true, true, true, true] } ],
         ],
       },
       layout: 'noHorizontalLines',
-      margin: [0, 4, 0, 0],
+      margin: [0, 6, 0, 0],
     });
+
+    // Confirmation block merged across right side
+    content.push({
+      table: { widths: ['*','*','*','*','*','*'], body: [[ { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: 'I hereby confirm the order and agree to the payment terms stated in this Proforma Invoice', colSpan: 3, alignment: 'center', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] } ]] },
+      layout: 'noHorizontalLines',
+      margin: [0, 12, 0, 0],
+    });
+
+    // Spacer and signature line
+    content.push({ text: ' ', margin: [0, 40, 0, 0] });
+    content.push({ table: { widths: ['*','*','*','*','*','*'], body: [[ { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: "Customer's Signature", alignment: 'center', border: [false, true, false, false] }, { text: '', border: [false,false,false,false] } ]] }, layout: 'noHorizontalLines', margin: [0, 0, 0, 0] });
+
+    // Spacer to social section
+    content.push({ text: ' ', margin: [0, 70, 0, 0] });
+    try {
+      const social = await fetchBase64('/socialmedia-qrcode.png');
+      const bottomLogo = await fetchBase64('/company-logo.png');
+      content.push({
+        table: {
+          widths: ['*','auto','*','*','auto','*'],
+          body: [[
+            { text: '', border: [false, false, false, false] },
+            { image: bottomLogo, fit: [410, 72], alignment: 'left', border: [false, false, false, false] },
+            { text: '', border: [false, false, false, false] },
+            { text: '', border: [false, false, false, false] },
+            { stack: [ { text: 'Follow us on social media !', alignment: 'center', margin: [0, 0, 0, 4] }, { image: social, fit: [120, 60], alignment: 'center' } ], border: [false, false, false, false] },
+            { text: '', border: [false, false, false, false] },
+          ]],
+        },
+        layout: 'noHorizontalLines',
+      });
+    } catch {}
 
     const docDefinition = { pageOrientation: 'landscape', pageMargins: [20,20,20,20], content, defaultStyle: { fontSize: 9 } } as any;
     const fname = `early-buy-${orderNo}.pdf`;
     (pdfMake as any).createPdf(docDefinition).download(fname);
-  }, [editingOrder, lines, customerName, customerPhone, shippingAddress, customerEmail, status, estFulfillment, estDelivered, groupPriceByName, palletDescByGroup, computedSubTotal, shippingPercent, computedGrandTotal, numberFmt2]);
+  }, [editingOrder, lines, customerName, customerPhone, shippingAddress, customerEmail, status, estFulfillment, estDelivered, groupPriceByName, palletDescByGroup, computedSubTotal, shippingPercent, computedGrandTotal, numberFmt2, paymentTerms]);
 
   useEffect(() => {
     try {
@@ -1290,6 +1303,7 @@ export default function EarlyBuy() {
         originalPrice: String(d?.originalPrice || ''),
         shippingPercent: String(d?.shippingPercent || ''),
         discountPercent: String(d?.discountPercent || ''),
+        paymentTerms: String(d?.paymentTerms || ''),
         notes: String(d?.notes || ''),
         lines: (() => {
           const raw = Array.isArray(d?.lines)
@@ -1489,6 +1503,7 @@ export default function EarlyBuy() {
     if (!anyQty) errs.push('Please add at least one pallet with quantity > 0');
     const anyInvalid = rows.some(l => !Number.isFinite(Number(l.qty)) || Number(l.qty) <= 0);
     if (anyInvalid) errs.push('Each pallet quantity must be > 0');
+    if (!String(paymentTerms || '').trim()) errs.push('Payment Terms is required');
 
     if (errs.length) { toast.error(errs[0]); return; }
 
@@ -1520,6 +1535,7 @@ export default function EarlyBuy() {
         shippingAddress,
         originalPrice: computedSubTotal,
         shippingPercent,
+        paymentTerms,
         discountPercent: '',
         notes,
         // multiple aliases for backend compatibility
@@ -1629,6 +1645,7 @@ export default function EarlyBuy() {
     setLastUpdatedAt('');
     setLastUpdatedBy('');
     setLines([]);
+    setPaymentTerms('');
   }, []);
 
   return (
@@ -1697,6 +1714,7 @@ export default function EarlyBuy() {
               setOriginalPrice(row.originalPrice || '');
               setShippingPercent(row.shippingPercent || '');
               setDiscountPercent(row.discountPercent || '');
+              setPaymentTerms(String((row as any)?.paymentTerms || ''));
               setNotes(row.notes || '');
               setLastUpdatedAt(String(row.updatedAt || ''));
               setLastUpdatedBy(String(row.updatedBy || ''));
@@ -1764,9 +1782,17 @@ export default function EarlyBuy() {
               />
               <TextField size="small" required label="Customer Name" value={customerName} onChange={(e)=> setCustomerName(e.target.value)} fullWidth disabled={!isEditable} />
             </Stack>
-            <Stack direction={{ xs:'column', sm:'row' }} spacing={2}>
-              <TextField size="small" required label="Phone Number" value={customerPhone} onChange={(e)=> setCustomerPhone(e.target.value)} fullWidth disabled={!isEditable} />
-            </Stack>
+            <Box sx={{ display: 'flex' }}>
+              <TextField
+                size="small"
+                required
+                label="Phone Number"
+                value={customerPhone}
+                onChange={(e)=> setCustomerPhone(e.target.value)}
+                disabled={!isEditable}
+                sx={{ width: { xs: '100%', sm: 280 } }}
+              />
+            </Box>
             <TextField size="small" required label="Shipping Address" value={shippingAddress} onChange={(e)=> setShippingAddress(e.target.value)} fullWidth multiline minRows={2} disabled={!isEditable} />
             {(() => {
               const isYmd = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(String(s||''));
@@ -1821,6 +1847,19 @@ export default function EarlyBuy() {
               <TextField size="small" label="Shipping Charges (%)" value={shippingPercent} onChange={(e)=> setShippingPercent(e.target.value)} fullWidth disabled={!isEditable} />
               <TextField size="small" label="Grand Total" value={computedGrandTotal} fullWidth disabled />
             </Stack>
+            <Box sx={{ display: 'flex' }}>
+              <TextField
+                size="small"
+                label="Payment Terms"
+                value={paymentTerms}
+                onChange={(e)=> setPaymentTerms(e.target.value)}
+                required
+                disabled={!isEditable}
+                error={!String(paymentTerms||'').trim()}
+                helperText={!String(paymentTerms||'').trim() ? 'Required' : ''}
+                sx={{ width: { xs: '100%', sm: 280 } }}
+              />
+            </Box>
             <TextField size="small" label="Remarks/Notes" value={notes} onChange={(e)=> setNotes(e.target.value)} fullWidth multiline minRows={3} disabled={!isEditable} />
             <Typography variant="caption" color="error" sx={{ mt: -1 }}>
               {(() => {
