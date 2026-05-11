@@ -95,9 +95,11 @@ export default function Orders() {
   const [manualLastUpdatedBy, setManualLastUpdatedBy] = useState('');
   const [manualEstFulfillment, setManualEstFulfillment] = useState('');
   const [manualEstDelivered, setManualEstDelivered] = useState('');
+  const [manualRequestedShip, setManualRequestedShip] = useState('');
   const [manualShippingAddress, setManualShippingAddress] = useState('');
   const [manualNotes, setManualNotes] = useState('');
-  const [manualPaymentTerms, setManualPaymentTerms] = useState('');
+  const [manualPaymentTerms, setManualPaymentTerms] = useState('Net 60');
+  const [manualPaymentStatus, setManualPaymentStatus] = useState('Not Paid');
   const [manualOriginalPrice, setManualOriginalPrice] = useState('');
   const [manualShippingPercent, setManualShippingPercent] = useState('');
   const [manualDiscountPercent, setManualDiscountPercent] = useState('');
@@ -675,10 +677,12 @@ export default function Orders() {
       }
     } catch {}
     setManualEstDelivered(toYmd((row as any)?.estDeliveredDate));
+    setManualRequestedShip(toYmd((row as any)?.requestedShipDate));
     // Mark as touched only if we already have a server value; otherwise allow recompute to run
     setManualShipdateTouched(Boolean(initShip));
     setManualShippingAddress(String(row?.shippingAddress || '').trim());
-    setManualPaymentTerms(String((row as any)?.paymentTerms || '').trim());
+    setManualPaymentTerms(String((row as any)?.paymentTerms || 'Net 60').trim());
+    setManualPaymentStatus(String((row as any)?.paymentStatus || 'Not Paid').trim());
     setManualNotes(String((row as any)?.notes || '').trim());
     setManualOriginalPrice(String((row as any)?.originalPrice ?? '').trim());
     setManualShippingPercent(String((row as any)?.shippingPercent ?? '').trim());
@@ -1249,14 +1253,16 @@ export default function Orders() {
           const maybeRow = args?.[1];
           const row = (maybeRow && typeof maybeRow === 'object') ? maybeRow : (maybeParams?.row || {});
           const list = Array.isArray((row as any)?.onWaterShipments) ? (row as any).onWaterShipments : [];
-          const hit = list.find((x: any) => String(x?.edd || '') === edd);
-          const v = Number(hit?.qty ?? 0);
+          const v = list
+            .filter((x: any) => String(x?.edd || '') === edd)
+            .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
           return Math.max(0, Math.floor(Number.isFinite(v) ? v : 0));
         },
         renderCell: (p: any) => {
           const list = Array.isArray(p?.row?.onWaterShipments) ? p.row.onWaterShipments : [];
-          const hit = list.find((x: any) => String(x?.edd || '') === edd);
-          const v = Number(hit?.qty ?? 0);
+          const v = list
+            .filter((x: any) => String(x?.edd || '') === edd)
+            .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
           const qty = Math.max(0, Math.floor(Number.isFinite(v) ? v : 0));
           return String(qty);
         },
@@ -1312,14 +1318,16 @@ export default function Orders() {
           const maybeRow = args?.[1];
           const row = (maybeRow && typeof maybeRow === 'object') ? maybeRow : (maybeParams?.row || {});
           const list = Array.isArray((row as any)?.onProcessBatches) ? (row as any).onProcessBatches : [];
-          const hit = list.find((x: any) => String(x?.edd || '') === edd);
-          const v = Number(hit?.qty ?? 0);
+          const v = list
+            .filter((x: any) => String(x?.edd || '') === edd)
+            .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
           return Math.max(0, Math.floor(Number.isFinite(v) ? v : 0));
         },
         renderCell: (p: any) => {
           const list = Array.isArray(p?.row?.onProcessBatches) ? p.row.onProcessBatches : [];
-          const hit = list.find((x: any) => String(x?.edd || '') === edd);
-          const v = Number(hit?.qty ?? 0);
+          const v = list
+            .filter((x: any) => String(x?.edd || '') === edd)
+            .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
           const qty = Math.max(0, Math.floor(Number.isFinite(v) ? v : 0));
           return String(qty);
         },
@@ -2159,25 +2167,24 @@ export default function Orders() {
     };
 
     // Header (logo and contact info)
-    ws.mergeCells('A1:A4');
+    // Merge only A1:A2 for the logo area (remove extra spacing below)
+    ws.mergeCells('A1:A2');
     ws.getCell('A1').value = null; // ensure merged block has no stray value
-    // Target size for merged A1:A4: width 2.3in (~221px), height 1.0in (~72pt tall)
+    // Target size for merged A1:A2: width 2.3in (~221px), height ~0.49in (~35pt)
     // Column width is in characters; map ~ (px/7)-5. 2.3in ~ 221px => ~26 chars
     try { ws.getColumn(1).width = 26; } catch {}
-    // Distribute total height across rows 1-4 to exactly ~1.0in total (72pt)
+    // Set compact height across rows 1-2 to ~0.49in total (35pt)
     try {
       ws.getRow(1).height = 18;
-      ws.getRow(2).height = 18;
-      ws.getRow(3).height = 18;
-      ws.getRow(4).height = 18;
+      ws.getRow(2).height = 17;
     } catch {}
-    // Add all borders around merged A1:A4 (logo area)
+    // Add all borders around merged A1:A2 (logo area)
     try { (ws.getCell('A1') as any).border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } }; } catch {}
     try {
       const logoImg = await fetchImageBase64(['/logo.png','/company-logo.png','/company-logo.jpg','/logo.jpg']);
       const imgId = wb.addImage({ base64: logoImg.base64, extension: logoImg.ext });
-      // Place image sized to requested area (2.3in x 1.0in) ~ (221px x 96px)
-      ws.addImage(imgId, { tl: { col: 0, row: 0 }, ext: { width: 221, height: 96 } });
+      // Place image sized to requested area (2.3in x 0.49in) ~ (221px x 47px)
+      ws.addImage(imgId, { tl: { col: 0, row: 0 }, ext: { width: 221, height: 47 } });
     } catch {}
     const lightGreen = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFCCFFCC' } } as const;
     const lightBlue = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDDEBF7' } } as const;
@@ -2193,34 +2200,34 @@ export default function Orders() {
     ws.getCell('D2').value = 'Website:'; ws.getCell('D2').font = bold; (ws.getCell('D2') as any).fill = lightGreen;
     ws.getCell('E2').value = 'www.mpgwholesale.com';
 
-    // Order Information
-    ws.getCell('A5').value = orderNumber || (manualEditRow as any)?.rawId || '';
-    ws.getCell('A5').font = bold; (ws.getCell('A5') as any).fill = lightBlue; (ws.getCell('A5') as any).border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } } as any;
-    ws.getCell('B5').value = 'To:'; ws.getCell('B5').font = bold; (ws.getCell('B5') as any).fill = lightBlue;
-    ws.getCell('C5').value = String(manualCustomerName || '');
-    ws.getCell('D5').value = 'Phone:'; ws.getCell('D5').font = bold; (ws.getCell('D5') as any).fill = lightBlue;
-    ws.getCell('E5').value = String(manualCustomerPhone || '');
-    ws.getCell('B6').value = 'Address:'; ws.getCell('B6').font = bold; (ws.getCell('B6') as any).fill = lightBlue;
-    ws.getCell('C6').value = String(manualShippingAddress || '');
-    ws.getCell('D6').value = 'Email:'; ws.getCell('D6').font = bold; (ws.getCell('D6') as any).fill = lightBlue;
-    ws.getCell('E6').value = String(manualCustomerEmail || '');
+    // Order Information (shifted up one row to remove extra spacer)
+    ws.getCell('A4').value = orderNumber || (manualEditRow as any)?.rawId || '';
+    ws.getCell('A4').font = bold; (ws.getCell('A4') as any).fill = lightBlue; (ws.getCell('A4') as any).border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } } as any;
+    ws.getCell('B4').value = 'To:'; ws.getCell('B4').font = bold; (ws.getCell('B4') as any).fill = lightBlue;
+    ws.getCell('C4').value = String(manualCustomerName || '');
+    ws.getCell('D4').value = 'Phone:'; ws.getCell('D4').font = bold; (ws.getCell('D4') as any).fill = lightBlue;
+    ws.getCell('E4').value = String(manualCustomerPhone || '');
+    ws.getCell('B5').value = 'Address:'; ws.getCell('B5').font = bold; (ws.getCell('B5') as any).fill = lightBlue;
+    ws.getCell('C5').value = String(manualShippingAddress || '');
+    ws.getCell('D5').value = 'Email:'; ws.getCell('D5').font = bold; (ws.getCell('D5') as any).fill = lightBlue;
+    ws.getCell('E5').value = String(manualCustomerEmail || '');
 
     // Borders for C5, C6, E5, E6
     const thinBorder = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } } as const;
+    ws.getCell('C4').border = thinBorder as any;
     ws.getCell('C5').border = thinBorder as any;
-    ws.getCell('C6').border = thinBorder as any;
+    ws.getCell('E4').border = thinBorder as any;
     ws.getCell('E5').border = thinBorder as any;
-    ws.getCell('E6').border = thinBorder as any;
     // Additional borders per spec
-    ;(['B1','C1','D1','E1','B2','C2','D2','E2','B5','B6','D5','D6'] as const).forEach((addr) => {
+    ;(['B1','C1','D1','E1','B2','C2','D2','E2','B4','B5','D4','D5'] as const).forEach((addr) => {
       (ws.getCell(addr) as any).border = thinBorder as any;
     });
-    ws.getCell('A8').value = 'Status:'; ws.getCell('A8').font = bold; (ws.getCell('A8') as any).fill = lightBlue; (ws.getCell('A8') as any).border = thinBorder as any; ws.getCell('B8').value = sStatus; ws.getCell('B8').font = bold; (ws.getCell('B8') as any).border = thinBorder as any;
-    ws.getCell('A9').value = 'Estimated Shipdate for Customer:'; ws.getCell('A9').font = bold; (ws.getCell('A9') as any).fill = lightBlue; (ws.getCell('A9') as any).border = thinBorder as any; ws.getCell('B9').value = String(manualEstFulfillment || ''); ws.getCell('B9').font = bold; (ws.getCell('B9') as any).border = thinBorder as any;
-    ws.getCell('A10').value = 'Estimated Arrival Date:'; ws.getCell('A10').font = bold; (ws.getCell('A10') as any).fill = lightBlue; (ws.getCell('A10') as any).border = thinBorder as any; ws.getCell('B10').value = String(manualEstDelivered || ''); ws.getCell('B10').font = bold; (ws.getCell('B10') as any).border = thinBorder as any;
+    ws.getCell('A7').value = 'Status:'; ws.getCell('A7').font = bold; (ws.getCell('A7') as any).fill = lightBlue; (ws.getCell('A7') as any).border = thinBorder as any; ws.getCell('B7').value = sStatus; ws.getCell('B7').font = bold; (ws.getCell('B7') as any).border = thinBorder as any;
+    ws.getCell('A8').value = 'Estimated Shipdate for Customer:'; ws.getCell('A8').font = bold; (ws.getCell('A8') as any).fill = lightBlue; (ws.getCell('A8') as any).border = thinBorder as any; ws.getCell('B8').value = String(manualEstFulfillment || ''); ws.getCell('B8').font = bold; (ws.getCell('B8') as any).border = thinBorder as any;
+    ws.getCell('A9').value = 'Estimated Arrival Date:'; ws.getCell('A9').font = bold; (ws.getCell('A9') as any).fill = lightBlue; (ws.getCell('A9') as any).border = thinBorder as any; ws.getCell('B9').value = String(manualEstDelivered || ''); ws.getCell('B9').font = bold; (ws.getCell('B9') as any).border = thinBorder as any;
 
     // Dynamic Pallet Logic: group by pallet and print details once; add one summary per duplicate line
-    let currentRow = 12;
+    let currentRow = 11;
     // Return numeric value for currency cells; formatting applies $ via numFmt
     const encodeMoney = (n: any) => (Number.isFinite(Number(n)) ? Number(n) : '');
     const rowsList = Array.isArray(manualOrderRows) ? manualOrderRows : [];
@@ -2274,7 +2281,7 @@ export default function Orders() {
         ws.getRow(currentRow).values = [
           `PALLET PRICE: ${Number.isFinite(unitBase) ? `$${unitBase.toFixed(2)}` : ''}`,
           `DISCOUNT: ${Number.isFinite(disc) ? `${disc}%` : ''}`,
-          `DISCOUNTED PRICE: ${Number.isFinite(unitDiscounted) ? `$${unitDiscounted.toFixed(2)}` : ''}`,
+          (disc === 0 ? '' : `DISCOUNTED PRICE: ${Number.isFinite(unitDiscounted) ? `$${unitDiscounted.toFixed(2)}` : ''}`),
           `QUANTITY: ${Number.isFinite(qty) ? qty : ''}`,
           'SUB TOTAL',
           encodeMoney(lineSub),
@@ -2292,7 +2299,11 @@ export default function Orders() {
     // Totals and Footer
     ws.getCell(`A${currentRow}`).value = 'SUB TOTAL'; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any; ws.getCell(`B${currentRow}`).value = Number.isFinite(subRounded) ? subRounded : ''; ws.getCell(`B${currentRow}`).numFmt = '"$"#,##0.00'; ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
     currentRow += 1;
-    ws.getCell(`A${currentRow}`).value = 'SHIPPING'; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any; ws.getCell(`B${currentRow}`).value = Number.isFinite(sp) ? `${sp}%` : ''; ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
+    // Shipping row: Column A shows percentage, Column B shows amount
+    const shipAmt = (Number.isFinite(subRounded) && Number.isFinite(sp)) ? Number((subRounded * (sp/100)).toFixed(2)) : NaN;
+    const shipLabel = Number.isFinite(sp) ? `SHIPPING (${sp}%)` : 'SHIPPING';
+    ws.getCell(`A${currentRow}`).value = shipLabel; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any;
+    ws.getCell(`B${currentRow}`).value = Number.isFinite(shipAmt) ? shipAmt : ''; ws.getCell(`B${currentRow}`).numFmt = '"$"#,##0.00'; ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
     currentRow += 1;
     ws.getCell(`A${currentRow}`).value = 'GRAND TOTAL'; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any; ws.getCell(`B${currentRow}`).value = Number.isFinite(grand) ? grand : ''; ws.getCell(`B${currentRow}`).numFmt = '"$"#,##0.00'; ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
     currentRow += 1;
@@ -2336,6 +2347,16 @@ export default function Orders() {
       } catch {}
     } catch {}
 
+    // Make all text alignment centered
+    try {
+      ws.eachRow({ includeEmpty: true }, (row: any) => {
+        row.eachCell({ includeEmpty: true }, (cell: any) => {
+          const prev = (cell.alignment || {}) as any;
+          cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: Boolean(prev.wrapText) } as any;
+        });
+      });
+    } catch {}
+
     const buffer = await wb.xlsx.writeBuffer();
     const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);
@@ -2369,6 +2390,14 @@ export default function Orders() {
     if (!s) return false;
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
   };
+  const plusOneDay = (ymd?: string) => {
+    const s = String(ymd || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return undefined as unknown as string | undefined;
+    const d = new Date(`${s}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return undefined as unknown as string | undefined;
+    d.setDate(d.getDate() + 1);
+    return d.toISOString().slice(0, 10);
+  };
 
   const exportManualOrderPdf = useCallback(async () => {
     if (manualMode !== 'edit' || !manualEditRow) return;
@@ -2380,6 +2409,8 @@ export default function Orders() {
     const ship = Number.isFinite(sp) ? Math.min(100, Math.max(0, sp)) : 0;
     // Match UI/server behavior: round subtotal to cents before applying shipping
     const subRounded = Number.isFinite(sub) ? Number(Number(sub).toFixed(2)) : NaN;
+    const shipAmt = (Number.isFinite(subRounded) && Number.isFinite(sp)) ? Number((subRounded * (sp / 100)).toFixed(2)) : NaN;
+    const shipLabel = Number.isFinite(sp) ? `SHIPPING (${sp}%)` : 'SHIPPING';
     const grand = Number.isFinite(subRounded) ? subRounded * (1 + ship / 100) : NaN;
 
     const blue = '#DDEBF7';
@@ -2461,8 +2492,8 @@ export default function Orders() {
           widths: [130, 100, 260, 100, 150],
           body: [
             [
-              { image: logo, height:60,width:130, rowSpan: 4, border: [true, true, true, true], alignment: 'center', },
-              { text: 'Phone:', fillColor: green, bold: true, border: [true, true, true, true] },
+              { image: logo, height:35, width:135, rowSpan: 2, border: [true, true, true, true], alignment: 'center' },
+              { text: 'Phone:',fillColor: green, bold: true, border: [true, true, true, true] },
               { text: companyPhone, border: [true, true, true, true] },
               { text: 'Contact Email:', fillColor: green, bold: true, border: [true, true, true, true] },
               { text: companyEmail, border: [true, true, true, true] },
@@ -2474,20 +2505,8 @@ export default function Orders() {
               { text: 'Website:', fillColor: green, bold: true, border: [true, true, true, true] },
               { text: companyWebsite, border: [true, true, true, true] },
             ],
-            // Spacer rows (no borders) between company and customer details, merged under the logo
-            [
-              { text: '', border: [false, false, false, false] },
-              { text: '', border: [false, false, false, false] },
-              { text: '', border: [false, false, false, false] },
-              { text: '', border: [false, false, false, false] },
-              { text: '', border: [false, false, false, false] },
-            ],
-            [
-              { text: '', border: [false, false, false, false] },
-              { text: '', border: [false, false, false, false] },
-              { text: '', border: [false, false, false, false] },
-              { text: '', border: [false, false, false, false] },
-              { text: '', border: [false, false, false, false] },
+             [
+              { text: '', colSpan: 5, margin: [-4, -4], border: [false, false, false, false] }, {}, {}, {}, {}
             ],
             [
               { text: orderNumber, fillColor: blue, bold: true, border: [true, true, true, true] },
@@ -2503,6 +2522,7 @@ export default function Orders() {
               { text: 'Email:', fillColor: blue, bold: true, border: [true, true, true, true] },
               { text: manualCustomerEmail || '', border: [true, true, true, true] },
             ],
+            
           ],
         },
         layout: 'noHorizontalLines',
@@ -2585,9 +2605,9 @@ export default function Orders() {
           { text: '', fillColor: lightGrey, border: [true, true, true, true] },
           { text: String(it?.itemCode || ''), fillColor: lightGrey, border: [true, true, true, true] },
           { text: String(it?.description || ''), fillColor: lightGrey, border: [true, true, true, true] },
-          { text: String(it?.upc || ''), alignment: 'left', fillColor: lightGrey, border: [true, true, true, true] },
-          { text: (Number.isFinite(Number(it?.packSize)) ? String(Number(it?.packSize)) : ''), alignment: 'left', fillColor: lightGrey, border: [true, true, true, true] },
-          { text: (Number.isFinite(Number(it?.price)) ? `$${Number(it?.price).toFixed(2)}` : ''), alignment: 'right', fillColor: lightGrey, border: [true, true, true, true] },
+          { text: String(it?.upc || ''), alignment: 'center', fillColor: lightGrey, border: [true, true, true, true] },
+          { text: (Number.isFinite(Number(it?.packSize)) ? String(Number(it?.packSize)) : ''), alignment: 'center', fillColor: lightGrey, border: [true, true, true, true] },
+          { text: (Number.isFinite(Number(it?.price)) ? `$${Number(it?.price).toFixed(2)}` : ''), alignment: 'center', fillColor: lightGrey, border: [true, true, true, true] },
         ]);
         content.push({ table: { widths: palletColWidths, body: itemRows }, layout: 'noHorizontalLines' });
       }
@@ -2607,10 +2627,10 @@ export default function Orders() {
             body: [[
               { text: `PALLET PRICE: ${Number.isFinite(unitBase) ? `$${unitBase.toFixed(2)}` : ''}`, fillColor: darkGrey, bold: true, border: [true, true, true, true] },
               { text: `DISCOUNT: ${Number.isFinite(disc) ? `${disc}%` : ''}`, fillColor: darkGrey, bold: true, border: [true, true, true, true] },
-              { text: `DISCOUNTED PRICE: ${Number.isFinite(unitDisc) ? `$${unitDisc.toFixed(2)}` : ''}`, fillColor: darkGrey, bold: true, border: [true, true, true, true] },
+              { text: (disc === 0 ? '' : `DISCOUNTED PRICE: ${Number.isFinite(unitDisc) ? `$${unitDisc.toFixed(2)}` : ''}`), fillColor: darkGrey, bold: true, border: [true, true, true, true] },
               { text: `QUANTITY: ${Number.isFinite(qtyEach) ? qtyEach : ''}`, fillColor: darkGrey, bold: true, border: [true, true, true, true] },
               { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] },
-              { text: Number.isFinite(lineSubEach) ? `$${lineSubEach.toFixed(2)}` : '', alignment: 'right', fillColor: blue, border: [true, true, true, true] },
+              { text: Number.isFinite(lineSubEach) ? `$${lineSubEach.toFixed(2)}` : '', alignment: 'center', fillColor: blue, border: [true, true, true, true] },
             ]],
           },
           layout: 'noHorizontalLines',
@@ -2624,10 +2644,10 @@ export default function Orders() {
       table: {
         widths: [120, 120],
         body: [
-          [ { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(subRounded) ? `$${subRounded.toFixed(2)}` : '', alignment: 'right', bold: true, border: [true, true, true, true] } ],
-          [ { text: 'SHIPPING', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(sp) ? `${sp}%` : '', alignment: 'right', bold: true, border: [true, true, true, true] } ],
-          [ { text: 'GRAND TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(grand) ? `$${grand.toFixed(2)}` : '', alignment: 'right', bold: true, border: [true, true, true, true] } ],
-          [ { text: 'PAYMENT TERMS', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: String(manualPaymentTerms || ''), alignment: 'right', bold: true, border: [true, true, true, true] } ],
+          [ { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(subRounded) ? `$${subRounded.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
+          [ { text: shipLabel, fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(shipAmt) ? `$${shipAmt.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
+          [ { text: 'GRAND TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(grand) ? `$${grand.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
+          [ { text: 'PAYMENT TERMS', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: String(manualPaymentTerms || ''), alignment: 'center', bold: true, border: [true, true, true, true] } ],
         ],
       },
       layout: 'noHorizontalLines',
@@ -2712,7 +2732,7 @@ export default function Orders() {
       pageOrientation: 'landscape',
       pageMargins: [20, 20, 20, 20],
       content,
-      defaultStyle: { fontSize: 9 },
+      defaultStyle: { fontSize: 9, alignment: 'center' },
     } as any;
 
     const safe = (v: any) => String(v ?? '').replace(/[\/\\:*?"<>|]/g, '-');
@@ -3550,7 +3570,9 @@ export default function Orders() {
           customerPhone: String(o?.customerPhone || ''),
           shippingAddress: String(o?.shippingAddress || ''),
           paymentTerms: String(o?.paymentTerms || ''),
+          paymentStatus: String(o?.paymentStatus || ''),
           createdAtOrder: normalizeDateValue(o?.createdAtOrder),
+          requestedShipDate: normalizeDateValue(o?.requestedShipDate),
           originalPrice: o?.originalPrice,
           shippingPercent: o?.shippingPercent,
           discountPercent: o?.discountPercent,
@@ -3911,16 +3933,6 @@ export default function Orders() {
   }, []);
 
   const ordersColumns: GridColDef[] = useMemo(() => [
-    {
-      field: 'actions',
-      headerName: 'Actions',
-      width: 120,
-      sortable: false,
-      filterable: false,
-      renderCell: (params: any) => (
-        <Button size="small" variant="outlined" onClick={() => openDetailedEdit(params.row as OrdersRow)}>View</Button>
-      )
-    },
     { field: 'orderNumber', headerName: 'Order #', flex: 1, minWidth: 110 },
     {
       field: 'status',
@@ -4099,8 +4111,10 @@ export default function Orders() {
     setManualEstFulfillment('');
     setManualEstDelivered('');
     setManualShipdateTouched(false);
+    setManualRequestedShip('');
     setManualShippingAddress('');
-    setManualPaymentTerms('');
+    setManualPaymentTerms('Net 60');
+    setManualPaymentStatus('Not Paid');
     setManualNotes('');
     setManualOriginalPrice('');
     setManualShippingPercent('');
@@ -4404,13 +4418,13 @@ export default function Orders() {
 
         if (manualPrevStatus === 'shipped' && manualStatus === 'completed') {
           const ok = window.confirm(
-            'Changing the status to COMPLETED will lock this order and cannot be undone. Are you sure you want to proceed?'
+            'Changing the status to COMPLETED will lock this order and cannot be undone (Disabled from Editing).\n\n Are you sure you want to proceed?'
           );
           if (!ok) return;
         }
 
         if (manualStatus === 'canceled' && manualPrevStatus !== 'canceled') {
-          const ok = window.confirm('Are you sure you want to cancel this order? Canceling order cannot be undone.');
+          const ok = window.confirm('Are you sure you want to Cancel this order? \n\n Canceling order cannot be undone.');
           if (!ok) return;
         }
 
@@ -4425,8 +4439,10 @@ export default function Orders() {
             // order-level discount removed; per-line discounts are used
             estFulfillmentDate: manualEstFulfillment || undefined,
             estDeliveredDate: manualEstDelivered || undefined,
+            requestedShipDate: manualRequestedShip || undefined,
             shippingAddress: manualShippingAddress.trim(),
             paymentTerms: manualPaymentTerms.trim(),
+            paymentStatus: manualPaymentStatus.trim(),
             notes: manualNotes.trim(),
             lines: parsed.map((l) => {
               const g = String(l.groupName || '').trim();
@@ -4469,8 +4485,10 @@ export default function Orders() {
               // order-level discount removed; per-line discounts are used
               estFulfillmentDate: manualEstFulfillment || undefined,
               estDeliveredDate: manualEstDelivered || undefined,
+              requestedShipDate: manualRequestedShip || undefined,
               shippingAddress: manualShippingAddress.trim(),
               paymentTerms: manualPaymentTerms.trim(),
+              paymentStatus: manualPaymentStatus.trim(),
               notes: manualNotes.trim(),
               lines: parsed.map((l) => {
                 const g = String(l.groupName || '').trim();
@@ -4638,8 +4656,10 @@ export default function Orders() {
         // order-level discount removed; per-line discounts are used
         estFulfillmentDate: manualEstFulfillment || undefined,
         estDeliveredDate: manualEstDelivered || undefined,
+        requestedShipDate: manualRequestedShip || undefined,
         shippingAddress: manualShippingAddress.trim(),
         paymentTerms: manualPaymentTerms.trim(),
+        paymentStatus: manualPaymentStatus.trim(),
         notes: manualNotes.trim(),
         lines: parsed.map((l) => {
           const g = String(l.groupName || '').trim();
@@ -4952,6 +4972,18 @@ export default function Orders() {
             }}
           >
             <TextField type="date" label="Created Order Date" InputLabelProps={{ shrink: true }} size="small" value={manualCreatedAt} onChange={(e)=>setManualCreatedAt(e.target.value)} inputProps={{ max: todayYmd }} error={!manualCreatedAt || manualCreatedAt > todayYmd} helperText={!manualCreatedAt ? 'Required' : (manualCreatedAt > todayYmd ? 'Cannot be advance date' : '')} disabled={manualMode === 'edit'} />
+            <TextField
+              type="date"
+              label="Requested Ship Date"
+              InputLabelProps={{ shrink: true }}
+              size="small"
+              value={manualRequestedShip}
+              onChange={(e)=> setManualRequestedShip(String(e.target.value || ''))}
+              inputProps={{ min: plusOneDay(manualCreatedAt) as any }}
+              disabled={manualFieldsLocked}
+              error={Boolean(manualRequestedShip && manualCreatedAt && manualRequestedShip <= manualCreatedAt)}
+              helperText={manualRequestedShip && manualCreatedAt && manualRequestedShip <= manualCreatedAt ? 'Must be later than Created Order Date' : ''}
+            />
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
               <TextField
                 disabled
@@ -5033,15 +5065,37 @@ export default function Orders() {
               value={manualFinalPrice}
               disabled
             />
+            <Box sx={{ gridColumn: '1 / -1' }}>
+              <Typography variant="subtitle2" sx={{ mt: 1 }}>Payment</Typography>
+            </Box>
             <TextField
               label="Payment Terms"
               size="small"
+              select
               value={manualPaymentTerms}
               onChange={(e)=> setManualPaymentTerms(e.target.value)}
-              disabled={manualFieldsLocked}
+              disabled={manualIsCanceled || manualIsCompleted}
               error={!String(manualPaymentTerms||'').trim()}
               helperText={!String(manualPaymentTerms||'').trim() ? 'Required' : ''}
-            />
+            >
+              <MenuItem value="Pre-Pay">Pre-Pay</MenuItem>
+              <MenuItem value="Net 30">Net 30</MenuItem>
+              <MenuItem value="Net 60">Net 60</MenuItem>
+            </TextField>
+            <TextField
+              label="Payment Status"
+              size="small"
+              select
+              value={manualPaymentStatus}
+              onChange={(e)=> setManualPaymentStatus(e.target.value)}
+              disabled={manualIsCanceled || manualIsCompleted}
+              error={!String(manualPaymentStatus||'').trim()}
+              helperText={!String(manualPaymentStatus||'').trim() ? 'Required' : ''}
+            >
+              <MenuItem value="Paid">Paid</MenuItem>
+              <MenuItem value="Not Paid">Not Paid</MenuItem>
+              <MenuItem value="10% Paid">10% Paid</MenuItem>
+            </TextField>
           </Box>
 
           {manualMode === 'edit' && manualLastUpdatedAt ? (
@@ -5535,7 +5589,7 @@ export default function Orders() {
               ((manualMode !== 'edit') && (!manualEstFulfillment)) ||
               !String(manualShippingAddress||'').trim() ||
               !String(manualPaymentTerms||'').trim() ||
-              manualIsLocked ||
+              manualIsCanceled ||
               ((manualMode !== 'edit') && (manualOrderGroups.length === 0)) ||
               ((manualMode !== 'edit') && (Object.entries(manualOrderQtyByGroup || {}).filter(([g, q]) => manualOrderGroups.includes(g) && Number(q) > 0).length === 0))
             }
@@ -5648,14 +5702,16 @@ export default function Orders() {
                       const maybeRow = args?.[1];
                       const row = (maybeRow && typeof maybeRow === 'object') ? maybeRow : (maybeParams?.row || {});
                       const list = Array.isArray(row?.onWaterShipments) ? row.onWaterShipments : [];
-                      const hit = list.find((x: any) => String(x?.edd || '') === edd);
-                      const v = Number(hit?.qty ?? 0);
+                      const v = list
+                        .filter((x: any) => String(x?.edd || '') === edd)
+                        .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
                       return Math.max(0, Math.floor(Number.isFinite(v) ? v : 0));
                     },
                     renderCell: (p: any) => {
                       const list = Array.isArray(p?.row?.onWaterShipments) ? p.row.onWaterShipments : [];
-                      const hit = list.find((x: any) => String(x?.edd || '') === edd);
-                      const v = Number(hit?.qty ?? 0);
+                      const v = list
+                        .filter((x: any) => String(x?.edd || '') === edd)
+                        .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
                       const qty = Math.max(0, Math.floor(Number.isFinite(v) ? v : 0));
                       return String(qty);
                     },
@@ -5704,14 +5760,16 @@ export default function Orders() {
                       const maybeRow = args?.[1];
                       const row = (maybeRow && typeof maybeRow === 'object') ? maybeRow : (maybeParams?.row || {});
                       const list = Array.isArray(row?.onProcessBatches) ? row.onProcessBatches : [];
-                      const hit = list.find((x: any) => String(x?.edd || '') === edd);
-                      const v = Number(hit?.qty ?? 0);
+                      const v = list
+                        .filter((x: any) => String(x?.edd || '') === edd)
+                        .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
                       return Math.max(0, Math.floor(Number.isFinite(v) ? v : 0));
                     },
                     renderCell: (p: any) => {
                       const list = Array.isArray(p?.row?.onProcessBatches) ? p.row.onProcessBatches : [];
-                      const hit = list.find((x: any) => String(x?.edd || '') === edd);
-                      const v = Number(hit?.qty ?? 0);
+                      const v = list
+                        .filter((x: any) => String(x?.edd || '') === edd)
+                        .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
                       const qty = Math.max(0, Math.floor(Number.isFinite(v) ? v : 0));
                       return String(qty);
                     },

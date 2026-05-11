@@ -69,10 +69,12 @@ export default function EarlyBuy() {
   const [containerArrival, setContainerArrival] = useState('');
   const [estFulfillment, setEstFulfillment] = useState('');
   const [estDelivered, setEstDelivered] = useState('');
+  const [requestedShip, setRequestedShip] = useState('');
   const [shippingAddress, setShippingAddress] = useState('');
   const [lastUpdatedAt, setLastUpdatedAt] = useState('');
   const [lastUpdatedBy, setLastUpdatedBy] = useState('');
-  const [paymentTerms, setPaymentTerms] = useState('');
+  const [paymentTerms, setPaymentTerms] = useState('Net 60');
+  const [paymentStatus, setPaymentStatus] = useState('Not Paid');
 
   const isEditable = useMemo(() => {
     // Editable when creating (no editingOrder) OR when status is processing/ready_to_ship
@@ -81,6 +83,11 @@ export default function EarlyBuy() {
 
   const isArrivalDateEditable = useMemo(() => {
     // Allow editing arrival date even when status is shipped
+    return !editingOrder || status === 'processing' || status === 'ready_to_ship' || status === 'shipped';
+  }, [editingOrder, status]);
+
+  const isPaymentEditable = useMemo(() => {
+    // Allow editing payment fields when shipped as well
     return !editingOrder || status === 'processing' || status === 'ready_to_ship' || status === 'shipped';
   }, [editingOrder, status]);
 
@@ -219,7 +226,7 @@ export default function EarlyBuy() {
       }
 
       const ok = window.confirm(
-        'Are you sure you want to change the status to COMPLETED?\n\nThis cannot be undone and you can no longer edit the order.'
+        'Are you sure you want to change the status to COMPLETED?\n\nThis cannot be undone (Disabled from Editing) and you can no longer edit the order.'
       );
       if (!ok) return;
     }
@@ -348,15 +355,15 @@ export default function EarlyBuy() {
     };
     const fetchImageBase64 = async (paths: string[]) => { let last: any=null; for (const p of paths){ try{return await fetchBase64WithExt(p);}catch(e){last=e;} } throw last||new Error('No image'); };
 
-    // Header with logo + contact
-    ws.mergeCells('A1:A4');
+    // Header with logo + contact (compact A1:A2 like Orders)
+    ws.mergeCells('A1:A2');
     try { ws.getColumn(1).width = 26; } catch {}
-    try { ws.getRow(1).height = 18; ws.getRow(2).height = 18; ws.getRow(3).height = 18; ws.getRow(4).height = 18; } catch {}
+    try { ws.getRow(1).height = 18; ws.getRow(2).height = 17; } catch {}
     try { (ws.getCell('A1') as any).border = thinBorder as any; } catch {}
     try {
       const logoImg = await fetchImageBase64(['/logo.png','/company-logo.png','/company-logo.jpg','/logo.jpg']);
       const imgId = wb.addImage({ base64: logoImg.base64, extension: logoImg.ext });
-      ws.addImage(imgId, { tl: { col: 0, row: 0 }, ext: { width: 221, height: 96 } });
+      ws.addImage(imgId, { tl: { col: 0, row: 0 }, ext: { width: 221, height: 47 } });
     } catch {}
     ws.getCell('B1').value = 'Phone:'; ws.getCell('B1').font = bold; (ws.getCell('B1') as any).fill = lightGreen; ws.getCell('C1').value = '+1 470-812-0762';
     ws.getCell('D1').value = 'Contact Email:'; ws.getCell('D1').font = bold; (ws.getCell('D1') as any).fill = lightGreen; ws.getCell('E1').value = 'brandon@mpgwholesale.com';
@@ -364,20 +371,20 @@ export default function EarlyBuy() {
     ws.getCell('D2').value = 'Website:'; ws.getCell('D2').font = bold; (ws.getCell('D2') as any).fill = lightGreen; ws.getCell('E2').value = 'www.mpgwholesale.com';
     ;(['B1','C1','D1','E1','B2','C2','D2','E2'] as const).forEach((addr)=>{ (ws.getCell(addr) as any).border = thinBorder as any; });
 
-    // Order info
-    ws.getCell('A5').value = orderNumber; ws.getCell('A5').font = bold; (ws.getCell('A5') as any).fill = lightBlue; (ws.getCell('A5') as any).border = thinBorder as any;
-    ws.getCell('B5').value = 'To:'; ws.getCell('B5').font = bold; (ws.getCell('B5') as any).fill = lightBlue; ws.getCell('C5').value = String(customerName || '');
-    ws.getCell('D5').value = 'Phone:'; ws.getCell('D5').font = bold; (ws.getCell('D5') as any).fill = lightBlue; ws.getCell('E5').value = String(customerPhone || '');
-    ws.getCell('B6').value = 'Address:'; ws.getCell('B6').font = bold; (ws.getCell('B6') as any).fill = lightBlue; ws.getCell('C6').value = String(shippingAddress || '');
-    ws.getCell('D6').value = 'Email:'; ws.getCell('D6').font = bold; (ws.getCell('D6') as any).fill = lightBlue; ws.getCell('E6').value = String(customerEmail || '');
-    ;(['B5','C5','D5','E5','B6','C6','D6','E6'] as const).forEach((addr)=>{ (ws.getCell(addr) as any).border = thinBorder as any; });
+    // Order info (shifted up to row 4-5)
+    ws.getCell('A4').value = orderNumber; ws.getCell('A4').font = bold; (ws.getCell('A4') as any).fill = lightBlue; (ws.getCell('A4') as any).border = thinBorder as any;
+    ws.getCell('B4').value = 'To:'; ws.getCell('B4').font = bold; (ws.getCell('B4') as any).fill = lightBlue; ws.getCell('C4').value = String(customerName || '');
+    ws.getCell('D4').value = 'Phone:'; ws.getCell('D4').font = bold; (ws.getCell('D4') as any).fill = lightBlue; ws.getCell('E4').value = String(customerPhone || '');
+    ws.getCell('B5').value = 'Address:'; ws.getCell('B5').font = bold; (ws.getCell('B5') as any).fill = lightBlue; ws.getCell('C5').value = String(shippingAddress || '');
+    ws.getCell('D5').value = 'Email:'; ws.getCell('D5').font = bold; (ws.getCell('D5') as any).fill = lightBlue; ws.getCell('E5').value = String(customerEmail || '');
+    ;(['B4','C4','D4','E4','B5','C5','D5','E5'] as const).forEach((addr)=>{ (ws.getCell(addr) as any).border = thinBorder as any; });
 
-    ws.getCell('A8').value = 'Status:'; ws.getCell('A8').font = bold; (ws.getCell('A8') as any).fill = lightBlue; (ws.getCell('A8') as any).border = thinBorder as any; ws.getCell('B8').value = sStatus; ws.getCell('B8').font = bold; (ws.getCell('B8') as any).border = thinBorder as any;
-    ws.getCell('A9').value = 'Estimated Shipdate for Customer:'; ws.getCell('A9').font = bold; (ws.getCell('A9') as any).fill = lightBlue; (ws.getCell('A9') as any).border = thinBorder as any; ws.getCell('B9').value = String(estFulfillment || ''); ws.getCell('B9').font = bold; (ws.getCell('B9') as any).border = thinBorder as any;
-    ws.getCell('A10').value = 'Estimated Arrival Date:'; ws.getCell('A10').font = bold; (ws.getCell('A10') as any).fill = lightBlue; (ws.getCell('A10') as any).border = thinBorder as any; ws.getCell('B10').value = String(estDelivered || ''); ws.getCell('B10').font = bold; (ws.getCell('B10') as any).border = thinBorder as any;
+    ws.getCell('A7').value = 'Status:'; ws.getCell('A7').font = bold; (ws.getCell('A7') as any).fill = lightBlue; (ws.getCell('A7') as any).border = thinBorder as any; ws.getCell('B7').value = sStatus; ws.getCell('B7').font = bold; (ws.getCell('B7') as any).border = thinBorder as any;
+    ws.getCell('A8').value = 'Estimated Shipdate for Customer:'; ws.getCell('A8').font = bold; (ws.getCell('A8') as any).fill = lightBlue; (ws.getCell('A8') as any).border = thinBorder as any; ws.getCell('B8').value = String(estFulfillment || ''); ws.getCell('B8').font = bold; (ws.getCell('B8') as any).border = thinBorder as any;
+    ws.getCell('A9').value = 'Estimated Arrival Date:'; ws.getCell('A9').font = bold; (ws.getCell('A9') as any).fill = lightBlue; (ws.getCell('A9') as any).border = thinBorder as any; ws.getCell('B9').value = String(estDelivered || ''); ws.getCell('B9').font = bold; (ws.getCell('B9') as any).border = thinBorder as any;
 
     // Grouped pallets
-    let currentRow = 12;
+    let currentRow = 11;
     const encodeMoney = (n: any) => (Number.isFinite(Number(n)) ? Number(n) : '');
     const groups = new Map<string, any[]>();
     for (const r of (Array.isArray(lines) ? lines : [])) {
@@ -417,7 +424,7 @@ export default function EarlyBuy() {
         ws.getRow(currentRow).values = [
           `PALLET PRICE: ${Number.isFinite(unitBase) ? `$${unitBase.toFixed(2)}` : ''}`,
           `DISCOUNT: ${Number.isFinite(disc) ? `${disc}%` : ''}`,
-          `DISCOUNTED PRICE: ${Number.isFinite(unitDiscounted) ? `$${unitDiscounted.toFixed(2)}` : ''}`,
+          (disc === 0 ? '' : `DISCOUNTED PRICE: ${Number.isFinite(unitDiscounted) ? `$${unitDiscounted.toFixed(2)}` : ''}`),
           `QUANTITY: ${Number.isFinite(qty) ? qty : ''}`,
           'SUB TOTAL',
           encodeMoney(lineSub),
@@ -430,7 +437,10 @@ export default function EarlyBuy() {
 
     ws.getCell(`A${currentRow}`).value = 'SUB TOTAL'; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any; ws.getCell(`B${currentRow}`).value = Number.isFinite(subRounded) ? subRounded : ''; ws.getCell(`B${currentRow}`).numFmt = '"$"#,##0.00'; ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
     currentRow += 1;
-    ws.getCell(`A${currentRow}`).value = 'SHIPPING'; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any; ws.getCell(`B${currentRow}`).value = Number.isFinite(sp) ? `${sp}%` : ''; ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
+    const shipAmt = (Number.isFinite(subRounded) && Number.isFinite(sp)) ? Number((subRounded * (sp/100)).toFixed(2)) : NaN;
+    const shipLabel = Number.isFinite(sp) ? `SHIPPING (${sp}%)` : 'SHIPPING';
+    ws.getCell(`A${currentRow}`).value = shipLabel; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any;
+    ws.getCell(`B${currentRow}`).value = Number.isFinite(shipAmt) ? shipAmt : ''; ws.getCell(`B${currentRow}`).numFmt = '"$"#,##0.00'; ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
     currentRow += 1;
     ws.getCell(`A${currentRow}`).value = 'GRAND TOTAL'; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any; ws.getCell(`B${currentRow}`).value = Number.isFinite(grand) ? grand : ''; ws.getCell(`B${currentRow}`).numFmt = '"$"#,##0.00'; ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
     currentRow += 1;
@@ -447,6 +457,16 @@ export default function EarlyBuy() {
     try {
       const socialImg = await fetchImageBase64(['/socialmedia-qrcode.png']); const idSocial = wb.addImage({ base64: socialImg.base64, extension: socialImg.ext }); const imgRow = currentRow + 1; ws.addImage(idSocial, { tl: { col: 4.2, row: imgRow }, ext: { width: 130, height: 60 } });
       try { const bigLogo = await fetchImageBase64(['/logo.png','/company-logo.png','/company-logo.jpg','/logo.jpg']); const idBigLogo = wb.addImage({ base64: bigLogo.base64, extension: bigLogo.ext }); ws.addImage(idBigLogo, { tl: { col: 1, row: imgRow - 1 }, ext: { width: 546, height: 96 } }); } catch {}
+    } catch {}
+
+    // Center all text across the sheet
+    try {
+      ws.eachRow({ includeEmpty: false }, (row: any) => {
+        row.eachCell({ includeEmpty: false }, (cell: any) => {
+          const prev = cell.alignment || {};
+          cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: Boolean((prev as any).wrapText) } as any;
+        });
+      });
     } catch {}
 
     const buffer = await wb.xlsx.writeBuffer(); const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = fname; a.click(); setTimeout(() => URL.revokeObjectURL(url), 4000);
@@ -523,7 +543,7 @@ export default function EarlyBuy() {
           widths: [130, 100, 260, 100, 150],
           body: [
             [
-              { image: logo, height:60,width:130, rowSpan: 4, border: [true, true, true, true], alignment: 'center' },
+              { image: logo, height:35, width:135, rowSpan: 2, border: [true, true, true, true], alignment: 'center' },
               { text: 'Phone:', fillColor: green, bold: true, border: [true, true, true, true] },
               { text: companyPhone, border: [true, true, true, true] },
               { text: 'Contact Email:', fillColor: green, bold: true, border: [true, true, true, true] },
@@ -536,8 +556,9 @@ export default function EarlyBuy() {
               { text: 'Website:', fillColor: green, bold: true, border: [true, true, true, true] },
               { text: companyWebsite, border: [true, true, true, true] },
             ],
-            [ { text: '', border: [false, false, false, false] }, { text: '', border: [false, false, false, false] }, { text: '', border: [false, false, false, false] }, { text: '', border: [false, false, false, false] }, { text: '', border: [false, false, false, false] } ],
-            [ { text: '', border: [false, false, false, false] }, { text: '', border: [false, false, false, false] }, { text: '', border: [false, false, false, false] }, { text: '', border: [false, false, false, false] }, { text: '', border: [false, false, false, false] } ],
+             [
+              { text: '', colSpan: 5, margin: [-4, -4], border: [false, false, false, false] }, {}, {}, {}, {}
+            ],
             [
               { text: orderNumber, fillColor: blue, bold: true, border: [true, true, true, true] },
               { text: 'To:', fillColor: blue, bold: true, border: [true, true, true, true] },
@@ -613,9 +634,9 @@ export default function EarlyBuy() {
           { text: '', fillColor: lightGrey, border: [true, true, true, true] },
           { text: String(it?.itemCode || ''), fillColor: lightGrey, border: [true, true, true, true] },
           { text: String(it?.description || ''), fillColor: lightGrey, border: [true, true, true, true] },
-          { text: String(it?.upc || ''), alignment: 'left', fillColor: lightGrey, border: [true, true, true, true] },
-          { text: (Number.isFinite(Number(it?.packSize)) ? String(Number(it?.packSize)) : ''), alignment: 'left', fillColor: lightGrey, border: [true, true, true, true] },
-          { text: (Number.isFinite(Number(it?.price)) ? `$${Number(it?.price).toFixed(2)}` : ''), alignment: 'right', fillColor: lightGrey, border: [true, true, true, true] },
+          { text: String(it?.upc || ''), alignment: 'center', fillColor: lightGrey, border: [true, true, true, true] },
+          { text: (Number.isFinite(Number(it?.packSize)) ? String(Number(it?.packSize)) : ''), alignment: 'center', fillColor: lightGrey, border: [true, true, true, true] },
+          { text: (Number.isFinite(Number(it?.price)) ? `$${Number(it?.price).toFixed(2)}` : ''), alignment: 'center', fillColor: lightGrey, border: [true, true, true, true] },
         ]));
         content.push({ table: { widths: palletColWidths, body: itemRows }, layout: 'noHorizontalLines' });
       }
@@ -632,10 +653,10 @@ export default function EarlyBuy() {
             body: [[
               { text: `PALLET PRICE: ${Number.isFinite(unitBase) ? `$${unitBase.toFixed(2)}` : ''}`, fillColor: darkGrey, bold: true, border: [true, true, true, true] },
               { text: `DISCOUNT: ${Number.isFinite(disc) ? `${disc}%` : ''}`, fillColor: darkGrey, bold: true, border: [true, true, true, true] },
-              { text: `DISCOUNTED PRICE: ${Number.isFinite(unitDisc) ? `$${unitDisc.toFixed(2)}` : ''}`, fillColor: darkGrey, bold: true, border: [true, true, true, true] },
+              { text: (disc === 0 ? '' : `DISCOUNTED PRICE: ${Number.isFinite(unitDisc) ? `$${unitDisc.toFixed(2)}` : ''}`), fillColor: darkGrey, bold: true, border: [true, true, true, true] },
               { text: `QUANTITY: ${Number.isFinite(qtyEach) ? qtyEach : ''}`, fillColor: darkGrey, bold: true, border: [true, true, true, true] },
               { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] },
-              { text: Number.isFinite(lineSubEach) ? `$${lineSubEach.toFixed(2)}` : '', alignment: 'right', fillColor: blue, border: [true, true, true, true] },
+              { text: Number.isFinite(lineSubEach) ? `$${lineSubEach.toFixed(2)}` : '', alignment: 'center', fillColor: blue, border: [true, true, true, true] },
             ]],
           },
           layout: 'noHorizontalLines',
@@ -650,16 +671,18 @@ export default function EarlyBuy() {
     const subRounded = Number.isFinite(subN) ? Number(Number(subN).toFixed(2)) : NaN;
     const sp = Number(shippingPercent);
     const ship = Number.isFinite(sp) ? sp : NaN;
+    const shipAmt = (Number.isFinite(subRounded) && Number.isFinite(sp)) ? Number((subRounded * (sp / 100)).toFixed(2)) : NaN;
+    const shipLabel = Number.isFinite(sp) ? `SHIPPING (${sp}%)` : 'SHIPPING';
     const grandN = Number(computedGrandTotal);
     const grandRounded = Number.isFinite(grandN) ? Number(Number(grandN).toFixed(2)) : NaN;
     content.push({
       table: {
         widths: [120, 120],
         body: [
-          [ { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(subRounded) ? `$${subRounded.toFixed(2)}` : '', alignment: 'right', bold: true, border: [true, true, true, true] } ],
-          [ { text: 'SHIPPING', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(ship) ? `${ship}%` : '', alignment: 'right', bold: true, border: [true, true, true, true] } ],
-          [ { text: 'GRAND TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(grandRounded) ? `$${grandRounded.toFixed(2)}` : '', alignment: 'right', bold: true, border: [true, true, true, true] } ],
-          [ { text: 'PAYMENT TERMS', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: String(paymentTerms || ''), alignment: 'right', bold: true, border: [true, true, true, true] } ],
+          [ { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(subRounded) ? `$${subRounded.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
+          [ { text: shipLabel, fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(shipAmt) ? `$${shipAmt.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
+          [ { text: 'GRAND TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(grandRounded) ? `$${grandRounded.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
+          [ { text: 'PAYMENT TERMS', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: String(paymentTerms || ''), alignment: 'center', bold: true, border: [true, true, true, true] } ],
         ],
       },
       layout: 'noHorizontalLines',
@@ -698,7 +721,7 @@ export default function EarlyBuy() {
       });
     } catch {}
 
-    const docDefinition = { pageOrientation: 'landscape', pageMargins: [20,20,20,20], content, defaultStyle: { fontSize: 9 } } as any;
+    const docDefinition = { pageOrientation: 'landscape', pageMargins: [20,20,20,20], content, defaultStyle: { fontSize: 9, alignment: 'center' } } as any;
     const fname = `early-buy-${orderNo}.pdf`;
     (pdfMake as any).createPdf(docDefinition).download(fname);
   }, [editingOrder, lines, customerName, customerPhone, shippingAddress, customerEmail, status, estFulfillment, estDelivered, groupPriceByName, palletDescByGroup, computedSubTotal, shippingPercent, computedGrandTotal, numberFmt2, paymentTerms]);
@@ -1504,6 +1527,7 @@ export default function EarlyBuy() {
     const anyInvalid = rows.some(l => !Number.isFinite(Number(l.qty)) || Number(l.qty) <= 0);
     if (anyInvalid) errs.push('Each pallet quantity must be > 0');
     if (!String(paymentTerms || '').trim()) errs.push('Payment Terms is required');
+    if (requestedShip && createdAt && requestedShip <= createdAt) errs.push('Requested Ship Date must be > Created Order Date');
 
     if (errs.length) { toast.error(errs[0]); return; }
 
@@ -1529,6 +1553,7 @@ export default function EarlyBuy() {
         containerArrival,
         estFulfillment,
         estDelivered,
+        requestedShipDate: requestedShip || undefined,
         customerEmail,
         customerName,
         customerPhone,
@@ -1638,6 +1663,7 @@ export default function EarlyBuy() {
     setCreatedAt(new Date().toISOString().slice(0,10));
     setEstFulfillment('');
     setEstDelivered('');
+    setRequestedShip('');
     setOriginalPrice('');
     setShippingPercent('');
     setDiscountPercent('');
@@ -1645,7 +1671,8 @@ export default function EarlyBuy() {
     setLastUpdatedAt('');
     setLastUpdatedBy('');
     setLines([]);
-    setPaymentTerms('');
+    setPaymentTerms('Net 60');
+    setPaymentStatus('Not Paid');
   }, []);
 
   return (
@@ -1711,10 +1738,12 @@ export default function EarlyBuy() {
               setContainerArrival(String((row as any).containerArrival || ''));
               setEstFulfillment(row.estFulfillment);
               setEstDelivered(row.estDelivered);
+              setRequestedShip(String((row as any)?.requestedShipDate || ''));
               setOriginalPrice(row.originalPrice || '');
               setShippingPercent(row.shippingPercent || '');
               setDiscountPercent(row.discountPercent || '');
-              setPaymentTerms(String((row as any)?.paymentTerms || ''));
+              setPaymentTerms(String((row as any)?.paymentTerms || 'Net 60'));
+              setPaymentStatus(String((row as any)?.paymentStatus || 'Not Paid'));
               setNotes(row.notes || '');
               setLastUpdatedAt(String(row.updatedAt || ''));
               setLastUpdatedBy(String(row.updatedBy || ''));
@@ -1768,6 +1797,7 @@ export default function EarlyBuy() {
                 {STATUS_OPTIONS.map(op => (<MenuItem key={op.value} value={op.value}>{op.label}</MenuItem>))}
               </TextField>
             </Stack>
+            <Typography variant="subtitle2">Customer</Typography>
             <Stack direction={{ xs:'column', sm:'row' }} spacing={2}>
               <TextField
                 size="small"
@@ -1790,16 +1820,29 @@ export default function EarlyBuy() {
                 value={customerPhone}
                 onChange={(e)=> setCustomerPhone(e.target.value)}
                 disabled={!isEditable}
-                sx={{ width: { xs: '100%', sm: 280 } }}
+                sx={{ width: { xs: '100%', sm: 320 } }}
               />
             </Box>
             <TextField size="small" required label="Shipping Address" value={shippingAddress} onChange={(e)=> setShippingAddress(e.target.value)} fullWidth multiline minRows={2} disabled={!isEditable} />
+            <Typography variant="subtitle2">Dates</Typography>
             {(() => {
               const isYmd = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(String(s||''));
               const cA = createdAt && isYmd(createdAt) ? createdAt : '';
               const cR = containerArrival && isYmd(containerArrival) ? containerArrival : '';
               const eS = estFulfillment && isYmd(estFulfillment) ? estFulfillment : '';
               const eD = estDelivered && isYmd(estDelivered) ? estDelivered : '';
+              const plusOne = (ymd?: string) => {
+                const s = String(ymd || '').trim();
+                if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return '';
+                const d = new Date(`${s}T00:00:00`);
+                if (Number.isNaN(d.getTime())) return '';
+                const n = new Date(d); n.setDate(n.getDate() + 1);
+                const mm = `${n.getMonth()+1}`.padStart(2,'0');
+                const dd = `${n.getDate()}`.padStart(2,'0');
+                return `${n.getFullYear()}-${mm}-${dd}`;
+              };
+              const rS = requestedShip && isYmd(requestedShip) ? requestedShip : '';
+              const errReqShipLtCreated = Boolean(rS && cA && rS <= cA);
               const errCreatedFuture = Boolean(cA && cA > todayYmd);
               const errShipLtCreated = Boolean(eS && cA && eS < cA);
               const errContainerGtShip = Boolean(cR && eS && cR > eS);
@@ -1813,6 +1856,13 @@ export default function EarlyBuy() {
                     inputProps={{ max: todayYmd }}
                     error={Boolean(cA) && errCreatedFuture}
                     helperText={Boolean(cA) && errCreatedFuture ? 'Created Order Date cannot be in the future' : ''}
+                  />
+                  <TextField
+                    size="small" type="date" label="Requested Ship Date" value={requestedShip}
+                    onChange={(e)=> setRequestedShip(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isEditable}
+                    inputProps={{ min: plusOne(cA) || undefined }}
+                    error={Boolean(rS && cA) && errReqShipLtCreated}
+                    helperText={Boolean(rS && cA) && errReqShipLtCreated ? 'Requested Ship Date must be > Created Order Date' : ''}
                   />
                   <TextField
                     size="small" required type="date" label="Container Arrival" value={containerArrival}
@@ -1842,24 +1892,45 @@ export default function EarlyBuy() {
                 </Stack>
               );
             })()}
+            <Typography variant="subtitle2">Pricing</Typography>
             <Stack direction={{ xs:'column', md:'row' }} spacing={2}>
               <TextField size="small" label="Sub Total" value={computedSubTotal} fullWidth disabled />
               <TextField size="small" label="Shipping Charges (%)" value={shippingPercent} onChange={(e)=> setShippingPercent(e.target.value)} fullWidth disabled={!isEditable} />
               <TextField size="small" label="Grand Total" value={computedGrandTotal} fullWidth disabled />
             </Stack>
-            <Box sx={{ display: 'flex' }}>
+            <Typography variant="subtitle2">Payment</Typography>
+            <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
               <TextField
                 size="small"
                 label="Payment Terms"
+                select
                 value={paymentTerms}
                 onChange={(e)=> setPaymentTerms(e.target.value)}
                 required
-                disabled={!isEditable}
+                disabled={!isPaymentEditable}
                 error={!String(paymentTerms||'').trim()}
                 helperText={!String(paymentTerms||'').trim() ? 'Required' : ''}
-                sx={{ width: { xs: '100%', sm: 280 } }}
-              />
+                sx={{ width: { xs: '100%', sm: 300 } }}
+              >
+                <MenuItem value={"Pre-Pay"}>Pre-Pay</MenuItem>
+                <MenuItem value={"Net 30"}>Net 30</MenuItem>
+                <MenuItem value={"Net 60"}>Net 60</MenuItem>
+              </TextField>
+              <TextField
+                size="small"
+                label="Payment Status"
+                select
+                value={paymentStatus}
+                onChange={(e)=> setPaymentStatus(e.target.value)}
+                disabled={!isPaymentEditable}
+                sx={{ width: { xs: '100%', sm: 260 } }}
+              >
+                <MenuItem value={"Paid"}>Paid</MenuItem>
+                <MenuItem value={"Not Paid"}>Not Paid</MenuItem>
+                <MenuItem value={"10% Paid"}>10% Paid</MenuItem>
+              </TextField>
             </Box>
+            <Typography variant="subtitle2">Pallets to Order</Typography>
             <TextField size="small" label="Remarks/Notes" value={notes} onChange={(e)=> setNotes(e.target.value)} fullWidth multiline minRows={3} disabled={!isEditable} />
             <Typography variant="caption" color="error" sx={{ mt: -1 }}>
               {(() => {
