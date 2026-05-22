@@ -436,13 +436,8 @@ export default function ItemRegistry() {
   };
 
   useEffect(() => {
-    const canonical = canonicalUpcForCode(gItemCode);
-    const current = String(gUpc || '').trim();
-    if (canonical && canonical !== current) {
-      setUpcConflict(`Item Code already uses UPC "${canonical}". Please use the same UPC.`);
-    } else {
-      setUpcConflict('');
-    }
+    // Allow different UPCs for the same Item Code; no conflict warning
+    setUpcConflict('');
   }, [gItemCode, gUpc, items]);
 
   const deleteGroup = async (id: string, name: string) => {
@@ -679,12 +674,7 @@ export default function ItemRegistry() {
                       const pNum = pRaw === '' ? 0 : Number(pRaw);
                       if (pRaw !== '' && !Number.isFinite(pNum)) { toast.error('Price must be a valid number'); return; }
 
-                      const normUpc = String(gUpc || '').trim();
-                      const canonicalUpc = canonicalUpcForCode(code);
-                      if (canonicalUpc && canonicalUpc !== normUpc) {
-                        toast.error('UPC does not match existing item record');
-                        return;
-                      }
+                      // Allow different UPCs per Item Code; do not block save on mismatch
 
                       try {
                         if (isEditing) {
