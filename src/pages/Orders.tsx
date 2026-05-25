@@ -1196,14 +1196,23 @@ export default function Orders() {
     const rows = Array.isArray(manualPickerRows) ? manualPickerRows : [];
     const waterEddsSet = new Set<string>();
     const processEddsSet = new Set<string>();
+    const addMonthsYmd = (s: string, n: number) => {
+      const [yy, mm, dd] = String(s || '').split('-').map((t) => Number(t));
+      if (!yy || !mm || !dd) return '';
+      const dt = new Date(yy, mm - 1, dd);
+      dt.setHours(0,0,0,0);
+      dt.setMonth(dt.getMonth() + n);
+      return dt.toISOString().slice(0,10);
+    };
     for (const r of rows) {
       for (const s of (Array.isArray((r as any)?.onWaterShipments) ? (r as any).onWaterShipments : [])) {
         const edd = String((s as any)?.edd || '').trim();
         if (edd && (!from || edd >= from) && (!to || edd <= to)) waterEddsSet.add(edd);
       }
       for (const b of (Array.isArray((r as any)?.onProcessBatches) ? (r as any).onProcessBatches : [])) {
-        const edd = String((b as any)?.edd || '').trim();
-        if (edd && (!from || edd >= from) && (!to || edd <= to)) processEddsSet.add(edd);
+        const orig = String((b as any)?.edd || '').trim();
+        const shifted = addMonthsYmd(orig, 3);
+        if (orig && shifted && (!from || shifted >= from) && (!to || shifted <= to)) processEddsSet.add(orig);
       }
     }
     const waterEdds = Array.from(waterEddsSet).sort((a, b) => a.localeCompare(b));
@@ -1306,9 +1315,9 @@ export default function Orders() {
       });
     }
 
-    // On-Process EDD columns
+    // On-Process EDD columns (display original EDD, effective date is original EDD + 3 months)
     for (const edd of manualPickerEddLists.processEdds) {
-      const header = `On-Process ${(() => { const [y,m,d] = String(edd).split('-'); return `${m}/${d}/${y}`; })()}`;
+      const header = `On-Process ${(() => { const [y,m,d] = String(edd).split('-'); return `${m}/${d}/${y}`; })()} + 3 Months`;
       cols.push({
         field: `op_${edd}`,
         headerName: header,
@@ -1362,7 +1371,11 @@ export default function Orders() {
           .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
         const procList = Array.isArray((row as any)?.onProcessBatches) ? (row as any).onProcessBatches : [];
         const onProcess = procList
-          .filter((x: any) => inRange(String(x?.edd || '').trim()))
+          .filter((x: any) => {
+            const orig = String(x?.edd || '').trim();
+            const shifted = (() => { const [yy,mm,dd] = orig.split('-').map((t)=>Number(t)); if(!yy||!mm||!dd) return ''; const dt=new Date(yy,mm-1,dd); dt.setHours(0,0,0,0); dt.setMonth(dt.getMonth()+3); return dt.toISOString().slice(0,10); })();
+            return Boolean(shifted) && inRange(shifted);
+          })
           .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
         const list = Array.isArray(manualPickerWarehouses) ? manualPickerWarehouses : [];
         const wid = String(manualWarehouseId || '').trim();
@@ -1395,7 +1408,11 @@ export default function Orders() {
           .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
         const procList = Array.isArray((row as any)?.onProcessBatches) ? (row as any).onProcessBatches : [];
         const onProcess = procList
-          .filter((x: any) => inRange(String(x?.edd || '').trim()))
+          .filter((x: any) => {
+            const orig = String(x?.edd || '').trim();
+            const shifted = (() => { const [yy,mm,dd] = orig.split('-').map((t)=>Number(t)); if(!yy||!mm||!dd) return ''; const dt=new Date(yy,mm-1,dd); dt.setHours(0,0,0,0); dt.setMonth(dt.getMonth()+3); return dt.toISOString().slice(0,10); })();
+            return Boolean(shifted) && inRange(shifted);
+          })
           .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
         // Include PEBA only when within the manual picker EDD range
         const pebaYmdManual = (() => { const d = new Date(); d.setHours(0,0,0,0); d.setMonth(d.getMonth() + 3); return d.toISOString().slice(0,10); })();
@@ -5013,8 +5030,10 @@ export default function Orders() {
               error={Boolean(manualRequestedShip && manualCreatedAt && manualRequestedShip <= manualCreatedAt)}
               helperText={manualRequestedShip && manualCreatedAt && manualRequestedShip <= manualCreatedAt ? 'Must be later than Created Order Date' : ''}
             />
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-              <TextField
+            <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', gap: 0.5 }}>
+              <Typography variant="caption" color="text.secondary" sx={{mt:-2.8,color:"red"}}>This Date is AutoComputed Based on the Order Reserved</Typography>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                <TextField
                 disabled
                 type="date"
                 label="Estimated Shipdate for Customer"
@@ -5048,11 +5067,13 @@ export default function Orders() {
                     </Typography>
                   </Box>
                 )}
+                color='info'
               >
                 <IconButton size="small" aria-label="Estimated shipdate computation help" sx={{ mt: 0.5 }}>
                   <HelpOutlineIcon fontSize="inherit" />
                 </IconButton>
               </Tooltip>
+              </Box>
             </Box>
             <TextField
               type="date"
@@ -5706,6 +5727,14 @@ export default function Orders() {
                 // PEBA is modeled as second warehouse availability with EDD = today + 3 months
                 const pebaYmd = (() => { const d = new Date(); d.setHours(0,0,0,0); d.setMonth(d.getMonth() + 3); return d.toISOString().slice(0,10); })();
                 const pebaInRange = (!from || pebaYmd >= from) && (!to || pebaYmd <= to);
+                const addMonthsYmd = (s: string, n: number) => {
+                  const [yy, mm, dd] = String(s || '').split('-').map((t) => Number(t));
+                  if (!yy || !mm || !dd) return '';
+                  const dt = new Date(yy, mm - 1, dd);
+                  dt.setHours(0,0,0,0);
+                  dt.setMonth(dt.getMonth() + n);
+                  return dt.toISOString().slice(0,10);
+                };
 
                 const allRows = Array.isArray(viewOrderableFilteredRows) ? viewOrderableFilteredRows : [];
                 const waterEddsSet = new Set<string>();
@@ -5716,8 +5745,9 @@ export default function Orders() {
                     if (edd && (!from || edd >= from) && (!to || edd <= to)) waterEddsSet.add(edd);
                   }
                   for (const b of (Array.isArray(r?.onProcessBatches) ? r.onProcessBatches : [])) {
-                    const edd = String(b?.edd || '').trim();
-                    if (edd && (!from || edd >= from) && (!to || edd <= to)) processEddsSet.add(edd);
+                    const orig = String(b?.edd || '').trim();
+                    const shifted = addMonthsYmd(orig, 3);
+                    if (orig && shifted && (!from || shifted >= from) && (!to || shifted <= to)) processEddsSet.add(orig);
                   }
                 }
                 const waterEdds = Array.from(waterEddsSet).sort((a, b) => a.localeCompare(b));
@@ -5795,7 +5825,7 @@ export default function Orders() {
                 }
 
                 for (const edd of processEdds) {
-                  const header = `On-Process ${(() => { const [y,m,d] = String(edd).split('-'); return `${m}/${d}/${y}`; })()}`;
+                  const header = `On-Process ${(() => { const [y,m,d] = String(edd).split('-'); return `${m}/${d}/${y}`; })()} + 3 Months`;
                   cols.push({
                     field: `op_${edd}`,
                     headerName: header,
@@ -5850,7 +5880,11 @@ export default function Orders() {
                       .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
                     const opList = Array.isArray(row?.onProcessBatches) ? row.onProcessBatches : [];
                     const onProcess = opList
-                      .filter((x: any) => inRange(String(x?.edd || '').trim()))
+                      .filter((x: any) => {
+                        const orig = String(x?.edd || '').trim();
+                        const shifted = addMonthsYmd(orig, 3);
+                        return Boolean(shifted) && inRange(shifted);
+                      })
                       .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
                     let secondQty = 0;
                     if (secondId && pebaInRange) {
@@ -5897,13 +5931,25 @@ export default function Orders() {
                 const fromF = String(viewOrderableEddFrom || '').trim();
                 const toF = String(viewOrderableEddTo || '').trim();
                 const inRange = (d: string) => (!fromF || d >= fromF) && (!toF || d <= toF);
+                const addMonthsYmd = (s: string, n: number) => {
+                  const [yy, mm, dd] = String(s || '').split('-').map((t) => Number(t));
+                  if (!yy || !mm || !dd) return '';
+                  const dt = new Date(yy, mm - 1, dd);
+                  dt.setHours(0,0,0,0);
+                  dt.setMonth(dt.getMonth() + n);
+                  return dt.toISOString().slice(0,10);
+                };
                 const owList = Array.isArray(row?.onWaterShipments) ? row.onWaterShipments : [];
                 const onWater = owList
                   .filter((x: any) => inRange(String(x?.edd || '').trim()))
                   .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
                 const opList = Array.isArray(row?.onProcessBatches) ? row.onProcessBatches : [];
                 const onProcess = opList
-                  .filter((x: any) => inRange(String(x?.edd || '').trim()))
+                  .filter((x: any) => {
+                    const orig = String(x?.edd || '').trim();
+                    const shifted = addMonthsYmd(orig, 3);
+                    return Boolean(shifted) && inRange(shifted);
+                  })
                   .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
                 const list = Array.isArray(viewOrderableWarehouses) ? viewOrderableWarehouses : [];
                 const wid = String(viewOrderableWarehouseId || '').trim();
@@ -6032,6 +6078,9 @@ export default function Orders() {
         <DialogTitle>{`On-Process - ${onProcessGroupName || ''}`}</DialogTitle>
         <DialogContent sx={{ pt: 2 }}>
           {onProcessLoading ? <LinearProgress sx={{ mb: 2 }} /> : null}
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1,color: 'error.main' }}>
+            Note: On-Process: EDD + 3 Months (transfer/handling time)
+          </Typography>
           <div style={{ height: 420, width: '100%' }}>
             <DataGrid
               rows={(onProcessRows || []).map((r: any, idx: number) => ({ id: r?.id || `${idx}`, ...r }))}
