@@ -5840,8 +5840,18 @@ export default function Orders() {
                     const maybeRow = args?.[1];
                     const row = (maybeRow && typeof maybeRow === 'object') ? maybeRow : (maybeParams?.row || {});
                     const primary = Number(row?.selectedWarehouseAvailable ?? 0);
-                    const onWater = Number(row?.onWaterPallets ?? 0);
-                    const onProcess = Number(row?.onProcessPallets ?? 0);
+                    // EDD-filtered sums
+                    const fromF = String(viewOrderableEddFrom || '').trim();
+                    const toF = String(viewOrderableEddTo || '').trim();
+                    const inRange = (d: string) => (!fromF || d >= fromF) && (!toF || d <= toF);
+                    const owList = Array.isArray(row?.onWaterShipments) ? row.onWaterShipments : [];
+                    const onWater = owList
+                      .filter((x: any) => inRange(String(x?.edd || '').trim()))
+                      .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
+                    const opList = Array.isArray(row?.onProcessBatches) ? row.onProcessBatches : [];
+                    const onProcess = opList
+                      .filter((x: any) => inRange(String(x?.edd || '').trim()))
+                      .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
                     let secondQty = 0;
                     if (secondId && pebaInRange) {
                       const per = row?.perWarehouse || {};
@@ -5883,8 +5893,18 @@ export default function Orders() {
               getRowClassName={(params: any) => {
                 const row = (params as any)?.row || {};
                 const primary = Number(row?.selectedWarehouseAvailable ?? 0);
-                const onWater = Number(row?.onWaterPallets ?? 0);
-                const onProcess = Number(row?.onProcessPallets ?? 0);
+                // EDD-filtered sums for row styling
+                const fromF = String(viewOrderableEddFrom || '').trim();
+                const toF = String(viewOrderableEddTo || '').trim();
+                const inRange = (d: string) => (!fromF || d >= fromF) && (!toF || d <= toF);
+                const owList = Array.isArray(row?.onWaterShipments) ? row.onWaterShipments : [];
+                const onWater = owList
+                  .filter((x: any) => inRange(String(x?.edd || '').trim()))
+                  .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
+                const opList = Array.isArray(row?.onProcessBatches) ? row.onProcessBatches : [];
+                const onProcess = opList
+                  .filter((x: any) => inRange(String(x?.edd || '').trim()))
+                  .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
                 const list = Array.isArray(viewOrderableWarehouses) ? viewOrderableWarehouses : [];
                 const wid = String(viewOrderableWarehouseId || '').trim();
                 const second = list.find((w: any) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
