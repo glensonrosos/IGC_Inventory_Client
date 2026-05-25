@@ -1275,7 +1275,12 @@ export default function Orders() {
     const second = list.find((w: any) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
     const secondId = second ? String(second._id) : '';
     const secondName = second ? String((second as any).name || '') : '';
-    if (secondId && second) {
+    // Determine if PEBA (second warehouse availability) is within the manual picker EDD range
+    const mpFrom = String(manualPickerEddFrom || '').trim();
+    const mpTo = String(manualPickerEddTo || '').trim();
+    const pebaYmdManual = (() => { const d = new Date(); d.setHours(0,0,0,0); d.setMonth(d.getMonth() + 3); return d.toISOString().slice(0,10); })();
+    const pebaInRangeManual = (!mpFrom || pebaYmdManual >= mpFrom) && (!mpTo || pebaYmdManual <= mpTo);
+    if (secondId && second && pebaInRangeManual) {
       cols.push({
         field: 'secondWarehouseAvailable',
         headerName: `${secondName}`,
@@ -1347,14 +1352,26 @@ export default function Orders() {
         const maybeRow = args?.[1];
         const row = (maybeRow && typeof maybeRow === 'object') ? maybeRow : (maybeParams?.row || {});
         const primary = Number((row as any)?.selectedWarehouseAvailable ?? 0);
-        const onWater = Number((row as any)?.onWaterPallets ?? 0);
-        const onProcess = Number((row as any)?.onProcessPallets ?? 0);
+        // EDD-filtered On-Water sum
+        const mpFrom = String(manualPickerEddFrom || '').trim();
+        const mpTo = String(manualPickerEddTo || '').trim();
+        const inRange = (d: string) => (!mpFrom || d >= mpFrom) && (!mpTo || d <= mpTo);
+        const waterList = Array.isArray((row as any)?.onWaterShipments) ? (row as any).onWaterShipments : [];
+        const onWater = waterList
+          .filter((x: any) => inRange(String(x?.edd || '').trim()))
+          .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
+        const procList = Array.isArray((row as any)?.onProcessBatches) ? (row as any).onProcessBatches : [];
+        const onProcess = procList
+          .filter((x: any) => inRange(String(x?.edd || '').trim()))
+          .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
         const list = Array.isArray(manualPickerWarehouses) ? manualPickerWarehouses : [];
         const wid = String(manualWarehouseId || '').trim();
         const second = list.find((w: any) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
         const secondId = second ? String(second._id) : '';
+        const pebaYmdManual = (() => { const d = new Date(); d.setHours(0,0,0,0); d.setMonth(d.getMonth() + 3); return d.toISOString().slice(0,10); })();
+        const pebaInRangeManual = (!mpFrom || pebaYmdManual >= mpFrom) && (!mpTo || pebaYmdManual <= mpTo);
         let secondQty = 0;
-        if (secondId) {
+        if (secondId && pebaInRangeManual) {
           const per = (row as any)?.perWarehouse || {};
           secondQty = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
         }
@@ -1369,10 +1386,22 @@ export default function Orders() {
         const row = (p && typeof p === 'object' && 'row' in p) ? (p as any).row : {};
         if (row && (row as any).isDuplicate) return '-';
         const primary = Number((row as any)?.selectedWarehouseAvailable ?? 0);
-        const onWater = Number((row as any)?.onWaterPallets ?? 0);
-        const onProcess = Number((row as any)?.onProcessPallets ?? 0);
+        const mpFrom = String(manualPickerEddFrom || '').trim();
+        const mpTo = String(manualPickerEddTo || '').trim();
+        const inRange = (d: string) => (!mpFrom || d >= mpFrom) && (!mpTo || d <= mpTo);
+        const waterList = Array.isArray((row as any)?.onWaterShipments) ? (row as any).onWaterShipments : [];
+        const onWater = waterList
+          .filter((x: any) => inRange(String(x?.edd || '').trim()))
+          .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
+        const procList = Array.isArray((row as any)?.onProcessBatches) ? (row as any).onProcessBatches : [];
+        const onProcess = procList
+          .filter((x: any) => inRange(String(x?.edd || '').trim()))
+          .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
+        // Include PEBA only when within the manual picker EDD range
+        const pebaYmdManual = (() => { const d = new Date(); d.setHours(0,0,0,0); d.setMonth(d.getMonth() + 3); return d.toISOString().slice(0,10); })();
+        const pebaInRangeManual = (!mpFrom || pebaYmdManual >= mpFrom) && (!mpTo || pebaYmdManual <= mpTo);
         let second = 0;
-        if (secondWarehouse?._id) {
+        if (secondWarehouse?._id && pebaInRangeManual) {
           const per = (row as any)?.perWarehouse || {};
           const wid = String(secondWarehouse._id);
           second = Number((per && typeof per === 'object') ? (per[wid] ?? per[String(wid)] ?? 0) : 0);
@@ -5359,7 +5388,22 @@ export default function Orders() {
                   columns={manualPickerColumns}
                   loading={manualPickerLoading}
                   columnHeaderHeight={90}
-                  rowHeight={55}
+                  rowHeight={75}
+                  getCellClassName={(params: any) => {
+                    const field = String((params && (params as any).field) || '');
+                    const raw = (params && (params as any).value);
+                    const value = Number(raw);
+                    const isNumeric = Number.isFinite(value);
+                    const isQtyField = (
+                      field === 'selectedWarehouseAvailable' ||
+                      field === 'secondWarehouseAvailable' ||
+                      field === 'maxOrder' ||
+                      field.startsWith('ow_') ||
+                      field.startsWith('op_')
+                    );
+                    if (isQtyField && isNumeric && Math.floor(value) === 0) return 'qty-zero';
+                    return '';
+                  }}
                   onRowDoubleClick={(p: any) => {
                     const g = String(p?.row?.groupName || '').trim();
                     if (g) openOrderableGroupItems({ groupName: g });
@@ -5390,6 +5434,9 @@ export default function Orders() {
                     return maxOrder <= 0 ? 'row-maxorder-zero' : '';
                   }}
                   sx={{
+                    '& .qty-zero': {
+                      bgcolor: 'rgba(211, 47, 47, 0.06)',
+                    },
                     '& .row-maxorder-zero': {
                       bgcolor: 'rgba(211, 47, 47, 0.08)',
                       '&:hover': { bgcolor: 'rgba(211, 47, 47, 0.12)' },
@@ -5656,6 +5703,9 @@ export default function Orders() {
                 const secondName = second ? String(second.name || '').trim() : '';
                 const from = String(viewOrderableEddFrom || '').trim();
                 const to = String(viewOrderableEddTo || '').trim();
+                // PEBA is modeled as second warehouse availability with EDD = today + 3 months
+                const pebaYmd = (() => { const d = new Date(); d.setHours(0,0,0,0); d.setMonth(d.getMonth() + 3); return d.toISOString().slice(0,10); })();
+                const pebaInRange = (!from || pebaYmd >= from) && (!to || pebaYmd <= to);
 
                 const allRows = Array.isArray(viewOrderableFilteredRows) ? viewOrderableFilteredRows : [];
                 const waterEddsSet = new Set<string>();
@@ -5718,7 +5768,7 @@ export default function Orders() {
                   });
                 }
 
-                if (secondId) {
+                if (secondId && pebaInRange) {
                   cols.push({
                     field: 'secondWarehouseAvailable',
                     headerName: `${secondName || 'Warehouse'}`,
@@ -5793,7 +5843,7 @@ export default function Orders() {
                     const onWater = Number(row?.onWaterPallets ?? 0);
                     const onProcess = Number(row?.onProcessPallets ?? 0);
                     let secondQty = 0;
-                    if (secondId) {
+                    if (secondId && pebaInRange) {
                       const per = row?.perWarehouse || {};
                       secondQty = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
                     }
@@ -5812,9 +5862,24 @@ export default function Orders() {
 
                 return cols;
               })()}
-              rowHeight={55}
+              rowHeight={75}
               columnHeaderHeight={90}
               loading={viewOrderableLoading}
+              getCellClassName={(params: any) => {
+                const field = String((params && (params as any).field) || '');
+                const raw = (params && (params as any).value);
+                const value = Number(raw);
+                const isNumeric = Number.isFinite(value);
+                const isQtyField = (
+                  field === 'selectedWarehouseAvailable' ||
+                  field === 'secondWarehouseAvailable' ||
+                  field === 'maxOrder' ||
+                  field.startsWith('ow_') ||
+                  field.startsWith('op_')
+                );
+                if (isQtyField && isNumeric && Math.floor(value) === 0) return 'qty-zero';
+                return '';
+              }}
               getRowClassName={(params: any) => {
                 const row = (params as any)?.row || {};
                 const primary = Number(row?.selectedWarehouseAvailable ?? 0);
@@ -5824,8 +5889,13 @@ export default function Orders() {
                 const wid = String(viewOrderableWarehouseId || '').trim();
                 const second = list.find((w: any) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
                 const secondId = second ? String(second._id) : '';
+                // Recompute PEBA visibility window here (same as in columns builder)
+                const from = String(viewOrderableEddFrom || '').trim();
+                const to = String(viewOrderableEddTo || '').trim();
+                const pebaYmd = (() => { const d = new Date(); d.setHours(0,0,0,0); d.setMonth(d.getMonth() + 3); return d.toISOString().slice(0,10); })();
+                const pebaInRange = (!from || pebaYmd >= from) && (!to || pebaYmd <= to);
                 let secondQty = 0;
-                if (secondId) {
+                if (secondId && pebaInRange) {
                   const per = row?.perWarehouse || {};
                   secondQty = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
                 }
@@ -5838,6 +5908,9 @@ export default function Orders() {
                 return maxOrder <= 0 ? 'row-maxorder-zero' : '';
               }}
               sx={{
+                '& .qty-zero': {
+                  bgcolor: 'rgba(211, 47, 47, 0.06)',
+                },
                 '& .row-maxorder-zero': {
                   bgcolor: 'rgba(211, 47, 47, 0.08)',
                   '&:hover': { bgcolor: 'rgba(211, 47, 47, 0.12)' },
