@@ -279,6 +279,7 @@ export default function Orders() {
   const [manualOrderQtyByGroup, setManualOrderQtyByGroup] = useState<Record<string, string>>({});
   const [manualDiscountByGroup, setManualDiscountByGroup] = useState<Record<string, string>>({});
   const [manualShipdateTouched, setManualShipdateTouched] = useState(false);
+  const manualRecalcDebounceRef = useRef<any>(null);
   const [manualStatusTouched, setManualStatusTouched] = useState(false);
   const [manualPickOpen, setManualPickOpen] = useState(false);
   const [manualPickSelected, setManualPickSelected] = useState<any>({ type: 'include', ids: new Set() });
@@ -1590,6 +1591,21 @@ export default function Orders() {
     return rows;
   }, [manualOrderGroups, manualPickerRowByGroup, manualDiscountByGroup, manualOrderQtyByGroup, groupPriceByName, manualUnitPriceByRow, manualUnitPriceByGroup]);
 
+  // Precompute total ordered quantity per pallet group (across duplicates) to avoid O(n) scanning during each cell render
+  const manualTotalOrderedByGroup = useMemo(() => {
+    const map = new Map<string, number>();
+    const rows = Array.isArray(manualOrderRows) ? manualOrderRows : [];
+    for (const r of rows as any[]) {
+      const rid = String((r as any)?.id || '');
+      const rg = String((r as any)?.groupName || '').trim().toLowerCase();
+      if (!rg || !rid) continue;
+      const qRaw = (manualOrderQtyByGroup as any)?.[rid] ?? '';
+      const q = Math.max(0, Math.floor(Number(qRaw || 0)) || 0);
+      map.set(rg, (map.get(rg) || 0) + q);
+    }
+    return map;
+  }, [manualOrderRows, manualOrderQtyByGroup]);
+
   // Sum of all row subtotals for the order pricing summary
   const manualOrderSubTotal = useMemo(() => {
     const rows = Array.isArray(manualOrderRows) ? manualOrderRows : [];
@@ -1829,17 +1845,12 @@ export default function Orders() {
           (Number.isFinite(second) ? second : 0) +
           (Number.isFinite(onProcess) ? onProcess : 0)
         ));
-        // Remaining available for this row after subtracting quantities of other duplicate rows with the same pallet
-        let otherQty = 0;
-        for (const r of (Array.isArray(manualOrderRows) ? manualOrderRows : []) as any[]) {
-          const rid = String((r as any)?.id || '');
-          const rg = String((r as any)?.groupName || '').trim().toLowerCase();
-          if (rid !== rowKey && rg === String(groupName).trim().toLowerCase()) {
-            const qRaw = (manualOrderQtyByGroup as any)?.[rid] ?? '';
-            const q = Math.max(0, Math.floor(Number(qRaw || 0)) || 0);
-            otherQty += q;
-          }
-        }
+        // Remaining available after subtracting quantities of other duplicate rows (use precomputed totals)
+        const groupKeyLower = String(groupName).trim().toLowerCase();
+        const totalForGroup = Number(manualTotalOrderedByGroup.get(groupKeyLower) || 0);
+        const currentRaw = (manualOrderQtyByGroup as any)?.[rowKey] ?? '';
+        const currentQty = Math.max(0, Math.floor(Number(currentRaw || 0)) || 0);
+        const otherQty = Math.max(0, totalForGroup - currentQty);
         const reserved = manualReservedByGroup.get(groupName)?.total || 0;
         const remaining = Math.max(0, baseMax - otherQty);
         const maxAllowed = Math.max(0, Math.floor(remaining + Math.max(0, reserved)));
@@ -1855,8 +1866,11 @@ export default function Orders() {
               let n = Math.max(1, Math.floor(Number(raw || 0)));
               if (Number.isFinite(maxAllowed)) n = Math.min(n, maxAllowed);
               setManualOrderQtyByGroup((prev)=> ({ ...prev, [rowKey]: String(n) }));
-              setManualShipdateTouched(true);
-              setManualRecalcTick((t)=> t + 1);
+              // Debounce heavier recomputations to avoid long 'input' handlers
+              if (manualRecalcDebounceRef.current) clearTimeout(manualRecalcDebounceRef.current);
+              manualRecalcDebounceRef.current = setTimeout(() => {
+                try { setManualRecalcTick((t)=> t + 1); } catch {}
+              }, 120);
             }}
             onBlur={(e)=>{
               const raw = normalizeIntText(e.target.value);
@@ -1864,6 +1878,8 @@ export default function Orders() {
               if (Number.isFinite(maxAllowed)) n = Math.min(n, maxAllowed);
               setManualOrderQtyByGroup((prev)=> ({ ...prev, [rowKey]: String(n) }));
               setManualShipdateTouched(true);
+              // Flush recompute promptly on blur
+              if (manualRecalcDebounceRef.current) clearTimeout(manualRecalcDebounceRef.current);
               setManualRecalcTick((t)=> t + 1);
             }}
             onKeyDown={(e)=>{
