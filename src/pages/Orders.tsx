@@ -1784,7 +1784,7 @@ export default function Orders() {
               let n = Math.max(1, Math.floor(Number(raw || 0)));
               if (Number.isFinite(maxAllowed)) n = Math.min(n, maxAllowed);
               setManualOrderQtyByGroup((prev)=> ({ ...prev, [rowKey]: String(n) }));
-              setManualShipdateTouched(false);
+              setManualShipdateTouched(true);
               setManualRecalcTick((t)=> t + 1);
             }}
             onBlur={(e)=>{
@@ -1792,7 +1792,7 @@ export default function Orders() {
               let n = Math.max(1, Math.floor(Number(raw || 0)));
               if (Number.isFinite(maxAllowed)) n = Math.min(n, maxAllowed);
               setManualOrderQtyByGroup((prev)=> ({ ...prev, [rowKey]: String(n) }));
-              setManualShipdateTouched(false);
+              setManualShipdateTouched(true);
               setManualRecalcTick((t)=> t + 1);
             }}
             onKeyDown={(e)=>{
