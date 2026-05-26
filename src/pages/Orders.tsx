@@ -358,7 +358,7 @@ export default function Orders() {
           return hay.includes(q);
         });
 
-    // Hide rows where total availability across tiers is zero
+    // Hide rows when EDD-filtered Max Order is zero (align with grid Max Order computation)
     const wid = String(viewOrderableWarehouseId || '').trim();
     const list = Array.isArray(viewOrderableWarehouses) ? viewOrderableWarehouses : [];
     const second = list.find((w: any) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
@@ -373,31 +373,49 @@ export default function Orders() {
       if (to && s > to) return false;
       return true;
     };
-    const matchesEddRange = (row: any) => {
-      if (!from && !to) return true;
-      const ships = Array.isArray(row?.onWaterShipments) ? row.onWaterShipments : [];
-      for (const x of ships) if (inRange(String(x?.edd || ''))) return true;
-      const batches = Array.isArray(row?.onProcessBatches) ? row.onProcessBatches : [];
-      for (const b of batches) if (inRange(String(b?.edd || ''))) return true;
-      return false;
+    const addMonthsYmd = (s: string, n: number) => {
+      const [yy, mm, dd] = String(s || '').split('-').map((t) => Number(t));
+      if (!yy || !mm || !dd) return '';
+      const dt = new Date(yy, mm - 1, dd);
+      dt.setHours(0,0,0,0);
+      dt.setMonth(dt.getMonth() + n);
+      return dt.toISOString().slice(0,10);
     };
+    const pebaYmd = (() => { const d = new Date(); d.setHours(0,0,0,0); d.setMonth(d.getMonth() + 3); return d.toISOString().slice(0,10); })();
+    const pebaInRange = (!from || pebaYmd >= from) && (!to || pebaYmd <= to);
 
     return bySearch.filter((row: any) => {
       const primary = Number(row?.selectedWarehouseAvailable ?? 0);
-      const onWater = Number(row?.onWaterPallets ?? 0);
-      const onProcess = Number(row?.onProcessPallets ?? 0);
+
+      // EDD-filtered sums
+      const owList = Array.isArray(row?.onWaterShipments) ? row.onWaterShipments : [];
+      const onWater = owList
+        .filter((x: any) => inRange(String(x?.edd || '').trim()))
+        .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
+
+      const opList = Array.isArray(row?.onProcessBatches) ? row.onProcessBatches : [];
+      const onProcess = opList
+        .filter((x: any) => {
+          const orig = String(x?.edd || '').trim();
+          const shifted = addMonthsYmd(orig, 3);
+          return Boolean(shifted) && inRange(shifted);
+        })
+        .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
+
       let secondQty = 0;
-      if (secondId) {
+      if (secondId && pebaInRange) {
         const per = row?.perWarehouse || {};
         secondQty = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
       }
+
       const total =
         (Number.isFinite(primary) ? primary : 0) +
         (Number.isFinite(onWater) ? onWater : 0) +
         (Number.isFinite(onProcess) ? onProcess : 0) +
         (Number.isFinite(secondQty) ? secondQty : 0);
+
       if (!(Math.max(0, Math.floor(total)) > 0)) return false;
-      return matchesEddRange(row);
+      return true;
     });
   }, [viewOrderableQ, viewOrderableRows, viewOrderableWarehouseId, viewOrderableWarehouses, viewOrderableEddFrom, viewOrderableEddTo, palletNameByGroup, palletDescByGroup]);
 
@@ -466,74 +484,113 @@ export default function Orders() {
     if (!wid) return;
     setViewOrderableExporting(true);
     try {
-      const { data } = await api.get('/orders/pallet-picker', { params: { warehouseId: wid } });
-      const rows = Array.isArray(data?.rows) ? data.rows : [];
-      const whs = Array.isArray(data?.warehouses) ? data.warehouses : [];
+      const rows = Array.isArray(viewOrderableFilteredRows) ? viewOrderableFilteredRows : [];
+      const whs = Array.isArray(viewOrderableWarehouses) ? viewOrderableWarehouses : [];
+      const selectedWarehouseName = String(whs.find((w: any) => String(w?._id || '') === wid)?.name || '').trim();
+      const cleanedPrimaryName = selectedWarehouseName.replace(/^THIS\s*-\s*/i, '');
       const second = whs.find((w: any) => String(w?._id || '').trim() && String(w?._id || '').trim() !== wid) || null;
       const secondId = second ? String(second._id) : '';
       const secondName = second ? String(second.name || '').trim() : '';
 
-      // Collect distinct EDD dates across all rows for On-Water and On-Process
+      const from = String(viewOrderableEddFrom || '').trim();
+      const to = String(viewOrderableEddTo || '').trim();
+      const inRange = (d: string) => (!from || d >= from) && (!to || d <= to);
+      const addMonthsYmd = (s: string, n: number) => {
+        const [yy, mm, dd] = String(s || '').split('-').map((t) => Number(t));
+        if (!yy || !mm || !dd) return '';
+        const dt = new Date(yy, mm - 1, dd);
+        dt.setHours(0,0,0,0);
+        dt.setMonth(dt.getMonth() + n);
+        return dt.toISOString().slice(0,10);
+      };
+      const pebaYmd = (() => { const d = new Date(); d.setHours(0,0,0,0); d.setMonth(d.getMonth() + 3); return d.toISOString().slice(0,10); })();
+      const pebaInRange = (!from || pebaYmd >= from) && (!to || pebaYmd <= to);
+
+      // Collect distinct, filtered EDDs for columns (match the grid)
       const waterEddsSet = new Set<string>();
       const processEddsSet = new Set<string>();
       for (const r of rows) {
-        for (const s of (Array.isArray(r?.onWaterShipments) ? r.onWaterShipments : [])) {
-          const d = String(s?.edd || '').trim();
-          if (d) waterEddsSet.add(d);
+        const ships = Array.isArray(r?.onWaterShipments) ? r.onWaterShipments : [];
+        for (const s of ships) {
+          const edd = String(s?.edd || '').trim();
+          if (edd && inRange(edd)) waterEddsSet.add(edd);
         }
-        for (const b of (Array.isArray(r?.onProcessBatches) ? r.onProcessBatches : [])) {
-          const d = String(b?.edd || '').trim();
-          if (d) processEddsSet.add(d);
+        const batches = Array.isArray(r?.onProcessBatches) ? r.onProcessBatches : [];
+        for (const b of batches) {
+          const orig = String(b?.edd || '').trim();
+          const shifted = addMonthsYmd(orig, 3);
+          if (orig && shifted && inRange(shifted)) processEddsSet.add(orig);
         }
       }
       const waterEdds = Array.from(waterEddsSet).sort((a, b) => a.localeCompare(b));
       const processEdds = Array.from(processEddsSet).sort((a, b) => a.localeCompare(b));
 
+      // Build export rows mirroring visible columns
       const exportRows = rows.map((r: any) => {
-        const primary = Number(r?.selectedWarehouseAvailable ?? 0);
-        const onWater = Number(r?.onWaterPallets ?? 0);
-        const onProcess = Number(r?.onProcessPallets ?? 0);
         const groupName = String(r?.groupName || '').trim();
         const gLower = groupName.toLowerCase();
+
+        const primary = Number(r?.selectedWarehouseAvailable ?? 0);
+        const owList = Array.isArray(r?.onWaterShipments) ? r.onWaterShipments : [];
+        const onWater = owList
+          .filter((x: any) => inRange(String(x?.edd || '').trim()))
+          .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
+        const opList = Array.isArray(r?.onProcessBatches) ? r.onProcessBatches : [];
+        const onProcess = opList
+          .filter((x: any) => {
+            const orig = String(x?.edd || '').trim();
+            const shifted = addMonthsYmd(orig, 3);
+            return Boolean(shifted) && inRange(shifted);
+          })
+          .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
         let secondQty = 0;
-        if (secondId) {
+        if (secondId && pebaInRange) {
           const per = r?.perWarehouse || {};
           secondQty = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
         }
-        const maxOrder =
+        const maxOrder = Math.max(0, Math.floor(
           (Number.isFinite(primary) ? primary : 0) +
           (Number.isFinite(onWater) ? onWater : 0) +
           (Number.isFinite(onProcess) ? onProcess : 0) +
-          (Number.isFinite(secondQty) ? secondQty : 0);
+          (Number.isFinite(secondQty) ? secondQty : 0)
+        ));
 
         const out: any = {
-          'Pallet Name': String(r?.palletName || ''),
+          'Pallet Name': String(palletNameByGroup?.[gLower] || ''),
           'Pallet Description': String(palletDescByGroup?.[gLower] || ''),
           'Pallet ID': String(r?.lineItem || ''),
-          'MPG': Math.max(0, Math.floor(Number.isFinite(primary) ? primary : 0)),
         };
+        out[cleanedPrimaryName || 'Warehouse'] = Math.max(0, Math.floor(Number.isFinite(primary) ? primary : 0));
+        if (secondId && pebaInRange) out[secondName || 'Warehouse'] = Math.max(0, Math.floor(Number.isFinite(secondQty) ? secondQty : 0));
 
-        if (secondId) out['PEBA'] = Math.max(0, Math.floor(Number.isFinite(secondQty) ? secondQty : 0));
-
-        // Per-EDD On-Water columns
+        // Per-EDD On-Water columns (sum duplicates)
         const shipMap = new Map<string, number>();
-        for (const s of (Array.isArray(r?.onWaterShipments) ? r.onWaterShipments : [])) {
+        for (const s of owList) {
           const d = String(s?.edd || '').trim();
           const qty = Math.max(0, Math.floor(Number(s?.qty || 0)));
-          if (d && qty > 0) shipMap.set(d, (shipMap.get(d) || 0) + qty);
+          if (d && inRange(d) && qty > 0) shipMap.set(d, (shipMap.get(d) || 0) + qty);
         }
-        for (const d of waterEdds) out[`On-Water EDD ${d}`] = Math.max(0, Math.floor(shipMap.get(d) || 0));
+        for (const d of waterEdds) {
+          const [y,m,dd] = String(d).split('-');
+          const hdr = `On-Water ${m}/${dd}/${y}`;
+          out[hdr] = Math.max(0, Math.floor(shipMap.get(d) || 0));
+        }
 
-        // Per-EDD On-Process columns
+        // Per-EDD On-Process columns (sum duplicates), headers show original EDD + suffix
         const procMap = new Map<string, number>();
-        for (const b of (Array.isArray(r?.onProcessBatches) ? r.onProcessBatches : [])) {
+        for (const b of opList) {
           const d = String(b?.edd || '').trim();
+          const shifted = addMonthsYmd(d, 3);
           const qty = Math.max(0, Math.floor(Number(b?.qty || 0)));
-          if (d && qty > 0) procMap.set(d, (procMap.get(d) || 0) + qty);
+          if (d && shifted && inRange(shifted) && qty > 0) procMap.set(d, (procMap.get(d) || 0) + qty);
         }
-        for (const d of processEdds) out[`On-Process EDD ${d}`] = Math.max(0, Math.floor(procMap.get(d) || 0));
+        for (const d of processEdds) {
+          const [y,m,dd] = String(d).split('-');
+          const hdr = `On-Process ${m}/${dd}/${y} + 3 Months`;
+          out[hdr] = Math.max(0, Math.floor(procMap.get(d) || 0));
+        }
 
-        out['Max Order'] = Math.max(0, Math.floor(Number.isFinite(maxOrder) ? maxOrder : 0));
+        out['Max Order'] = maxOrder;
         return out;
       });
 
@@ -543,7 +600,11 @@ export default function Orders() {
       const dt = new Date();
       const pad = (n: number) => String(n).padStart(2, '0');
       const stamp = `${dt.getFullYear()}${pad(dt.getMonth() + 1)}${pad(dt.getDate())}_${pad(dt.getHours())}${pad(dt.getMinutes())}${pad(dt.getSeconds())}`;
-      const filename = `orderable_pallets_${stamp}.xlsx`;
+      const f = String(viewOrderableEddFrom || '').trim();
+      const t = String(viewOrderableEddTo || '').trim();
+      const suffixF = f ? `_EDD_f_${f}` : '';
+      const suffixT = t ? `_EDD_t_${t}` : '';
+      const filename = `orderable_pallets_${stamp}${suffixF}${suffixT}.xlsx`;
       XLSX.writeFile(wb, filename);
     } catch {
       toast.error('Failed to export XLSX');
@@ -1116,32 +1177,37 @@ export default function Orders() {
           return gid.includes(q) || gnameLower.includes(q) || pname.includes(q) || pdesc.includes(q);
         });
 
-    // EDD date range filter: Only include rows having any On-Water or On-Process EDD within [from, to]
+    // EDD-filtered Max Order: primary + in-range On-Water + in-range (shifted) On-Process + PEBA if implied EDD (today+3m) in range
     const from = String(manualPickerEddFrom || '').trim();
     const to = String(manualPickerEddTo || '').trim();
-    const inRange = (ymd: string) => {
-      const s = String(ymd || '').trim();
-      if (!s) return false;
-      if (from && s < from) return false;
-      if (to && s > to) return false;
-      return true;
+    const inRange = (d: string) => (!from || d >= from) && (!to || d <= to);
+    const addMonthsYmd = (s: string, n: number) => {
+      const [yy, mm, dd] = String(s || '').split('-').map((t) => Number(t));
+      if (!yy || !mm || !dd) return '';
+      const dt = new Date(yy, mm - 1, dd);
+      dt.setHours(0,0,0,0);
+      dt.setMonth(dt.getMonth() + n);
+      return dt.toISOString().slice(0,10);
     };
-    const matchesEddRange = (row: any) => {
-      if (!from && !to) return true;
-      const ships = Array.isArray(row?.onWaterShipments) ? row.onWaterShipments : [];
-      for (const x of ships) if (inRange(String(x?.edd || ''))) return true;
-      const batches = Array.isArray(row?.onProcessBatches) ? row.onProcessBatches : [];
-      for (const b of batches) if (inRange(String(b?.edd || ''))) return true;
-      return false;
-    };
+    const pebaYmd = (() => { const d = new Date(); d.setHours(0,0,0,0); d.setMonth(d.getMonth() + 3); return d.toISOString().slice(0,10); })();
+    const pebaInRange = (!from || pebaYmd >= from) && (!to || pebaYmd <= to);
 
-    // Hide rows with zero availability across tiers (Primary + On-Water + 2nd + On-Process)
     return bySearch.filter((row: any) => {
       const primary = Number(row?.selectedWarehouseAvailable ?? 0);
-      const onWater = Number(row?.onWaterPallets ?? 0);
-      const onProcess = Number(row?.onProcessPallets ?? 0);
+      const owList = Array.isArray(row?.onWaterShipments) ? row.onWaterShipments : [];
+      const onWater = owList
+        .filter((x: any) => inRange(String(x?.edd || '').trim()))
+        .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
+      const opList = Array.isArray(row?.onProcessBatches) ? row.onProcessBatches : [];
+      const onProcess = opList
+        .filter((x: any) => {
+          const orig = String(x?.edd || '').trim();
+          const shifted = addMonthsYmd(orig, 3);
+          return Boolean(shifted) && inRange(shifted);
+        })
+        .reduce((sum: number, x: any) => sum + Math.max(0, Math.floor(Number(x?.qty || 0))), 0);
       let secondQty = 0;
-      if (secondId) {
+      if (secondId && pebaInRange) {
         const per = row?.perWarehouse || {};
         secondQty = Number((per && typeof per === 'object') ? (per[secondId] ?? per[String(secondId)] ?? 0) : 0);
       }
@@ -1150,8 +1216,7 @@ export default function Orders() {
         (Number.isFinite(onWater) ? onWater : 0) +
         (Number.isFinite(onProcess) ? onProcess : 0) +
         (Number.isFinite(secondQty) ? secondQty : 0);
-      if (!(Math.max(0, Math.floor(total)) > 0)) return false;
-      return matchesEddRange(row);
+      return Math.max(0, Math.floor(total)) > 0;
     });
   }, [manualPickerRowsWithName, manualPickerQDebounced, manualWarehouseId, manualPickerWarehouses, manualPickerEddFrom, manualPickerEddTo, palletDescByGroup]);
 
@@ -1428,7 +1493,13 @@ export default function Orders() {
           (Number.isFinite(onWater) ? onWater : 0) +
           (Number.isFinite(second) ? second : 0) +
           (Number.isFinite(onProcess) ? onProcess : 0);
-        return String(Math.max(0, Math.floor(total)));
+        const v = Math.max(0, Math.floor(total));
+        const isZero = !Number.isFinite(v) || v === 0;
+        return (
+          <Box component="span" sx={{ fontWeight: 700, color: isZero ? 'inherit' : 'success.main' }}>
+            {String(v)}
+          </Box>
+        );
       },
     });
 
@@ -5316,6 +5387,9 @@ export default function Orders() {
               disabled={!manualWarehouseId || manualFieldsLocked}
               onClick={() => {
                 setManualPickSelected({ type: 'include', ids: new Set((manualOrderGroups || []).map((x)=> String(x))) });
+                // If a Requested Ship Date is set, auto-apply it to the picker EDD To filter
+                const rsd = String(manualRequestedShip || '').trim();
+                if (rsd) setManualPickerEddTo(rsd);
                 setManualPickOpen(true);
               }}
             >
@@ -5900,7 +5974,13 @@ export default function Orders() {
                   },
                   renderCell: (p: any) => {
                     const v = Number((p && typeof p === 'object' && 'value' in p) ? (p as any).value : 0);
-                    return String(Number.isFinite(v) ? v : 0);
+                    const text = String(Number.isFinite(v) ? v : 0);
+                    const isZero = !Number.isFinite(v) || Math.floor(v) === 0;
+                    return (
+                      <Box component="span" sx={{ fontWeight: 700, color: isZero ? 'inherit' : 'success.main' }}>
+                        {text}
+                      </Box>
+                    );
                   },
                 });
 
@@ -6104,3 +6184,4 @@ export default function Orders() {
     </Container>
   );
 }
+
