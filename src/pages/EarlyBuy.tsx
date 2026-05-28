@@ -117,6 +117,12 @@ export default function EarlyBuy() {
   const [discountPercent, setDiscountPercent] = useState('');
   const [notes, setNotes] = useState('');
 
+  // Uncontrolled inputs (lines grid): refs and error markers
+  const qtyInputRefs = useRef<Record<number, HTMLInputElement | null>>({});
+  const discountInputRefs = useRef<Record<number, HTMLInputElement | null>>({});
+  const [invalidQtyRows, setInvalidQtyRows] = useState<Set<number>>(new Set());
+  const [invalidDiscountRows, setInvalidDiscountRows] = useState<Set<number>>(new Set());
+
   const numberFmt2 = useMemo(() => new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }), []);
 
   // Report (Early Buy only)
@@ -253,10 +259,7 @@ export default function EarlyBuy() {
   const [pickerRows, setPickerRows] = useState<any[]>([]);
   const [pickerQ, setPickerQ] = useState('');
   const [pickerQDebounced, setPickerQDebounced] = useState('');
-  useEffect(() => {
-    const h = setTimeout(() => setPickerQDebounced(String(pickerQ || '')), 250);
-    return () => clearTimeout(h);
-  }, [pickerQ]);
+  const pickerQDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [pickerWarehouses, setPickerWarehouses] = useState<any[]>([]);
   const [selectedGroups, setSelectedGroups] = useState<string[]>([]);
 
@@ -867,6 +870,14 @@ export default function EarlyBuy() {
     return () => { canceled = true; };
   }, [pickerOpen]);
 
+  // Clear pending search debounce when dialog closes
+  useEffect(() => {
+    if (!pickerOpen && pickerQDebounceRef.current) {
+      clearTimeout(pickerQDebounceRef.current);
+      pickerQDebounceRef.current = null;
+    }
+  }, [pickerOpen]);
+
   const pickerRowsFiltered = useMemo(() => {
     const q = String(pickerQDebounced || '').trim().toLowerCase();
     const rows = (Array.isArray(pickerRows) ? pickerRows : [])
@@ -1180,8 +1191,9 @@ export default function EarlyBuy() {
         <TextField
           size="small"
           type="number"
-          value={v}
-          onChange={(e) => {
+          defaultValue={v}
+          onFocus={(e)=> { try { (e.target as HTMLInputElement).select(); } catch {} }}
+          onBlur={(e) => {
             const n = Math.max(0, Math.min(100, Math.floor(Number(e.target.value) || 0)));
             const next = [...lines];
             const i = Math.max(0, Number(p?.id) - 1);
@@ -1189,6 +1201,9 @@ export default function EarlyBuy() {
             setLines(next);
           }}
           inputProps={{ inputMode: 'numeric', pattern: '[0-9]*', min: 0, max: 100 }}
+          inputRef={(el)=> { const i = Math.max(0, Number(p?.id) - 1); discountInputRefs.current[i] = el; }}
+          error={invalidDiscountRows.has(Math.max(0, Number(p?.id) - 1))}
+          helperText={invalidDiscountRows.has(Math.max(0, Number(p?.id) - 1)) ? '0-100 required' : undefined}
           sx={{ '& input': { textAlign: 'right' } }}
         />
       );
@@ -1217,14 +1232,18 @@ export default function EarlyBuy() {
           <TextField
             size="small"
             type="number"
-            value={val}
-            onChange={(e) => {
+            defaultValue={val}
+            onFocus={(e)=> { try { (e.target as HTMLInputElement).select(); } catch {} }}
+            onBlur={(e) => {
               const v = Math.max(0, Math.floor(Number(e.target.value) || 0));
               const next = [...lines];
               if (next[i]) next[i] = { ...next[i], qty: v };
               setLines(next);
             }}
             inputProps={{ inputMode: 'numeric', pattern: '[0-9]*', min: 0 }}
+            inputRef={(el)=> { qtyInputRefs.current[i] = el; }}
+            error={invalidQtyRows.has(i)}
+            helperText={invalidQtyRows.has(i) ? 'Qty must be > 0' : undefined}
             sx={{ '& input': { textAlign: 'right' } }}
           />
         );
@@ -1483,6 +1502,24 @@ export default function EarlyBuy() {
   }, []);
 
   const saveNewOrder = async () => {
+    // Sync latest values from uncontrolled inputs (in case Save is clicked while a cell is focused)
+    const syncedLines = (() => {
+      const base = Array.isArray(lines) ? [...lines] : [];
+      for (let i = 0; i < base.length; i++) {
+        const qEl = qtyInputRefs.current[i];
+        if (qEl && typeof qEl.value === 'string') {
+          const v = Math.max(0, Math.floor(Number(qEl.value) || 0));
+          base[i] = { ...base[i], qty: v } as any;
+        }
+        const dEl = discountInputRefs.current[i];
+        if (dEl && typeof dEl.value === 'string') {
+          const v = Math.max(0, Math.min(100, Math.floor(Number(dEl.value) || 0)));
+          base[i] = { ...base[i], discount: v } as any;
+        }
+      }
+      return base;
+    })();
+
     // Validate
     const errs: string[] = [];
     const today = new Date().toISOString().slice(0,10);
@@ -1520,19 +1557,38 @@ export default function EarlyBuy() {
       if (!String(shippingPercent || '').trim() || !Number.isFinite(sp) || sp < 0 || sp > 100) errs.push('Shipping Charges (%) is required when status is COMPLETED');
     }
 
-    const rows = Array.isArray(lines) ? lines : [];
+    const rows = Array.isArray(syncedLines) ? syncedLines : [];
     if (rows.length === 0) errs.push('Please add at least one pallet');
     const anyQty = rows.some(l => Number(l.qty) > 0);
     if (!anyQty) errs.push('Please add at least one pallet with quantity > 0');
-    const anyInvalid = rows.some(l => !Number.isFinite(Number(l.qty)) || Number(l.qty) <= 0);
-    if (anyInvalid) errs.push('Each pallet quantity must be > 0');
+    const invalidQtyIdx: number[] = [];
+    const invalidDiscIdx: number[] = [];
+    rows.forEach((l, idx) => {
+      const q = Number(l.qty);
+      const d = Number((l as any)?.discount ?? 0);
+      if (!Number.isFinite(q) || q <= 0) invalidQtyIdx.push(idx);
+      if (!Number.isFinite(d) || d < 0 || d > 100) invalidDiscIdx.push(idx);
+    });
+    if (invalidQtyIdx.length) errs.push('Each pallet quantity must be > 0');
+    if (invalidDiscIdx.length) errs.push('Discount must be between 0 and 100');
     if (!String(paymentTerms || '').trim()) errs.push('Payment Terms is required');
     if (requestedShip && createdAt && requestedShip <= createdAt) errs.push('Requested Ship Date must be > Created Order Date');
 
-    if (errs.length) { toast.error(errs[0]); return; }
+    if (errs.length) {
+      // mark invalid rows
+      setInvalidQtyRows(new Set(invalidQtyIdx));
+      setInvalidDiscountRows(new Set(invalidDiscIdx));
+      toast.error(errs[0]);
+      return;
+    }
+
+    // clear error markers and persist synced values before saving
+    setInvalidQtyRows(new Set());
+    setInvalidDiscountRows(new Set());
+    if (rows !== lines) setLines(rows);
 
     try {
-      const normalizedLines = lines.map(l => ({
+      const normalizedLines = rows.map(l => ({
         ...l,
         qty: Math.max(0, Math.floor(Number(l.qty) || 0)),
         discount: (() => {
@@ -1591,7 +1647,7 @@ export default function EarlyBuy() {
           const cacheKey = `earlyBuyLineSnapshots:${orderId}`;
           const unit: Record<string, number> = {};
           const items: Record<string, any[]> = {};
-          for (const l of (Array.isArray(lines) ? lines : [])) {
+          for (const l of (Array.isArray(rows) ? rows : [])) {
             const k = String((l as any)?.groupName || '').trim().toLowerCase();
             if (!k) continue;
             const u = Number((l as any)?.unitPriceAtAdd);
@@ -1803,27 +1859,27 @@ export default function EarlyBuy() {
                 size="small"
                 required
                 label="Customer Email"
-                value={customerEmail}
-                onChange={(e)=> setCustomerEmail(e.target.value)}
+                defaultValue={customerEmail}
+                onBlur={(e)=> setCustomerEmail(e.target.value)}
                 fullWidth
                 disabled={!isEditable}
                 error={Boolean(customerEmail) && !isValidEmail(customerEmail)}
                 helperText={Boolean(customerEmail) && !isValidEmail(customerEmail) ? 'Enter a valid email address' : ''}
               />
-              <TextField size="small" required label="Customer Name" value={customerName} onChange={(e)=> setCustomerName(e.target.value)} fullWidth disabled={!isEditable} />
+              <TextField size="small" required label="Customer Name" defaultValue={customerName} onBlur={(e)=> setCustomerName(e.target.value)} fullWidth disabled={!isEditable} />
             </Stack>
             <Box sx={{ display: 'flex' }}>
               <TextField
                 size="small"
                 required
                 label="Phone Number"
-                value={customerPhone}
-                onChange={(e)=> setCustomerPhone(e.target.value)}
+                defaultValue={customerPhone}
+                onBlur={(e)=> setCustomerPhone(e.target.value)}
                 disabled={!isEditable}
                 sx={{ width: { xs: '100%', sm: 320 } }}
               />
             </Box>
-            <TextField size="small" required label="Shipping Address" value={shippingAddress} onChange={(e)=> setShippingAddress(e.target.value)} fullWidth multiline minRows={2} disabled={!isEditable} />
+            <TextField size="small" required label="Shipping Address" defaultValue={shippingAddress} onBlur={(e)=> setShippingAddress(e.target.value)} fullWidth multiline minRows={2} disabled={!isEditable} />
             <Typography variant="subtitle2">Dates</Typography>
             {(() => {
               const isYmd = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(String(s||''));
@@ -1851,22 +1907,22 @@ export default function EarlyBuy() {
               return (
                 <Stack direction={{ xs:'column', sm:'row' }} spacing={2}>
                   <TextField
-                    size="small" required type="date" label="Created Order Date" value={createdAt}
-                    onChange={(e)=> setCreatedAt(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isEditable}
+                    size="small" required type="date" label="Created Order Date" defaultValue={createdAt}
+                    onBlur={(e)=> setCreatedAt(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isEditable}
                     inputProps={{ max: todayYmd }}
                     error={Boolean(cA) && errCreatedFuture}
                     helperText={Boolean(cA) && errCreatedFuture ? 'Created Order Date cannot be in the future' : ''}
                   />
                   <TextField
-                    size="small" type="date" label="Requested Ship Date" value={requestedShip}
-                    onChange={(e)=> setRequestedShip(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isEditable}
+                    size="small" type="date" label="Requested Ship Date" defaultValue={requestedShip}
+                    onBlur={(e)=> setRequestedShip(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isEditable}
                     inputProps={{ min: plusOne(cA) || undefined }}
                     error={Boolean(rS && cA) && errReqShipLtCreated}
                     helperText={Boolean(rS && cA) && errReqShipLtCreated ? 'Requested Ship Date must be > Created Order Date' : ''}
                   />
                   <TextField
-                    size="small" required type="date" label="Container Arrival" value={containerArrival}
-                    onChange={(e)=> setContainerArrival(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isContainerArrivalEditable}
+                    size="small" required type="date" label="Container Arrival" defaultValue={containerArrival}
+                    onBlur={(e)=> setContainerArrival(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isContainerArrivalEditable}
                     inputProps={{ min: cA || undefined, max: eS || undefined }}
                     error={(Boolean(cR && eS) && errContainerGtShip) || (Boolean(cR && cA) && errContainerLtCreated)}
                     helperText={
@@ -1876,15 +1932,15 @@ export default function EarlyBuy() {
                     }
                   />
                   <TextField
-                    size="small" required type="date" label="Estimated ShipDate for Customer" value={estFulfillment}
-                    onChange={(e)=> setEstFulfillment(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isEditable}
+                    size="small" required type="date" label="Estimated ShipDate for Customer" defaultValue={estFulfillment}
+                    onBlur={(e)=> setEstFulfillment(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isEditable}
                     inputProps={{ min: cA || undefined }}
                     error={Boolean(eS && cA) && errShipLtCreated}
                     helperText={Boolean(eS && cA) && errShipLtCreated ? 'Estimated Shipdate must be ≥ Created Order Date' : ''}
                   />
                   <TextField
-                    size="small" type="date" label="Estimated Arrival Date" value={estDelivered}
-                    onChange={(e)=> setEstDelivered(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isArrivalDateEditable}
+                    size="small" type="date" label="Estimated Arrival Date" defaultValue={estDelivered}
+                    onBlur={(e)=> setEstDelivered(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth disabled={!isArrivalDateEditable}
                     inputProps={{ min: eS || undefined }}
                     error={Boolean(eD && eS) && errArrLtShip}
                     helperText={Boolean(eD && eS) && errArrLtShip ? 'Estimated Arrival Date must be ≥ Estimated Shipdate' : ''}
@@ -1895,7 +1951,23 @@ export default function EarlyBuy() {
             <Typography variant="subtitle2">Pricing</Typography>
             <Stack direction={{ xs:'column', md:'row' }} spacing={2}>
               <TextField size="small" label="Sub Total" value={computedSubTotal} fullWidth disabled />
-              <TextField size="small" label="Shipping Charges (%)" value={shippingPercent} onChange={(e)=> setShippingPercent(e.target.value)} fullWidth disabled={!isEditable} />
+              <TextField
+                size="small"
+                label="Shipping Charges (%)"
+                defaultValue={shippingPercent}
+                onBlur={(e)=> {
+                  const raw = String(e.target.value || '').trim();
+                  const n = Number(raw);
+                  if (!Number.isFinite(n)) { setShippingPercent(''); (e.target as HTMLInputElement).value = ''; return; }
+                  const clamped = Math.max(0, Math.min(100, n));
+                  const out = String(clamped);
+                  setShippingPercent(out);
+                  try { (e.target as HTMLInputElement).value = out; } catch {}
+                }}
+                inputProps={{ inputMode: 'decimal', step: '0.01', min: 0, max: 100, pattern: '^[0-9]*\.?[0-9]*$' }}
+                fullWidth
+                disabled={!isEditable}
+              />
               <TextField size="small" label="Grand Total" value={computedGrandTotal} fullWidth disabled />
             </Stack>
             <Typography variant="subtitle2">Payment</Typography>
@@ -1931,7 +2003,7 @@ export default function EarlyBuy() {
               </TextField>
             </Box>
             <Typography variant="subtitle2">Pallets to Order</Typography>
-            <TextField size="small" label="Remarks/Notes" value={notes} onChange={(e)=> setNotes(e.target.value)} fullWidth multiline minRows={3} disabled={!isEditable} />
+            <TextField size="small" label="Remarks/Notes" defaultValue={notes} onBlur={(e)=> setNotes(e.target.value)} fullWidth multiline minRows={3} disabled={!isEditable} />
             <Typography variant="caption" color="error" sx={{ mt: -1 }}>
               {(() => {
                 const at = String(lastUpdatedAt || '').trim();
@@ -2054,7 +2126,25 @@ export default function EarlyBuy() {
         <DialogTitle>Select Pallets</DialogTitle>
         <DialogContent>
           <Stack direction={{ xs:'column', sm:'row' }} spacing={2} alignItems={{ xs:'stretch', sm:'center' }} sx={{ mb: 1, mt: 1 }}>
-            <TextField size="small" label="Search Pallet ID / Pallet Description / Pallet Name" value={pickerQ} onChange={(e)=> setPickerQ(e.target.value)} sx={{ flex: 1, minWidth: 260 }} />
+            <TextField
+              size="small"
+              label="Search Pallet ID / Pallet Description / Pallet Name"
+              defaultValue={pickerQ}
+              onChange={(e)=> {
+                const val = String(e.target.value || '');
+                if (pickerQDebounceRef.current) clearTimeout(pickerQDebounceRef.current);
+                pickerQDebounceRef.current = setTimeout(() => {
+                  setPickerQDebounced(val);
+                }, 500);
+              }}
+              onBlur={(e)=> {
+                const val = String(e.target.value || '');
+                if (pickerQDebounceRef.current) { clearTimeout(pickerQDebounceRef.current); pickerQDebounceRef.current = null; }
+                setPickerQ(val);
+                setPickerQDebounced(val);
+              }}
+              sx={{ flex: 1, minWidth: 260 }}
+            />
           </Stack>
           <div style={{ height: 460, width: '100%' }}>
             <DG

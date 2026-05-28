@@ -72,6 +72,8 @@ export default function Orders() {
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [ordersQ, setOrdersQ] = useState('');
   const [ordersStatusFilter, setOrdersStatusFilter] = useState<'all' | OrderStatus>('all');
+  // Debounce timer for main Orders search commit
+  const ordersQDebounceRef = useRef<any>(null);
   const [csvOpen, setCsvOpen] = useState(false);
   const [csvWarehouseId, setCsvWarehouseId] = useState('');
   const [csvFile, setCsvFile] = useState<File | null>(null);
@@ -115,6 +117,8 @@ export default function Orders() {
   
   // Preserve original Pallet ID mapping from the order at the moment the modal opens
   const manualBaseLineItemByGroupRef = useRef<Map<string, string>>(new Map());
+  // Debounce timer for Select Pallets search commit
+  const manualPickerQDebounceRef = useRef<any>(null);
 
   // Utility to clear focus before closing dialogs to avoid aria-hidden + focus conflicts
   const blurActive = useCallback(() => {
@@ -151,6 +155,14 @@ export default function Orders() {
       window.removeEventListener('focus', onFocus);
     };
   }, [manualOpen]);
+
+  // Clear main search debounce on unmount
+  useEffect(() => {
+    return () => {
+      try { if (ordersQDebounceRef.current) clearTimeout(ordersQDebounceRef.current); } catch {}
+      ordersQDebounceRef.current = null;
+    };
+  }, []);
 
   // While viewing/editing an order, refresh the Reserved Stock (Hierarchy) periodically without spamming rebalance
   useEffect(() => {
@@ -281,6 +293,11 @@ export default function Orders() {
   const [manualShipdateTouched, setManualShipdateTouched] = useState(false);
   const manualRecalcDebounceRef = useRef<any>(null);
   const [manualStatusTouched, setManualStatusTouched] = useState(false);
+  // Uncontrolled row input refs and error markers (validated on Save)
+  const qtyInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const discountInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const [invalidQtyRows, setInvalidQtyRows] = useState<Set<string>>(new Set());
+  const [invalidDiscountRows, setInvalidDiscountRows] = useState<Set<string>>(new Set());
   const [manualPickOpen, setManualPickOpen] = useState(false);
   const [manualPickSelected, setManualPickSelected] = useState<any>({ type: 'include', ids: new Set() });
   const [manualOrderGroups, setManualOrderGroups] = useState<string[]>([]);
@@ -311,6 +328,13 @@ export default function Orders() {
     }, 350);
     return () => clearTimeout(handle);
   }, [manualPickOpen, manualWarehouseId]);
+  // Clear search debounce when closing the Select Pallets dialog
+  useEffect(() => {
+    if (!manualPickOpen) {
+      try { if (manualPickerQDebounceRef.current) clearTimeout(manualPickerQDebounceRef.current); } catch {}
+      manualPickerQDebounceRef.current = null;
+    }
+  }, [manualPickOpen]);
   const [onWaterRows, setOnWaterRows] = useState<any[]>([]);
 
   const [onProcessOpen, setOnProcessOpen] = useState(false);
@@ -329,6 +353,8 @@ export default function Orders() {
   const [viewOrderableExporting, setViewOrderableExporting] = useState(false);
   const [palletNameByGroup, setPalletNameByGroup] = useState<Record<string, string>>({});
   const [palletDescByGroup, setPalletDescByGroup] = useState<Record<string, string>>({});
+  // Debounce timer for View Orderable search commit
+  const viewOrderableQDebounceRef = useRef<any>(null);
 
   const [orderableGroupOpen, setOrderableGroupOpen] = useState(false);
   const [orderableGroupLoading, setOrderableGroupLoading] = useState(false);
@@ -419,6 +445,14 @@ export default function Orders() {
       return true;
     });
   }, [viewOrderableQ, viewOrderableRows, viewOrderableWarehouseId, viewOrderableWarehouses, viewOrderableEddFrom, viewOrderableEddTo, palletNameByGroup, palletDescByGroup]);
+
+  // Clear search debounce when closing the View Orderable Pallets dialog
+  useEffect(() => {
+    if (!viewOrderableOpen) {
+      try { if (viewOrderableQDebounceRef.current) clearTimeout(viewOrderableQDebounceRef.current); } catch {}
+      viewOrderableQDebounceRef.current = null;
+    }
+  }, [viewOrderableOpen]);
 
   useEffect(() => {
     let stopped = false;
@@ -1660,22 +1694,10 @@ export default function Orders() {
             <TextField
               type="number"
               size="small"
-              value={val}
+              defaultValue={val}
               disabled={manualFieldsLocked}
-              onChange={(e) => {
-                const raw = String(e.target.value || '').replace(/[^0-9.\-+eE]/g, '');
-                let n = Number(raw || 0);
-                if (!Number.isFinite(n)) n = 0;
-                n = Math.max(0, Math.min(100, Math.floor(n)));
-                setManualDiscountByGroup((prev) => ({ ...prev, [rowKey]: String(n) }));
-              }}
-              onBlur={(e) => {
-                const raw = String(e.target.value || '').trim();
-                let n = Number(raw || 0);
-                if (!Number.isFinite(n)) n = 0;
-                n = Math.max(0, Math.min(100, Math.floor(n)));
-                setManualDiscountByGroup((prev) => ({ ...prev, [rowKey]: String(n) }));
-              }}
+              inputRef={(el)=> { discountInputRefs.current[rowKey] = el; }}
+              onFocus={(e)=> { try { (e.target as HTMLInputElement).select(); } catch {} }}
               onKeyDown={(e) => {
                 const k = (e as any).key;
                 if (k === 'e' || k === 'E' || k === '.' || k === '-' || k === '+' ) {
@@ -1683,6 +1705,8 @@ export default function Orders() {
                 }
               }}
               inputProps={{ inputMode: 'numeric', pattern: '[0-9]*', min: 0, max: 100, step: 1 }}
+              error={invalidDiscountRows.has(rowKey)}
+              helperText={invalidDiscountRows.has(rowKey) ? '0-100 required' : undefined}
               sx={{ width: 90 }}
             />
           );
@@ -1858,39 +1882,19 @@ export default function Orders() {
           <TextField
             type="number"
             size="small"
-            value={val}
+            defaultValue={val}
             disabled={manualFieldsLocked}
-            onChange={(e)=>{
-              const raw = sanitizeIntText(e.target.value);
-              setManualValidationErrors([]);
-              let n = Math.max(1, Math.floor(Number(raw || 0)));
-              if (Number.isFinite(maxAllowed)) n = Math.min(n, maxAllowed);
-              setManualOrderQtyByGroup((prev)=> ({ ...prev, [rowKey]: String(n) }));
-              // Debounce heavier recomputations to avoid long 'input' handlers
-              if (manualRecalcDebounceRef.current) clearTimeout(manualRecalcDebounceRef.current);
-              manualRecalcDebounceRef.current = setTimeout(() => {
-                try { setManualRecalcTick((t)=> t + 1); } catch {}
-              }, 120);
-            }}
-            onBlur={(e)=>{
-              const raw = normalizeIntText(e.target.value);
-              let n = Math.max(1, Math.floor(Number(raw || 0)));
-              if (Number.isFinite(maxAllowed)) n = Math.min(n, maxAllowed);
-              setManualOrderQtyByGroup((prev)=> ({ ...prev, [rowKey]: String(n) }));
-              setManualShipdateTouched(true);
-              // Flush recompute promptly on blur
-              if (manualRecalcDebounceRef.current) clearTimeout(manualRecalcDebounceRef.current);
-              setManualRecalcTick((t)=> t + 1);
-            }}
             onKeyDown={(e)=>{
               const k = (e as any).key;
               if (k === 'e' || k === 'E' || k === '.' || k === '-' || k === '+' ) {
                 e.preventDefault();
               }
             }}
+            inputRef={(el)=> { qtyInputRefs.current[rowKey] = el; }}
+            onFocus={(e)=> { try { (e.target as HTMLInputElement).select(); } catch {} }}
             inputProps={{ inputMode: 'numeric', pattern: '[0-9]*', min: 1, max: maxAllowed, step: 1 }}
-            error={Number(val || 0) > maxAllowed}
-            helperText={Number(val || 0) > maxAllowed ? `Max ${maxAllowed}` : undefined}
+            error={invalidQtyRows.has(rowKey)}
+            helperText={invalidQtyRows.has(rowKey) ? `Invalid or exceeds Max ${maxAllowed}` : undefined}
             sx={{ width: 100 }}
           />
         );
@@ -4349,6 +4353,51 @@ export default function Orders() {
   const submitManual = async () => {
     const errs: string[] = [];
     setManualValidationErrors([]);
+    // 1) Read latest values from uncontrolled inputs (refs) and validate basics
+    const nextQtyBy: Record<string, string> = { ...(manualOrderQtyByGroup || {}) };
+    const nextDiscBy: Record<string, string> = { ...(manualDiscountByGroup || {}) };
+    const badQty = new Set<string>();
+    const badDisc = new Set<string>();
+    try {
+      const rows: any[] = Array.isArray(manualOrderRows) ? manualOrderRows : [];
+      for (const r of rows) {
+        const rowKey = String((r as any)?.id || '');
+        if (!rowKey) continue;
+        const qEl = qtyInputRefs.current[rowKey];
+        const dEl = discountInputRefs.current[rowKey];
+        if (qEl) {
+          const raw = String(qEl.value || '').trim();
+          const n = Math.floor(Number(raw || 0));
+          if (!Number.isFinite(n) || n < 1) {
+            badQty.add(rowKey);
+          } else {
+            nextQtyBy[rowKey] = String(n);
+          }
+        }
+        if (dEl) {
+          const raw = String(dEl.value || '').trim();
+          const n = Math.floor(Number(raw || 0));
+          if (!Number.isFinite(n) || n < 0 || n > 100) {
+            badDisc.add(rowKey);
+          } else {
+            nextDiscBy[rowKey] = String(n);
+          }
+        }
+      }
+    } catch {}
+    setInvalidQtyRows(badQty);
+    setInvalidDiscountRows(badDisc);
+    if (badQty.size || badDisc.size) {
+      const issues: string[] = [];
+      if (badQty.size) issues.push('Some Order Qty are invalid (must be integer ≥ 1).');
+      if (badDisc.size) issues.push('Some Discount (%) are invalid (0–100).');
+      setManualValidationErrors(issues);
+      toast.error(issues[0] || 'Invalid inputs');
+      return;
+    }
+    // Commit cleaned maps to state (single pass) before deeper validations
+    setManualOrderQtyByGroup(nextQtyBy);
+    setManualDiscountByGroup(nextDiscBy);
     if (!manualWarehouseId) {
       errs.push('Warehouse is required');
     }
@@ -4397,7 +4446,7 @@ export default function Orders() {
         .map((k) => keyToGroupName(String(k || '')).trim().toLowerCase())
         .filter((v) => v)
     );
-    const parsed = Object.entries(manualOrderQtyByGroup || {})
+    const parsed = Object.entries(nextQtyBy || {})
       .map(([rowKey, qtyStr]) => {
         const groupName = keyToGroupName(String(rowKey || ''));
         const gTrim = String(groupName || '').trim();
@@ -4412,7 +4461,7 @@ export default function Orders() {
           groupName: gTrim,
           qty: Math.floor(Number(qtyStr || 0)),
           discountPercent: (() => {
-            const raw = (manualDiscountByGroup as any)?.[rowKey] ?? '';
+            const raw = (nextDiscBy as any)?.[rowKey] ?? '';
             const num = Number(raw || 0);
             if (!Number.isFinite(num)) return 0;
             return Math.max(0, Math.min(100, Math.floor(num)));
@@ -4874,8 +4923,15 @@ export default function Orders() {
             <TextField
               size="small"
               label="Search"
-              value={ordersQ}
-              onChange={(e)=>setOrdersQ(e.target.value)}
+              defaultValue={ordersQ}
+              onChange={(e)=>{
+                try { if (ordersQDebounceRef.current) clearTimeout(ordersQDebounceRef.current); } catch {}
+                const v = e.target.value;
+                ordersQDebounceRef.current = setTimeout(()=>{
+                  setOrdersQ(v);
+                  ordersQDebounceRef.current = null;
+                }, 500);
+              }}
               sx={{ minWidth: 260 }}
             />
             <TextField
@@ -5079,15 +5135,15 @@ export default function Orders() {
                 </Tooltip>
               </Box>
             ) : null}
-            <TextField disabled={manualFieldsLocked} label="Customer Email" size="small" value={manualCustomerEmail} onChange={(e)=>setManualCustomerEmail(e.target.value)} error={!isValidEmail(manualCustomerEmail)} helperText={!isValidEmail(manualCustomerEmail) ? 'Required (valid email)' : ''} />
-            <TextField disabled={manualFieldsLocked} label="Customer Name" size="small" value={manualCustomerName} onChange={(e)=>setManualCustomerName(e.target.value)} error={!String(manualCustomerName||'').trim()} helperText={!String(manualCustomerName||'').trim() ? 'Required' : ''} />
-            <TextField disabled={manualFieldsLocked} label="Phone Number" size="small" value={manualCustomerPhone} onChange={(e)=>setManualCustomerPhone(e.target.value)} error={!String(manualCustomerPhone||'').trim()} helperText={!String(manualCustomerPhone||'').trim() ? 'Required' : ''} />
+            <TextField disabled={manualFieldsLocked} label="Customer Email" size="small" defaultValue={manualCustomerEmail} onBlur={(e)=>setManualCustomerEmail(e.target.value)} error={!isValidEmail(manualCustomerEmail)} helperText={!isValidEmail(manualCustomerEmail) ? 'Required (valid email)' : ''} />
+            <TextField disabled={manualFieldsLocked} label="Customer Name" size="small" defaultValue={manualCustomerName} onBlur={(e)=>setManualCustomerName(e.target.value)} error={!String(manualCustomerName||'').trim()} helperText={!String(manualCustomerName||'').trim() ? 'Required' : ''} />
+            <TextField disabled={manualFieldsLocked} label="Phone Number" size="small" defaultValue={manualCustomerPhone} onBlur={(e)=>setManualCustomerPhone(e.target.value)} error={!String(manualCustomerPhone||'').trim()} helperText={!String(manualCustomerPhone||'').trim() ? 'Required' : ''} />
             <TextField
               fullWidth
               label="Shipping Address"
               size="small"
-              value={manualShippingAddress}
-              onChange={(e)=>setManualShippingAddress(e.target.value)}
+              defaultValue={manualShippingAddress}
+              onBlur={(e)=>setManualShippingAddress(e.target.value)}
               error={!String(manualShippingAddress||'').trim()}
               helperText={!String(manualShippingAddress||'').trim() ? 'Required' : ''}
               disabled={manualFieldsLocked}
@@ -5110,8 +5166,8 @@ export default function Orders() {
               label="Requested Ship Date"
               InputLabelProps={{ shrink: true }}
               size="small"
-              value={manualRequestedShip}
-              onChange={(e)=> setManualRequestedShip(String(e.target.value || ''))}
+              defaultValue={manualRequestedShip}
+              onBlur={(e)=> setManualRequestedShip(String(e.target.value || ''))}
               inputProps={{ min: plusOneDay(manualCreatedAt) as any }}
               disabled={manualFieldsLocked}
               error={Boolean(manualRequestedShip && manualCreatedAt && manualRequestedShip <= manualCreatedAt)}
@@ -5167,8 +5223,8 @@ export default function Orders() {
               label="Estimated Arrival Date"
               InputLabelProps={{ shrink: true }}
               size="small"
-              value={manualEstDelivered}
-              onChange={(e)=> setManualEstDelivered(String(e.target.value || ''))}
+              defaultValue={manualEstDelivered}
+              onBlur={(e)=> setManualEstDelivered(String(e.target.value || ''))}
               inputProps={{ min: manualEstFulfillment || undefined }}
               disabled={manualIsLocked || !(manualStatus === 'shipped' || manualPrevStatus === 'shipped')}
             />
@@ -5192,8 +5248,8 @@ export default function Orders() {
             <TextField
               label="Shipping Charges (%)"
               size="small"
-              value={manualShippingPercent}
-              onChange={(e)=> setManualShippingPercent(normalizeDiscountText(e.target.value))}
+              defaultValue={manualShippingPercent}
+              onBlur={(e)=> setManualShippingPercent(normalizeDiscountText(e.target.value))}
               disabled={manualFieldsLocked}
             />
             <TextField
@@ -5246,8 +5302,8 @@ export default function Orders() {
             fullWidth
             label="Remarks/Notes"
             size="small"
-            value={manualNotes}
-            onChange={(e)=> setManualNotes(e.target.value)}
+            defaultValue={manualNotes}
+            onBlur={(e)=> setManualNotes(e.target.value)}
             sx={{ mb: 2 }}
             multiline
             minRows={3}
@@ -5458,8 +5514,15 @@ export default function Orders() {
                 <TextField
                   size="small"
                   label="Search Pallet ID / Pallet Description / Pallet Name"
-                  value={manualPickerQ}
-                  onChange={(e)=>setManualPickerQ(e.target.value)}
+                  defaultValue={manualPickerQ}
+                  onChange={(e)=>{
+                    try { if (manualPickerQDebounceRef.current) clearTimeout(manualPickerQDebounceRef.current); } catch {}
+                    const v = e.target.value;
+                    manualPickerQDebounceRef.current = setTimeout(()=>{
+                      setManualPickerQ(v);
+                      manualPickerQDebounceRef.current = null;
+                    }, 500);
+                  }}
                   sx={{ flex: 1, minWidth: 260 }}
                 />
                 <TextField
@@ -5764,8 +5827,15 @@ export default function Orders() {
             <TextField
               size="small"
               label="Search Pallet ID / Pallet Description / Pallet Name"
-              value={viewOrderableQ}
-              onChange={(e)=>setViewOrderableQ(e.target.value)}
+              defaultValue={viewOrderableQ}
+              onChange={(e)=>{
+                try { if (viewOrderableQDebounceRef.current) clearTimeout(viewOrderableQDebounceRef.current); } catch {}
+                const v = e.target.value;
+                viewOrderableQDebounceRef.current = setTimeout(()=>{
+                  setViewOrderableQ(v);
+                  viewOrderableQDebounceRef.current = null;
+                }, 500);
+              }}
               sx={{ flex: 1, minWidth: 260 }}
             />
             <TextField
