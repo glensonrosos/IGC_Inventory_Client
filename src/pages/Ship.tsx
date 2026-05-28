@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Container, Typography, Paper, Stack, TextField, Button, IconButton, MenuItem, Chip, Dialog, DialogTitle, DialogContent, DialogActions, Box, LinearProgress, ButtonGroup } from '@mui/material';
 import * as XLSX from 'xlsx';
 import { DataGrid, GridColDef, GridRenderCellParams } from '@mui/x-data-grid';
@@ -63,6 +63,8 @@ export default function Ship() {
   const [rowCount, setRowCount] = useState(0);
   const [qRef, setQRef] = useState('');
   const [qPallet, setQPallet] = useState('');
+  const qRefDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const qPalletDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [eddFrom, setEddFrom] = useState('');
   const [eddTo, setEddTo] = useState('');
   const [exporting, setExporting] = useState(false);
@@ -106,6 +108,16 @@ export default function Ship() {
   };
 
   useEffect(() => { load(); }, [filter, page, pageSize]);
+
+  // Clear pending debounce timers on unmount
+  useEffect(() => {
+    return () => {
+      if (qRefDebounceRef.current) clearTimeout(qRefDebounceRef.current);
+      if (qPalletDebounceRef.current) clearTimeout(qPalletDebounceRef.current);
+      qRefDebounceRef.current = null;
+      qPalletDebounceRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     const loadWarehouses = async () => {
@@ -492,17 +504,39 @@ export default function Ship() {
           <TextField
             size="small"
             label="Search / Reference/PO#"
-            value={qRef}
-            onChange={(e)=> setQRef(e.target.value)}
-            onKeyDown={(e)=>{ if (e.key==='Enter') { setPage(0); load(); } }}
+            defaultValue={qRef}
+            onChange={(e)=> {
+              const val = String(e.target.value || '');
+              if (qRefDebounceRef.current) clearTimeout(qRefDebounceRef.current);
+              qRefDebounceRef.current = setTimeout(() => {
+                setQRef(val);
+              }, 500);
+            }}
+            onBlur={(e)=> {
+              const val = String(e.target.value || '');
+              if (qRefDebounceRef.current) { clearTimeout(qRefDebounceRef.current); qRefDebounceRef.current = null; }
+              setQRef(val);
+            }}
+            onKeyDown={(e)=>{ if (e.key==='Enter') { const v = (e.target as HTMLInputElement).value; setQRef(v); setPage(0); load(); } }}
             sx={{ minWidth: 240, flex: '1 1 260px' }}
           />
           <TextField
             size="small"
             label="Search / Pallet Description or Pallet ID"
-            value={qPallet}
-            onChange={(e)=> setQPallet(e.target.value)}
-            onKeyDown={(e)=>{ if (e.key==='Enter') { setPage(0); load(); } }}
+            defaultValue={qPallet}
+            onChange={(e)=> {
+              const val = String(e.target.value || '');
+              if (qPalletDebounceRef.current) clearTimeout(qPalletDebounceRef.current);
+              qPalletDebounceRef.current = setTimeout(() => {
+                setQPallet(val);
+              }, 500);
+            }}
+            onBlur={(e)=> {
+              const val = String(e.target.value || '');
+              if (qPalletDebounceRef.current) { clearTimeout(qPalletDebounceRef.current); qPalletDebounceRef.current = null; }
+              setQPallet(val);
+            }}
+            onKeyDown={(e)=>{ if (e.key==='Enter') { const v = (e.target as HTMLInputElement).value; setQPallet(v); setPage(0); load(); } }}
             sx={{ minWidth: 240, flex: '1 1 260px' }}
           />
           <TextField

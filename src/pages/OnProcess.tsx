@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Container, Typography, Paper, Stack, Button, TextField, MenuItem, Dialog, DialogTitle, DialogContent, DialogActions, FormControlLabel, Checkbox, Chip, IconButton, Select, InputLabel, FormControl, Autocomplete } from '@mui/material';
 import { useNavigate } from 'react-router-dom';
 import SaveIcon from '@mui/icons-material/Save';
@@ -57,11 +57,15 @@ export default function OnProcess() {
   const [batches, setBatches] = useState<OnProcBatch[]>([]);
   const [selectedBatch, setSelectedBatch] = useState<OnProcBatch | null>(null);
   const [bq, setBq] = useState<string>('');
+  const [bqDebounced, setBqDebounced] = useState<string>('');
+  const bqDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [batchItems, setBatchItems] = useState<OnProcPallet[]>([]);
   const [batchStatus, setBatchStatus] = useState<'in-progress'|'partial-done'|'completed'>('in-progress');
   const [batchEst, setBatchEst] = useState<string>('');
   const [batchNotes, setBatchNotes] = useState<string>('');
   const [itemsSearch, setItemsSearch] = useState<string>('');
+  const [itemsSearchDebounced, setItemsSearchDebounced] = useState<string>('');
+  const itemsSearchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [selectedRows, setSelectedRows] = useState<string[]>([]);
   const [rowSelection, setRowSelection] = useState<string[]>([]);
   const [bulkStatus, setBulkStatus] = useState<'in_progress'|'partial'|'completed'|'cancelled'>('in_progress');
@@ -167,7 +171,7 @@ export default function OnProcess() {
   const itemRows = useMemo(() => (
     batchItems
       .filter(r => {
-        const t = itemsSearch.trim().toLowerCase();
+        const t = String(itemsSearchDebounced || '').trim().toLowerCase();
         if (!t) return true;
         const gn = String(r.groupName || '').toLowerCase();
         const pid = String(palletIdByGroup[String(r.groupName || '').trim()] || '').toLowerCase();
@@ -189,7 +193,7 @@ export default function OnProcess() {
         status: r.status || 'in_progress',
         locked: (Number((r as any).transferredPallet || 0) >= Number(r.totalPallet || 0)) && Number(r.totalPallet || 0) > 0,
       }))
-  ), [batchItems, itemsSearch, selectedBatch, palletIdByGroup, palletNameByGroup, palletDescByGroup]);
+  ), [batchItems, itemsSearchDebounced, selectedBatch, palletIdByGroup, palletNameByGroup, palletDescByGroup]);
 
   const load = async () => {
     setLoading(true);
@@ -278,7 +282,7 @@ export default function OnProcess() {
   ]), []);
 
   const batchRows = useMemo(() => {
-    const t = bq.trim().toLowerCase();
+    const t = String(bqDebounced || '').trim().toLowerCase();
     const list = (batches || []).map((b) => ({
       id: b._id,
       reference: b.reference,
@@ -296,7 +300,7 @@ export default function OnProcess() {
       String(r.estFinishDate||'').toLowerCase().includes(t) ||
       String(r.notes||'').toLowerCase().includes(t)
     );
-  }, [batches, bq, selectedBatch, batchStatus, batchEst]);
+  }, [batches, bqDebounced, selectedBatch, batchStatus, batchEst]);
   const exportBatchXlsx = async (b: OnProcBatch) => {
     try {
       const { data } = await api.get(`/on-process/batches/${b._id}/export`, { responseType: 'blob' as any });
@@ -421,7 +425,25 @@ export default function OnProcess() {
       <Paper sx={{ p:2, mb:2 }}>
         <Typography variant="h6" gutterBottom>Batches</Typography>
         <Stack direction={{ xs:'column', sm:'row' }} spacing={2} alignItems="center" sx={{ mb: 1 }}>
-          <TextField size="small" label="Search (PO#/Reference/Date/Notes)" value={bq} onChange={(e)=> setBq(e.target.value)} sx={{ minWidth: 280, flex: 1 }} />
+          <TextField
+            size="small"
+            label="Search (PO#/Reference/Date/Notes)"
+            defaultValue={bq}
+            onChange={(e)=> {
+              const val = String(e.target.value || '');
+              if (bqDebounceRef.current) clearTimeout(bqDebounceRef.current);
+              bqDebounceRef.current = setTimeout(() => {
+                setBqDebounced(val);
+              }, 500);
+            }}
+            onBlur={(e)=> {
+              const val = String(e.target.value || '');
+              if (bqDebounceRef.current) { clearTimeout(bqDebounceRef.current); bqDebounceRef.current = null; }
+              setBq(val);
+              setBqDebounced(val);
+            }}
+            sx={{ minWidth: 280, flex: 1 }}
+          />
         </Stack>
         <div style={{ height: 360, width: '100%' }}>
           <DataGrid
@@ -456,7 +478,25 @@ export default function OnProcess() {
               </Button>
             </Stack>
             <Stack direction={{ xs:'column', sm:'row' }} spacing={2} alignItems={{ xs:'stretch', sm:'center' }} justifyContent="space-between" sx={{ mb: 1 }}>
-              <TextField size="small" label="Search pallet name" value={itemsSearch} onChange={(e)=> setItemsSearch(e.target.value)} sx={{ minWidth: 260, flex: 1 }} />
+              <TextField
+                size="small"
+                label="Search pallet name"
+                defaultValue={itemsSearch}
+                onChange={(e)=> {
+                  const val = String(e.target.value || '');
+                  if (itemsSearchDebounceRef.current) clearTimeout(itemsSearchDebounceRef.current);
+                  itemsSearchDebounceRef.current = setTimeout(() => {
+                    setItemsSearchDebounced(val);
+                  }, 500);
+                }}
+                onBlur={(e)=> {
+                  const val = String(e.target.value || '');
+                  if (itemsSearchDebounceRef.current) { clearTimeout(itemsSearchDebounceRef.current); itemsSearchDebounceRef.current = null; }
+                  setItemsSearch(val);
+                  setItemsSearchDebounced(val);
+                }}
+                sx={{ minWidth: 260, flex: 1 }}
+              />
               <Stack direction={{ xs:'column', sm:'row' }} spacing={2} sx={{ mt: { xs: 1, sm: 0 } }}>
                 <TextField size="small" select label="Set status (PO)" value={batchStatus} onChange={(e)=> setBatchStatus(e.target.value as any)} sx={{ minWidth: 200 }}>
                   <MenuItem value="in-progress">in-progress</MenuItem>

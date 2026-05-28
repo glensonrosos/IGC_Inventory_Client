@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Container, Typography, Paper, Button, Stack, TextField, Dialog, DialogTitle, DialogContent, DialogActions, Chip, IconButton, MenuItem } from '@mui/material';
 import { formatDateTimeUS } from '../utils/datetime';
 import Autocomplete from '@mui/material/Autocomplete';
@@ -48,6 +48,8 @@ export default function Inventory() {
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [groups, setGroups] = useState<GroupOverview[]>([]);
   const [search, setSearch] = useState('');
+  const [searchDebounced, setSearchDebounced] = useState('');
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [groupLineItemByName, setGroupLineItemByName] = useState<Record<string, string>>({});
   const [groupPalletNameByName, setGroupPalletNameByName] = useState<Record<string, string>>({});
   const [groupPalletDescByName, setGroupPalletDescByName] = useState<Record<string, string>>({});
@@ -106,7 +108,7 @@ export default function Inventory() {
   const loadGroups = async () => {
     setLoading(true);
     try {
-      const q = search.trim();
+      const q = String((searchDebounced || search) || '').trim();
       const params = new URLSearchParams();
       if (q) params.set('search', q);
       const { data } = await api.get<GroupOverview[]>(`/pallet-inventory/groups?${params.toString()}`);
@@ -183,7 +185,13 @@ export default function Inventory() {
 
   useEffect(() => { loadWarehouses(); }, []);
   useEffect(() => { loadItemGroups(); }, []);
-  useEffect(() => { loadGroups(); }, [search, groupLineItemByName, groupPalletNameByName, groupPalletDescByName]);
+  useEffect(() => { loadGroups(); }, [searchDebounced, groupLineItemByName, groupPalletNameByName, groupPalletDescByName]);
+  useEffect(() => {
+    return () => {
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     if (!lossOpen) return;
@@ -343,8 +351,20 @@ export default function Inventory() {
           <TextField
             label="Search Pallet Name / Description / Item / Color"
             placeholder="Type to search..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            defaultValue={search}
+            onChange={(e) => {
+              const val = String(e.target.value || '');
+              if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+              searchDebounceRef.current = setTimeout(() => {
+                setSearchDebounced(val);
+              }, 500);
+            }}
+            onBlur={(e) => {
+              const val = String(e.target.value || '');
+              if (searchDebounceRef.current) { clearTimeout(searchDebounceRef.current); searchDebounceRef.current = null; }
+              setSearch(val);
+              setSearchDebounced(val);
+            }}
             sx={{ minWidth: 320, flex: 1 }}
           />
           <Stack direction="row" spacing={1}>

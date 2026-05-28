@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Container, Typography, Paper, Stack, Button, TextField, Dialog, DialogTitle, DialogContent, DialogActions, LinearProgress } from '@mui/material';
 import { DataGrid, GridColDef } from '@mui/x-data-grid';
 import * as XLSX from 'xlsx';
@@ -22,6 +22,8 @@ export default function Pallets() {
   const [palletIdByGroup, setPalletIdByGroup] = useState<Record<string, string>>({});
   const [palletNameByGroup, setPalletNameByGroup] = useState<Record<string, string>>({});
   const [q, setQ] = useState('');
+  const [qDebounced, setQDebounced] = useState('');
+  const qDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [onWaterOpen, setOnWaterOpen] = useState(false);
   const [onWaterLoading, setOnWaterLoading] = useState(false);
@@ -103,7 +105,7 @@ export default function Pallets() {
   }, []);
 
   const filteredRows = useMemo(() => {
-    const t = q.trim().toLowerCase();
+    const t = String(qDebounced || '').trim().toLowerCase();
     if (!t) return rows;
     return rows.filter((r) => {
       const groupName = String(r.itemGroup || '').trim();
@@ -112,7 +114,7 @@ export default function Pallets() {
       const pn = String(palletNameByGroup[groupName] || '').trim().toLowerCase();
       return (name && name.includes(t)) || (pid && pid.includes(t)) || (pn && pn.includes(t));
     });
-  }, [rows, q, palletIdByGroup, palletNameByGroup]);
+  }, [rows, qDebounced, palletIdByGroup, palletNameByGroup]);
 
   const columns = useMemo<GridColDef[]>(() => {
     const primaryWh = warehouses.find((w) => Boolean((w as any)?.isPrimary)) || null;
@@ -267,7 +269,25 @@ export default function Pallets() {
       <Typography variant="h4" gutterBottom>Pallets Summary</Typography>
       <Paper sx={{ p:2 }}>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems="center" justifyContent="space-between" sx={{ mb: 2 }}>
-          <TextField size="small" label="Search Pallet Name / ID / Description" value={q} onChange={(e)=> setQ(e.target.value)} sx={{ minWidth: 260, flex: 1 }} />
+          <TextField
+            size="small"
+            label="Search Pallet Name / ID / Description"
+            defaultValue={q}
+            onChange={(e)=> {
+              const val = String(e.target.value || '');
+              if (qDebounceRef.current) clearTimeout(qDebounceRef.current);
+              qDebounceRef.current = setTimeout(() => {
+                setQDebounced(val);
+              }, 500);
+            }}
+            onBlur={(e)=> {
+              const val = String(e.target.value || '');
+              if (qDebounceRef.current) { clearTimeout(qDebounceRef.current); qDebounceRef.current = null; }
+              setQ(val);
+              setQDebounced(val);
+            }}
+            sx={{ minWidth: 260, flex: 1 }}
+          />
           <Stack direction="row" spacing={1}>
             <Button variant="outlined" onClick={load} disabled={loading}>Refresh</Button>
             <Button variant="contained" onClick={exportExcel} disabled={!gridRows.length}>Export List</Button>

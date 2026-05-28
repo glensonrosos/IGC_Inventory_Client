@@ -302,6 +302,8 @@ export default function EarlyBuy() {
 
   // Orders table filtering
   const [tableQ, setTableQ] = useState('');
+  const [tableQDebounced, setTableQDebounced] = useState('');
+  const tableQDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tableStatus, setTableStatus] = useState<'all' | EarlyOrder['status']>('all');
 
   // MUI DataGrid compatibility shim (v5 vs v6 selection APIs)
@@ -1158,7 +1160,7 @@ export default function EarlyBuy() {
   ], [todayYmd]);
 
   const filteredOrders = useMemo(() => {
-    const q = String(tableQ || '').trim().toLowerCase();
+    const q = String(tableQDebounced || '').trim().toLowerCase();
     const st = tableStatus;
     return (orders || []).filter((o) => {
       const statusOk = st === 'all' ? true : normalizeStatus(o.status) === st;
@@ -1166,7 +1168,7 @@ export default function EarlyBuy() {
       const hay = `${o.id} ${o.customerEmail} ${o.customerName}`.toLowerCase();
       return statusOk && hay.includes(q);
     });
-  }, [orders, tableQ, tableStatus]);
+  }, [orders, tableQDebounced, tableStatus]);
 
   const linesColumns: GridColDef[] = useMemo(() => [
     { field: 'palletName', headerName: 'Pallet Name', width: 220 },
@@ -1745,7 +1747,25 @@ export default function EarlyBuy() {
       <Paper sx={{ p: 2 }}>
         <Stack direction={{ xs:'column', sm:'row' }} spacing={2} alignItems={{ xs:'stretch', sm:'center' }} sx={{ mb: 1 }}>
           <Box sx={{ flex: 1 }} />
-          <TextField size="small" label="Search" value={tableQ} onChange={(e)=> setTableQ(e.target.value)} sx={{ minWidth: 240 }} />
+          <TextField
+            size="small"
+            label="Search"
+            defaultValue={tableQ}
+            onChange={(e)=> {
+              const val = String(e.target.value || '');
+              if (tableQDebounceRef.current) clearTimeout(tableQDebounceRef.current);
+              tableQDebounceRef.current = setTimeout(() => {
+                setTableQDebounced(val);
+              }, 500);
+            }}
+            onBlur={(e)=> {
+              const val = String(e.target.value || '');
+              if (tableQDebounceRef.current) { clearTimeout(tableQDebounceRef.current); tableQDebounceRef.current = null; }
+              setTableQ(val);
+              setTableQDebounced(val);
+            }}
+            sx={{ minWidth: 240 }}
+          />
           <TextField size="small" select label="Status" value={tableStatus} onChange={(e)=> setTableStatus(e.target.value as any)} sx={{ width: 220 }}>
             <MenuItem value="all">All</MenuItem>
             <MenuItem value="processing">PROCESSING</MenuItem>

@@ -88,6 +88,8 @@ export default function ItemRegistry() {
   const [upcConflict, setUpcConflict] = useState<string>('');
   // Search
   const [groupsQ, setGroupsQ] = useState('');
+  const [groupsQDebounced, setGroupsQDebounced] = useState('');
+  const groupsQDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [itemsQ, setItemsQ] = useState('');
   const [enabledFilter, setEnabledFilter] = useState<'all'|'enabled'|'disabled'>('all');
   // Edit dialog
@@ -410,6 +412,12 @@ export default function ItemRegistry() {
   };
 
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    return () => {
+      if (groupsQDebounceRef.current) clearTimeout(groupsQDebounceRef.current);
+      groupsQDebounceRef.current = null;
+    };
+  }, []);
 
   // Press Enter on Item Code to auto-fill description & color if code exists (pack stays 0)
   const handleGItemCodeKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -840,13 +848,31 @@ export default function ItemRegistry() {
         </Grid>
         <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} alignItems="center" justifyContent="space-between" sx={{ mb: 1 }}>
           <Typography variant="subtitle2">Pallet Groups: {groups.length}</Typography>
-          <TextField size="small" label="Search pallet groups" value={groupsQ} onChange={(e)=>setGroupsQ(e.target.value)} sx={{ minWidth: 240 }} />
+          <TextField
+            size="small"
+            label="Search pallet groups"
+            defaultValue={groupsQ}
+            onChange={(e)=>{
+              const val = String(e.target.value || '');
+              if (groupsQDebounceRef.current) clearTimeout(groupsQDebounceRef.current);
+              groupsQDebounceRef.current = setTimeout(() => {
+                setGroupsQDebounced(val);
+              }, 500);
+            }}
+            onBlur={(e)=>{
+              const val = String(e.target.value || '');
+              if (groupsQDebounceRef.current) { clearTimeout(groupsQDebounceRef.current); groupsQDebounceRef.current = null; }
+              setGroupsQ(val);
+              setGroupsQDebounced(val);
+            }}
+            sx={{ minWidth: 240 }}
+          />
         </Stack>
         <div style={{ height: 420, width: '100%' }}>
           <DataGrid
             rows={groups
               .filter(g=>{
-                const q = groupsQ.trim().toLowerCase();
+                const q = String(groupsQDebounced || '').trim().toLowerCase();
                 if (!q) return true;
                 const name = String(g.name || '').toLowerCase();
                 const lineItem = String((g as any).lineItem || '').toLowerCase();
