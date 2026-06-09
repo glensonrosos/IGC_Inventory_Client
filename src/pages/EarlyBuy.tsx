@@ -400,6 +400,19 @@ export default function EarlyBuy() {
       const k = g.toLowerCase(); if (itemsCache.has(k)) return itemsCache.get(k)!;
       const snap = (Array.isArray(lines) ? lines : []).find(l => String(l?.groupName||'').trim().toLowerCase()===k && Array.isArray((l as any)?.itemsAtAdd) && (l as any).itemsAtAdd.length);
       if (snap) { const list = (snap as any).itemsAtAdd as any[]; itemsCache.set(k, list); return list; }
+      // Fallback to localStorage snapshot captured on add/save
+      try {
+        const orderId = String(editingOrder?.id || '').trim();
+        if (orderId) {
+          const cacheKey = `earlyBuyLineSnapshots:${orderId}`;
+          const cached = localStorage.getItem(cacheKey);
+          if (cached) {
+            const parsed = JSON.parse(cached);
+            const list = parsed && parsed.items ? (parsed.items[k] || parsed.items[g]) : null;
+            if (Array.isArray(list) && list.length) { itemsCache.set(k, list); return list; }
+          }
+        }
+      } catch {}
       try { const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`); const list = Array.isArray((data as any)?.items) ? (data as any).items : []; itemsCache.set(k, list); return list; } catch { itemsCache.set(k, []); return []; }
     };
     const getPalletMeta = (g: string) => {
@@ -419,8 +432,24 @@ export default function EarlyBuy() {
         for (let c = 1; c <= 6; c++) { const cell = ws.getRow(currentRow).getCell(c); cell.fill = lightGrey; cell.border = thinBorder as any; }
         ws.getRow(currentRow).getCell(6).numFmt = '"$"#,##0.00'; (ws.getRow(currentRow).getCell(6) as any).alignment = right;
       }
+      // Compute fallback unit from items if snapshots are missing
+      let fallbackUnitFromItems = 0;
+      try {
+        for (const it of (Array.isArray(items) ? items : [])) {
+          const pack = Number((it as any)?.packSize ?? 0) || 0;
+          const price = Number((it as any)?.price ?? 0) || 0;
+          fallbackUnitFromItems += pack * price;
+        }
+      } catch {}
+
       for (const r of groupRows) {
-        const unitBase = Number(groupPriceByName?.[key] ?? (r as any)?.unitPriceAtAdd ?? 0);
+        const unitBase = (() => {
+          const snapAtAdd = Number((r as any)?.unitPriceAtAdd);
+          if (Number.isFinite(snapAtAdd)) return snapAtAdd;
+          const gp = Number((groupPriceByName as any)?.[key]);
+          if (Number.isFinite(gp)) return gp;
+          return Number.isFinite(fallbackUnitFromItems) && fallbackUnitFromItems > 0 ? fallbackUnitFromItems : NaN;
+        })();
         const disc = Math.min(100, Math.max(0, Number((r as any)?.discount ?? (r as any)?.discountPercent ?? 0)));
         const unitDiscounted = Number.isFinite(unitBase) ? unitBase * (1 - disc/100) : NaN;
         const qty = Math.max(0, Math.floor(Number((r as any)?.qty || 0)));

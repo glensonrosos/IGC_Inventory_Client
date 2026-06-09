@@ -2268,6 +2268,19 @@ export default function Orders() {
           return list;
         }
       } catch {}
+      // Fallback to localStorage snapshots saved on last save
+      try {
+        const orderKey = String((manualEditRow as any)?.rawId || (manualEditRow as any)?.id || '').trim();
+        if (orderKey) {
+          const cacheKey = `orderLineSnapshots:${orderKey}`;
+          const cached = localStorage.getItem(cacheKey);
+          if (cached) {
+            const parsed = JSON.parse(cached);
+            const list = parsed && parsed.items ? (parsed.items[k] || parsed.items[g]) : null;
+            if (Array.isArray(list) && list.length) { itemsCache.set(k, list); return list; }
+          }
+        }
+      } catch {}
       try {
         const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
         const list = Array.isArray((data as any)?.items) ? (data as any).items : [];
@@ -2379,6 +2392,13 @@ export default function Orders() {
 
     for (const [key, groupRows] of Array.from(groups.entries())) {
       const g = String(groupRows[0]?.groupName || '').trim();
+      const gLower = g.toLowerCase();
+      // Establish robust base unit price for this group (snapshot -> row -> price map)
+      const unitSnap0 = (manualUnitPriceByGroup as any)?.[gLower] ?? (manualUnitPriceByGroup as any)?.[g];
+      const unit0 = Number.isFinite(Number(unitSnap0))
+        ? Number(unitSnap0)
+        : Number((groupRows[0] as any)?.unitPrice ?? (groupPriceByName as any)?.[gLower] ?? 0);
+
       const { palletId, palletName } = getPalletMeta(g);
       const palletDesc = String(palletDescByGroup?.[key] || g || '').trim();
 
@@ -2405,7 +2425,7 @@ export default function Orders() {
 
       // One summary row per ordered line in this group
       for (const r of groupRows) {
-        const unitBase = Number((manualUnitPriceByGroup as any)?.[key] ?? (r as any)?.unitPrice ?? 0);
+        const unitBase = Number((manualUnitPriceByGroup as any)?.[key] ?? (r as any)?.unitPrice ?? unit0 ?? 0);
         const disc = Math.min(100, Math.max(0, Number((r as any)?.discountPercent ?? 0)));
         const unitDiscounted = Number.isFinite(unitBase) ? unitBase * (1 - disc / 100) : NaN;
         const rowId = String((r as any)?.id || '').trim();
@@ -2519,6 +2539,7 @@ export default function Orders() {
     palletNameByGroup,
     manualItemsByGroup,
     manualUnitPriceByGroup,
+    groupPriceByName,
     manualPaymentTerms,
   ]);
 
