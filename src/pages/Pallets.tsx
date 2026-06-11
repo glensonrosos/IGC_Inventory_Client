@@ -16,6 +16,18 @@ type SummaryResponse = { warehouses: SummaryWarehouse[]; rows: SummaryRow[] };
 type ItemGroupRow = { name: string; lineItem?: string; palletName?: string };
 
 export default function Pallets() {
+  // Preflight session check on navigation to this page
+  useEffect(() => {
+    try {
+      const token = localStorage.getItem('token');
+      if (!token) {
+        const path = typeof window !== 'undefined' ? (window.location.pathname || '/') : '/';
+        const search = typeof window !== 'undefined' ? (window.location.search || '') : '';
+        const next = encodeURIComponent(`${path}${search}`);
+        if (typeof window !== 'undefined') window.location.assign(`/login?next=${next}`);
+      }
+    } catch {}
+  }, []);
   const [loading, setLoading] = useState(false);
   const [warehouses, setWarehouses] = useState<SummaryWarehouse[]>([]);
   const [rows, setRows] = useState<SummaryRow[]>([]);

@@ -10,6 +10,18 @@ interface Warehouse { _id: string; name: string }
 interface TransferPallet { groupName: string; pallets: number; palletName?: string }
 
 export default function Transfer() {
+  // Preflight session check on navigation to this page
+  useEffect(() => {
+    try {
+      const token = localStorage.getItem('token');
+      if (!token) {
+        const path = typeof window !== 'undefined' ? (window.location.pathname || '/') : '/';
+        const search = typeof window !== 'undefined' ? (window.location.search || '') : '';
+        const next = encodeURIComponent(`${path}${search}`);
+        if (typeof window !== 'undefined') window.location.assign(`/login?next=${next}`);
+      }
+    } catch {}
+  }, []);
   const [isAdmin, setIsAdmin] = useState(false);
   useEffect(() => {
     const compute = () => {

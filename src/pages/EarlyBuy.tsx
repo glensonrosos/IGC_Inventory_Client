@@ -52,6 +52,18 @@ const STATUS_OPTIONS: Array<{ label: string; value: EarlyOrder['status'] }> = [
 // Backend is the source of truth; IDs are generated server-side.
 
 export default function EarlyBuy() {
+  // Preflight session check on navigation to this page
+  useEffect(() => {
+    try {
+      const token = localStorage.getItem('token');
+      if (!token) {
+        const path = typeof window !== 'undefined' ? (window.location.pathname || '/') : '/';
+        const search = typeof window !== 'undefined' ? (window.location.search || '') : '';
+        const next = encodeURIComponent(`${path}${search}`);
+        if (typeof window !== 'undefined') window.location.assign(`/login?next=${next}`);
+      }
+    } catch {}
+  }, []);
   const toast = useToast();
   const [orders, setOrders] = useState<EarlyOrder[]>([]);
   const [open, setOpen] = useState(false);

@@ -58,6 +58,18 @@ type OrdersRow = {
 };
 
 export default function Orders() {
+  // Preflight session check on navigation to this page
+  useEffect(() => {
+    try {
+      const token = localStorage.getItem('token');
+      if (!token) {
+        const path = typeof window !== 'undefined' ? (window.location.pathname || '/') : '/';
+        const search = typeof window !== 'undefined' ? (window.location.search || '') : '';
+        const next = encodeURIComponent(`${path}${search}`);
+        if (typeof window !== 'undefined') window.location.assign(`/login?next=${next}`);
+      }
+    } catch {}
+  }, []);
   const todayYmd = useMemo(() => new Date().toISOString().slice(0, 10), []);
   const lastAutoSavedShipdateRef = useRef<{ orderId: string; ymd: string; at: number }>({ orderId: '', ymd: '', at: 0 });
   const lastAutoSuggestedShipdateRef = useRef<{ ymd: string; at: number }>({ ymd: '', at: 0 });
@@ -4374,6 +4386,18 @@ export default function Orders() {
   const submitManual = async () => {
     const errs: string[] = [];
     setManualValidationErrors([]);
+    // Preflight: ensure user session exists; if not, redirect to login before attempting any edits
+    try {
+      const tokenPresent = Boolean(localStorage.getItem('token'));
+      if (!tokenPresent) {
+        try { toast.info('Your session has expired. Please log in again.'); } catch {}
+        const path = typeof window !== 'undefined' ? (window.location.pathname || '/') : '/';
+        const search = typeof window !== 'undefined' ? (window.location.search || '') : '';
+        const next = encodeURIComponent(`${path}${search}`);
+        try { if (typeof window !== 'undefined') window.location.assign(`/login?next=${next}`); } catch {}
+        return;
+      }
+    } catch {}
     // 1) Read latest values from uncontrolled inputs (refs) and validate basics
     const nextQtyBy: Record<string, string> = { ...(manualOrderQtyByGroup || {}) };
     const nextDiscBy: Record<string, string> = { ...(manualDiscountByGroup || {}) };
@@ -4674,6 +4698,15 @@ export default function Orders() {
               localStorage.setItem(cacheKey, JSON.stringify(parsed));
             }
           } catch {}
+          // Refresh Last Updated fields in UI immediately
+          try {
+            const rawId = String(manualEditRow?.rawId || '').trim();
+            if (rawId) {
+              const { data: refreshed } = await api.get(`/orders/unfulfilled/${rawId}`);
+              setManualLastUpdatedAt(toLocalDateTime((refreshed as any)?.updatedAt || (refreshed as any)?.createdAt || ''));
+              setManualLastUpdatedBy(String((refreshed as any)?.lastUpdatedBy || '').trim());
+            }
+          } catch {}
           try { window.dispatchEvent(new Event('orders-changed')); } catch {}
         } else {
           // Status changes are handled by a separate endpoint.
@@ -4718,6 +4751,15 @@ export default function Orders() {
                 parsed.unit = { ...(parsed.unit || {}), ...(manualUnitPriceByGroup || {}) };
                 parsed.items = { ...(parsed.items || {}), ...(manualItemsByGroup || {}) };
                 localStorage.setItem(cacheKey, JSON.stringify(parsed));
+              }
+            } catch {}
+            // Refresh Last Updated fields in UI immediately
+            try {
+              const rawId = String(manualEditRow?.rawId || '').trim();
+              if (rawId) {
+                const { data: refreshed } = await api.get(`/orders/unfulfilled/${rawId}`);
+                setManualLastUpdatedAt(toLocalDateTime((refreshed as any)?.updatedAt || (refreshed as any)?.createdAt || ''));
+                setManualLastUpdatedBy(String((refreshed as any)?.lastUpdatedBy || '').trim());
               }
             } catch {}
             try { window.dispatchEvent(new Event('orders-changed')); } catch {}
