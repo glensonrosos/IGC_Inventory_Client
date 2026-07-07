@@ -33,6 +33,9 @@ type EarlyOrder = {
   customerName: string;
   customerPhone: string;
   shippingAddress: string;
+  companyName?: string;
+  customerNumber?: string;
+  salesRepresentative?: string;
   originalPrice?: string;
   shippingPercent?: string;
   discountPercent?: string;
@@ -77,6 +80,10 @@ export default function EarlyBuy() {
   const [customerEmail, setCustomerEmail] = useState('');
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
+  const [customerNumber, setCustomerNumber] = useState('');
+  const [salesRepresentative, setSalesRepresentative] = useState('');
+  const salesRepInputRef = useRef<HTMLInputElement | null>(null);
+  const [companyName, setCompanyName] = useState('');
   const [createdAt, setCreatedAt] = useState(() => new Date().toISOString().slice(0,10));
   const [containerArrival, setContainerArrival] = useState('');
   const [estFulfillment, setEstFulfillment] = useState('');
@@ -87,6 +94,20 @@ export default function EarlyBuy() {
   const [lastUpdatedBy, setLastUpdatedBy] = useState('');
   const [paymentTerms, setPaymentTerms] = useState('Net 60');
   const [paymentStatus, setPaymentStatus] = useState('Not Paid');
+
+  // Customer Browser (uncontrolled search with ref-based debounce for snappy typing)
+  const [customerPickOpen, setCustomerPickOpen] = useState(false);
+  const [customerRows, setCustomerRows] = useState<any[]>([]);
+  const [customerLoading, setCustomerLoading] = useState(false);
+  const customerPickDebounceRef = useRef<any>(null);
+  const [customerPickQ, setCustomerPickQ] = useState('');
+  const loadCustomers = useCallback(async ()=>{
+    setCustomerLoading(true);
+    try {
+      const { data } = await api.get('/customers');
+      setCustomerRows(Array.isArray(data) ? data : []);
+    } catch { setCustomerRows([]); } finally { setCustomerLoading(false); }
+  },[]);
 
   const isEditable = useMemo(() => {
     // Editable when creating (no editingOrder) OR when status is processing/ready_to_ship
@@ -388,17 +409,37 @@ export default function EarlyBuy() {
     ws.getCell('D2').value = 'Website:'; ws.getCell('D2').font = bold; (ws.getCell('D2') as any).fill = lightGreen; ws.getCell('E2').value = 'www.mpgwholesale.com';
     ;(['B1','C1','D1','E1','B2','C2','D2','E2'] as const).forEach((addr)=>{ (ws.getCell(addr) as any).border = thinBorder as any; });
 
+    // Pre-export validation: ensure key fields and lines are present
+    try {
+      const missing: string[] = [];
+      if (!String(customerName || '').trim()) missing.push('Customer Name');
+      // Company Name and Customer Account allowed to be empty per request
+      if (!String(shippingAddress || '').trim()) missing.push('Shipping Address');
+      if (!Array.isArray(lines) || lines.length === 0) missing.push('Order Lines');
+      if (missing.length) { toast.error(`Missing required data: ${missing.join(', ')}`); return; }
+
+      const badLines = (Array.isArray(lines) ? lines : []).filter((l: any) => {
+        const q = Number(l?.qty);
+        return !l?.groupName || !Number.isFinite(q) || q <= 0;
+      });
+      if (badLines.length) { toast.error('Some line items are incomplete (group or quantity). Please review the order lines.'); return; }
+    } catch {}
+
     // Order info (shifted up to row 4-5)
     ws.getCell('A4').value = orderNumber; ws.getCell('A4').font = bold; (ws.getCell('A4') as any).fill = lightBlue; (ws.getCell('A4') as any).border = thinBorder as any;
     ws.getCell('B4').value = 'To:'; ws.getCell('B4').font = bold; (ws.getCell('B4') as any).fill = lightBlue; ws.getCell('C4').value = String(customerName || '');
     ws.getCell('D4').value = 'Phone:'; ws.getCell('D4').font = bold; (ws.getCell('D4') as any).fill = lightBlue; ws.getCell('E4').value = String(customerPhone || '');
     ws.getCell('B5').value = 'Address:'; ws.getCell('B5').font = bold; (ws.getCell('B5') as any).fill = lightBlue; ws.getCell('C5').value = String(shippingAddress || '');
     ws.getCell('D5').value = 'Email:'; ws.getCell('D5').font = bold; (ws.getCell('D5') as any).fill = lightBlue; ws.getCell('E5').value = String(customerEmail || '');
-    ;(['B4','C4','D4','E4','B5','C5','D5','E5'] as const).forEach((addr)=>{ (ws.getCell(addr) as any).border = thinBorder as any; });
+    // Add Company Name and Customer Account
+    ws.getCell('B6').value = 'Company Name:'; ws.getCell('B6').font = bold; (ws.getCell('B6') as any).fill = lightBlue;
+    ws.getCell('C6').value = String(companyName || '');
+    ws.getCell('D6').value = 'Customer Account:'; ws.getCell('D6').font = bold; (ws.getCell('D6') as any).fill = lightBlue;
+    ws.getCell('E6').value = String(customerNumber || '');
+    ;(['B4','C4','D4','E4','B5','C5','D5','E5','B6','D6'] as const).forEach((addr)=>{ (ws.getCell(addr) as any).border = thinBorder as any; });
+    ws.getCell('C6').border = thinBorder as any; ws.getCell('E6').border = thinBorder as any;
 
-    ws.getCell('A7').value = 'Status:'; ws.getCell('A7').font = bold; (ws.getCell('A7') as any).fill = lightBlue; (ws.getCell('A7') as any).border = thinBorder as any; ws.getCell('B7').value = sStatus; ws.getCell('B7').font = bold; (ws.getCell('B7') as any).border = thinBorder as any;
-    ws.getCell('A8').value = 'Estimated Shipdate for Customer:'; ws.getCell('A8').font = bold; (ws.getCell('A8') as any).fill = lightBlue; (ws.getCell('A8') as any).border = thinBorder as any; ws.getCell('B8').value = String(estFulfillment || ''); ws.getCell('B8').font = bold; (ws.getCell('B8') as any).border = thinBorder as any;
-    ws.getCell('A9').value = 'Estimated Arrival Date:'; ws.getCell('A9').font = bold; (ws.getCell('A9') as any).fill = lightBlue; (ws.getCell('A9') as any).border = thinBorder as any; ws.getCell('B9').value = String(estDelivered || ''); ws.getCell('B9').font = bold; (ws.getCell('B9') as any).border = thinBorder as any;
+    // Removed Status and Estimated date rows per request
 
     // Grouped pallets
     let currentRow = 11;
@@ -493,12 +534,40 @@ export default function EarlyBuy() {
     ws.getCell(`A${currentRow}`).value = 'PAYMENT TERMS'; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any; ws.getCell(`B${currentRow}`).value = String(paymentTerms || ''); ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
     const totalsEndRow = currentRow;
 
-    currentRow += 2; const confirmRow = currentRow; const confirmMerge = `D${confirmRow}:F${confirmRow + 1}`; ws.mergeCells(confirmMerge);
-    ws.getCell(`D${confirmRow}`).value = 'I hereby confirm the order and agree to the payment terms stated in this Proforma Invoice'; (ws.getCell(`D${confirmRow}`) as any).alignment = { wrapText: true, horizontal: 'center', vertical: 'middle' } as any;
-    try { ws.getRow(confirmRow).height = 28; ws.getRow(confirmRow + 1).height = 22; } catch {}
+    // Order Authorization block (left-aligned), similar to Orders export
+    currentRow += 2;
+    const authStartRow = currentRow;
+    ws.mergeCells(`D${currentRow}:F${currentRow}`);
+    ws.getCell(`D${currentRow}`).value = 'Order Authorization';
+    ws.getCell(`D${currentRow}`).font = { bold: true } as any;
+    currentRow += 1;
+    ws.mergeCells(`D${currentRow}:F${currentRow}`);
+    ws.getCell(`D${currentRow}`).value = 'By signing below, I authorize this order and agree to the pricing, shipping charges, and payment terms outlined in this Proforma Invoice.';
+    (ws.getCell(`D${currentRow}`) as any).alignment = { wrapText: true } as any;
+    currentRow += 1; ws.mergeCells(`D${currentRow}:F${currentRow}`); ws.getCell(`D${currentRow}`).value = 'Authorized Signature: ______________________________________';
+    currentRow += 1; ws.mergeCells(`D${currentRow}:F${currentRow}`); ws.getCell(`D${currentRow}`).value = 'Printed Name: _____________________________________________';
+    currentRow += 1; ws.mergeCells(`D${currentRow}:F${currentRow}`); ws.getCell(`D${currentRow}`).value = 'Date: _____/_____/_______';
+    const authEndRow = currentRow;
 
-    currentRow = totalsEndRow + 7; const signatureRow = currentRow; ws.getCell(`E${currentRow}`).value = "Customer's Signature"; ws.getCell(`E${currentRow}`).border = { top: { style: 'thin' } } as any; (ws.getCell(`E${currentRow}`) as any).alignment = { horizontal: 'center' } as any;
+    // Center align most cells, then left-align authorization block
+    try {
+      ws.eachRow({ includeEmpty: true }, (row: any) => {
+        row.eachCell({ includeEmpty: true }, (cell: any) => {
+          const prev = (cell.alignment || {}) as any;
+          cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: Boolean(prev.wrapText) } as any;
+        });
+      });
+    } catch {}
+    try {
+      for (let r = authStartRow; r <= authEndRow; r++) {
+        (ws.getCell(`D${r}`) as any).alignment = { horizontal: 'left', vertical: 'middle', wrapText: true } as any;
+        (ws.getCell(`E${r}`) as any).alignment = { horizontal: 'left', vertical: 'middle', wrapText: true } as any;
+        (ws.getCell(`F${r}`) as any).alignment = { horizontal: 'left', vertical: 'middle', wrapText: true } as any;
+      }
+    } catch {}
 
+    // Social section: place below authorization block (no extra signature line)
+    const signatureRow = authEndRow;
     currentRow = signatureRow + 7; ws.getCell(`E${currentRow}`).value = 'Follow us on social media !'; (ws.getCell(`E${currentRow}`) as any).alignment = { horizontal: 'left' } as any;
     try {
       const socialImg = await fetchImageBase64(['/socialmedia-qrcode.png']); const idSocial = wb.addImage({ base64: socialImg.base64, extension: socialImg.ext }); const imgRow = currentRow + 1; ws.addImage(idSocial, { tl: { col: 4.2, row: imgRow }, ext: { width: 130, height: 60 } });
@@ -526,6 +595,9 @@ export default function EarlyBuy() {
       return Number.isFinite(v) ? numberFmt2.format(v) : '';
     };
 
+    // Brief toast while we hydrate details needed for the export
+    try { toast.info('Preparing export…'); } catch {}
+
     // Group duplicate lines so pallet header/items render once, with multiple summary rows
     const groupLinesMap = new Map<string, { display: string; palletName: string; lineItem: string; lines: Array<{ discount: number; qty: number }> }>();
     for (const l of lines) {
@@ -550,11 +622,35 @@ export default function EarlyBuy() {
         itemsByGroup[gLower] = snap.itemsAtAdd as any[];
         return;
       }
-      try {
-        const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
-        itemsByGroup[gLower] = Array.isArray((data as any)?.items) ? (data as any).items : [];
-      } catch { itemsByGroup[gLower] = []; }
+      // Try fetch with a quick retry window
+      const fetchWithRetry = async () => {
+        for (let i = 0; i < 2; i++) {
+          try {
+            const { data } = await api.get(`/pallet-inventory/groups/${encodeURIComponent(g)}`);
+            itemsByGroup[gLower] = Array.isArray((data as any)?.items) ? (data as any).items : [];
+            return;
+          } catch {
+            itemsByGroup[gLower] = [];
+          }
+          if (i === 0) { try { await new Promise(res => setTimeout(res, 150)); } catch {} }
+        }
+      };
+      await fetchWithRetry();
     }));
+
+    // Validate: for each group, ensure we have at least pallet meta (line item/name) or nonzero quantity
+    try {
+      let invalid = false;
+      for (const [key, meta] of Array.from(groupLinesMap.entries())) {
+        const hasQty = Array.isArray(meta.lines) && meta.lines.some(x => Number(x.qty) > 0);
+        const hasMeta = Boolean(String(meta?.lineItem || meta?.palletName || '').trim());
+        if (!hasQty && !hasMeta) { invalid = true; break; }
+      }
+      if (invalid) {
+        try { toast.error('Some pallet details are still loading. Please try export again in a moment.'); } catch {}
+        return;
+      }
+    } catch {}
 
     // Colors and widths matching Orders PDF
     const blue = '#DDEBF7';
@@ -619,6 +715,13 @@ export default function EarlyBuy() {
               { text: 'Email:', fillColor: blue, bold: true, border: [true, true, true, true] },
               { text: customerEmail || '', border: [true, true, true, true] },
             ],
+            [
+              {},
+              { text: 'Company Name:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: companyName || '', border: [true, true, true, true] },
+              { text: 'Customer Account:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: customerNumber || '', border: [true, true, true, true] },
+            ],
           ],
         },
         layout: 'noHorizontalLines',
@@ -632,6 +735,7 @@ export default function EarlyBuy() {
           body: [
             [ { text: orderNumber, fillColor: blue, bold: true, border: [true, true, true, true] }, { text: 'To:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: customerName || '', border: [true, true, true, true] }, { text: 'Phone:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: customerPhone || '', border: [true, true, true, true] } ],
             [ { text: '', border: [true, false, true, true] }, { text: 'Address:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: shippingAddress || '', border: [true, true, true, true] }, { text: 'Email:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: customerEmail || '', border: [true, true, true, true] } ],
+            [ { text: '', border: [true, false, true, true] }, { text: 'Company Name:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: companyName || '', border: [true, true, true, true] }, { text: 'Customer Account:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: customerNumber || '', border: [true, true, true, true] } ],
           ],
         },
         layout: 'noHorizontalLines',
@@ -639,20 +743,7 @@ export default function EarlyBuy() {
       });
     }
 
-    // Status and dates block (table matching Orders proportions)
-    const sStatus = String(status || '').toUpperCase();
-    content.push({
-      table: {
-        widths: [240, 200, '*'],
-        body: [
-          [ { text: 'Status:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: sStatus, bold: true, border: [true, true, true, true] }, { text: '', border: [false, false, false, false] } ],
-          [ { text: 'Estimated Shipdate for Customer:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: estFulfillment || '', bold: true, border: [true, true, true, true] }, { text: '', border: [false, false, false, false] } ],
-          [ { text: 'Estimated Arrival Date:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: estDelivered || '', bold: true, border: [true, true, true, true] }, { text: '', border: [false, false, false, false] } ],
-        ],
-      },
-      layout: 'noHorizontalLines',
-      margin: [0, 0, 0, 8],
-    });
+    // Removed Status and Estimated date rows per request
 
     // Per-pallet sections
     for (const [gKey, gMeta] of groupLinesMap.entries()) {
@@ -712,7 +803,7 @@ export default function EarlyBuy() {
       content.push({ text: ' ', margin: [0, 2, 0, 2] });
     }
 
-    // Totals including Payment Terms
+    // Totals + Authorization (two-column section to match Orders PDF)
     const subN = Number(computedSubTotal);
     const subRounded = Number.isFinite(subN) ? Number(Number(subN).toFixed(2)) : NaN;
     const sp = Number(shippingPercent);
@@ -723,28 +814,37 @@ export default function EarlyBuy() {
     const grandRounded = Number.isFinite(grandN) ? Number(Number(grandN).toFixed(2)) : NaN;
     content.push({
       table: {
-        widths: [120, 120],
-        body: [
-          [ { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(subRounded) ? `$${subRounded.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
-          [ { text: shipLabel, fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(shipAmt) ? `$${shipAmt.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
-          [ { text: 'GRAND TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(grandRounded) ? `$${grandRounded.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
-          [ { text: 'PAYMENT TERMS', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: String(paymentTerms || ''), alignment: 'center', bold: true, border: [true, true, true, true] } ],
-        ],
+        widths: ['*', '*'],
+        body: [[
+          {
+            table: {
+              widths: [120, 140],
+              body: [
+                [ { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(subRounded) ? `$${subRounded.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
+                [ { text: shipLabel, fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(shipAmt) ? `$${shipAmt.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
+                [ { text: 'GRAND TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(grandRounded) ? `$${grandRounded.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
+                [ { text: 'PAYMENT TERMS', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: String(paymentTerms || ''), alignment: 'center', bold: true, border: [true, true, true, true] } ],
+              ],
+            },
+            layout: 'noHorizontalLines',
+            border: [false, false, false, false],
+            margin: [0, 6, 12, 0],
+          },
+          {
+            stack: [
+              { text: 'Order Authorization', bold: true, fontSize: 14, alignment: 'left', margin: [0, 0, 0, 8] },
+              { text: 'By signing below, I authorize this order and agree to the pricing, shipping charges, and payment terms outlined in this Proforma Invoice.', bold: true, fontSize: 11, alignment: 'left', margin: [0, 0, 0, 12] },
+              { text: 'Authorized Signature: ______________________________________', bold: true, fontSize: 11, alignment: 'left', margin: [0, 0, 0, 10] },
+              { text: 'Printed Name: _____________________________________________', bold: true, fontSize: 11, alignment: 'left', margin: [0, 0, 0, 10] },
+              { text: 'Date: _____/_____/_______', bold: true, fontSize: 11, alignment: 'left' },
+            ],
+            border: [false, false, false, false],
+          }
+        ]],
       },
-      layout: 'noHorizontalLines',
+      layout: 'noBorders',
       margin: [0, 6, 0, 0],
     });
-
-    // Confirmation block merged across right side
-    content.push({
-      table: { widths: ['*','*','*','*','*','*'], body: [[ { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: 'I hereby confirm the order and agree to the payment terms stated in this Proforma Invoice', colSpan: 3, alignment: 'center', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] } ]] },
-      layout: 'noHorizontalLines',
-      margin: [0, 12, 0, 0],
-    });
-
-    // Spacer and signature line
-    content.push({ text: ' ', margin: [0, 40, 0, 0] });
-    content.push({ table: { widths: ['*','*','*','*','*','*'], body: [[ { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: "Customer's Signature", alignment: 'center', border: [false, true, false, false] }, { text: '', border: [false,false,false,false] } ]] }, layout: 'noHorizontalLines', margin: [0, 0, 0, 0] });
 
     // Spacer to social section
     content.push({ text: ' ', margin: [0, 70, 0, 0] });
@@ -770,7 +870,7 @@ export default function EarlyBuy() {
     const docDefinition = { pageOrientation: 'landscape', pageMargins: [20,20,20,20], content, defaultStyle: { fontSize: 9, alignment: 'center' } } as any;
     const fname = `early-buy-${orderNo}.pdf`;
     (pdfMake as any).createPdf(docDefinition).download(fname);
-  }, [editingOrder, lines, customerName, customerPhone, shippingAddress, customerEmail, status, estFulfillment, estDelivered, groupPriceByName, palletDescByGroup, computedSubTotal, shippingPercent, computedGrandTotal, numberFmt2, paymentTerms]);
+  }, [editingOrder, lines, customerName, customerPhone, shippingAddress, customerEmail, companyName, customerNumber, groupPriceByName, palletDescByGroup, computedSubTotal, shippingPercent, computedGrandTotal, numberFmt2, paymentTerms]);
 
   useEffect(() => {
     try {
@@ -970,7 +1070,8 @@ export default function EarlyBuy() {
         }
       } catch {}
       const unitAtAdd = Number.isFinite(unit) ? unit : (Number.isFinite(fallbackUnit) && fallbackUnit > 0 ? fallbackUnit : undefined);
-      return { ...a, qty: 0, unitPriceAtAdd: unitAtAdd, itemsAtAdd: itemsSnap } as any;
+      // Default Order Qty to 1 for newly added pallets
+      return { ...a, qty: 1, unitPriceAtAdd: unitAtAdd, itemsAtAdd: itemsSnap } as any;
     }));
     setLines(prev => [...prev, ...enriched]);
     try {
@@ -1048,6 +1149,7 @@ export default function EarlyBuy() {
     },
     { field: 'customerEmail', headerName: 'Customer Email', width: 220 },
     { field: 'customerName', headerName: 'Customer Name', width: 180 },
+    { field: 'companyName', headerName: 'Company Name', width: 200 },
     {
       field: 'createdAt',
       headerName: 'Order Created',
@@ -1153,6 +1255,9 @@ export default function EarlyBuy() {
               setCustomerName(r.customerName);
               setCustomerPhone(r.customerPhone);
               setShippingAddress(r.shippingAddress);
+              try { setSalesRepresentative(String((r as any)?.salesRepresentative || '')); } catch {}
+              try { setCustomerNumber(String((r as any)?.customerNumber || '')); } catch {}
+              try { setCompanyName(String((r as any)?.companyName || '')); } catch {}
               setCreatedAt(r.createdAt);
               setEstFulfillment(r.estFulfillment);
               setEstDelivered(r.estDelivered);
@@ -1206,7 +1311,7 @@ export default function EarlyBuy() {
     return (orders || []).filter((o) => {
       const statusOk = st === 'all' ? true : normalizeStatus(o.status) === st;
       if (!q) return statusOk;
-      const hay = `${o.id} ${o.customerEmail} ${o.customerName}`.toLowerCase();
+      const hay = `${o.id} ${o.customerEmail} ${o.customerName} ${o.companyName || ''}`.toLowerCase();
       return statusOk && hay.includes(q);
     });
   }, [orders, tableQDebounced, tableStatus]);
@@ -1385,6 +1490,9 @@ export default function EarlyBuy() {
         customerName: String(d?.customerName || ''),
         customerPhone: String(d?.customerPhone || ''),
         shippingAddress: String(d?.shippingAddress || ''),
+        companyName: String(d?.companyName || ''),
+        customerNumber: String(d?.customerNumber || ''),
+        salesRepresentative: String(d?.salesRepresentative || ''),
         originalPrice: String(d?.originalPrice || ''),
         shippingPercent: String(d?.shippingPercent || ''),
         discountPercent: String(d?.discountPercent || ''),
@@ -1630,6 +1738,11 @@ export default function EarlyBuy() {
     setInvalidDiscountRows(new Set());
     if (rows !== lines) setLines(rows);
 
+    // Read latest Sales Rep from input ref (uncontrolled)
+    const salesRepValue = (salesRepInputRef.current && typeof salesRepInputRef.current.value === 'string')
+      ? salesRepInputRef.current.value
+      : salesRepresentative;
+
     try {
       const normalizedLines = rows.map(l => ({
         ...l,
@@ -1657,6 +1770,9 @@ export default function EarlyBuy() {
         customerName,
         customerPhone,
         shippingAddress,
+        salesRepresentative: salesRepValue,
+        customerNumber,
+        companyName,
         originalPrice: computedSubTotal,
         shippingPercent,
         paymentTerms,
@@ -1713,6 +1829,7 @@ export default function EarlyBuy() {
     // reset form
     setStatus('processing');
     setCustomerEmail(''); setCustomerName(''); setCustomerPhone(''); setShippingAddress('');
+    setSalesRepresentative(''); setCustomerNumber(''); setCompanyName('');
     setCreatedAt(new Date().toISOString().slice(0,10)); setContainerArrival(''); setEstFulfillment(''); setEstDelivered('');
     setOriginalPrice(''); setShippingPercent(''); setDiscountPercent(''); setNotes('');
     setLastUpdatedAt('');
@@ -1759,6 +1876,10 @@ export default function EarlyBuy() {
     setCustomerName('');
     setCustomerPhone('');
     setShippingAddress('');
+    setSalesRepresentative('');
+    try { if (salesRepInputRef.current) salesRepInputRef.current.value = ''; } catch {}
+    setCustomerNumber('');
+    setCompanyName('');
     setCreatedAt(new Date().toISOString().slice(0,10));
     setEstFulfillment('');
     setEstDelivered('');
@@ -1851,6 +1972,9 @@ export default function EarlyBuy() {
               setCustomerName(row.customerName);
               setCustomerPhone(row.customerPhone);
               setShippingAddress(row.shippingAddress);
+              try { setSalesRepresentative(String((row as any)?.salesRepresentative || '')); } catch {}
+              try { setCustomerNumber(String((row as any)?.customerNumber || '')); } catch {}
+              try { setCompanyName(String((row as any)?.companyName || '')); } catch {}
               setCreatedAt(row.createdAt);
               setContainerArrival(String((row as any).containerArrival || ''));
               setEstFulfillment(row.estFulfillment);
@@ -1907,40 +2031,72 @@ export default function EarlyBuy() {
         <DialogTitle>{editingOrder ? `Edit Order - ${editingOrder.id}` : 'New Early Buy Order'}</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
-            <Stack direction={{ xs:'column', sm:'row' }} spacing={2}>
+            <Box sx={{
+              display: 'grid',
+              gridTemplateColumns: { xs: '1fr', md: '1fr 1fr 1fr' },
+              gap: 2,
+              alignItems: 'center',
+            }}>
               <TextField size="small" label="Warehouse" value="MPG" disabled fullWidth />
               {/* Status is always editable */}
               <TextField size="small" select label="Status" value={status} onChange={(e)=> handleStatusChange(e.target.value)} fullWidth disabled={!isStatusEditable}>
                 {STATUS_OPTIONS.map(op => (<MenuItem key={op.value} value={op.value}>{op.label}</MenuItem>))}
               </TextField>
-            </Stack>
+              <TextField
+                label="Sales Representative"
+                size="small"
+                defaultValue={salesRepresentative}
+                inputRef={(el)=> { salesRepInputRef.current = el; }}
+                fullWidth
+              />
+            </Box>
             <Typography variant="subtitle2">Customer</Typography>
-            <Stack direction={{ xs:'column', sm:'row' }} spacing={2}>
+            <Box sx={{
+              display: 'grid',
+              gridTemplateColumns: { xs: '1fr', md: '1fr 1fr 1fr' },
+              gap: 2,
+              alignItems: 'center',
+            }}>
+              <Button
+                variant="contained"
+                size="small"
+                onClick={()=>{ setCustomerPickOpen(true); loadCustomers(); }}
+                sx={{ height: 40, width: { xs: '100%', sm: 'auto' } }}
+              >
+                Browse Customer
+              </Button>
               <TextField
                 size="small"
                 required
                 label="Customer Email"
-                defaultValue={customerEmail}
-                onBlur={(e)=> setCustomerEmail(e.target.value)}
+                value={customerEmail}
+                onChange={(e)=> setCustomerEmail(e.target.value)}
                 fullWidth
-                disabled={!isEditable}
+                disabled
                 error={Boolean(customerEmail) && !isValidEmail(customerEmail)}
                 helperText={Boolean(customerEmail) && !isValidEmail(customerEmail) ? 'Enter a valid email address' : ''}
               />
-              <TextField size="small" required label="Customer Name" defaultValue={customerName} onBlur={(e)=> setCustomerName(e.target.value)} fullWidth disabled={!isEditable} />
-            </Stack>
-            <Box sx={{ display: 'flex' }}>
+              <TextField size="small" required label="Customer Name" value={customerName} onChange={(e)=> setCustomerName(e.target.value)} fullWidth disabled />
+            </Box>
+            <Box sx={{
+              display: 'grid',
+              gridTemplateColumns: { xs: '1fr', md: '1fr 1fr 1fr' },
+              gap: 2,
+              alignItems: 'center',
+            }}>
               <TextField
                 size="small"
                 required
                 label="Phone Number"
-                defaultValue={customerPhone}
-                onBlur={(e)=> setCustomerPhone(e.target.value)}
-                disabled={!isEditable}
-                sx={{ width: { xs: '100%', sm: 320 } }}
+                value={customerPhone}
+                onChange={(e)=> setCustomerPhone(e.target.value)}
+                disabled
+                fullWidth
               />
+              <TextField disabled label="Customer Number" size="small" value={customerNumber} fullWidth />
+              <TextField disabled label="Company Name" size="small" value={companyName} fullWidth />
             </Box>
-            <TextField size="small" required label="Shipping Address" defaultValue={shippingAddress} onBlur={(e)=> setShippingAddress(e.target.value)} fullWidth multiline minRows={2} disabled={!isEditable} />
+            <TextField size="small" required label="Shipping Address" value={shippingAddress} onChange={(e)=> setShippingAddress(e.target.value)} fullWidth multiline minRows={2} disabled />
             <Typography variant="subtitle2">Dates</Typography>
             {(() => {
               const isYmd = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(String(s||''));
@@ -2112,7 +2268,9 @@ export default function EarlyBuy() {
                           }
                         : c
                 )}
-                onRowDoubleClick={(p: any) => {
+                onCellDoubleClick={(p: any) => {
+                  const field = String(p?.field || '').trim();
+                  if (field === 'discount' || field === 'qty' || field === 'actions') return;
                   const g = String(p?.row?.groupName || '').trim();
                   if (g) openPalletItems({ groupName: g });
                 }}
@@ -2149,6 +2307,76 @@ export default function EarlyBuy() {
           <Button variant="outlined" onClick={exportEarlyBuyXlsx} disabled={!lines.length}>Export .xlsx</Button>
           <Button variant="outlined" onClick={exportEarlyBuyPdf} disabled={!lines.length}>Export .pdf</Button>
           <Button variant="contained" onClick={saveNewOrder}>Save</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Customer Picker Dialog */}
+      <Dialog open={customerPickOpen} onClose={()=> setCustomerPickOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle>Browse Customer</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              size="small"
+              label="Search"
+              placeholder="Email, name, phone, number, company, address"
+              defaultValue={customerPickQ}
+              onChange={(e)=>{
+                if (customerPickDebounceRef.current) try { clearTimeout(customerPickDebounceRef.current); } catch {}
+                const val = e.target.value;
+                customerPickDebounceRef.current = setTimeout(()=> setCustomerPickQ(val), 300);
+              }}
+            />
+            <Paper sx={{ height: 420, width: '100%', p: 1 }}>
+              <DataGrid
+                rows={(Array.isArray(customerRows) ? customerRows : [])
+                  .filter((r:any)=>{
+                    const s = customerPickQ.trim().toLowerCase();
+                    if (!s) return true;
+                    const hay = [r.email||'', r.name||'', r.phone||'', r.accountNumber||'', r.companyName||'', r.shippingAddress||''].join(' ').toLowerCase();
+                    return hay.includes(s);
+                  })
+                  .map((r:any)=> ({ ...r, id: r._id }))}
+                columns={[
+                  {
+                    field: 'actions',
+                    headerName: 'Actions',
+                    width: 120,
+                    sortable: false,
+                    filterable: false,
+                    renderCell: (params: any) => (
+                      <Button size="small" variant="outlined" onClick={()=>{
+                        const r = params.row;
+                        setCustomerEmail(String(r.email||''));
+                        setCustomerName(String(r.name||''));
+                        setCustomerPhone(String(r.phone||''));
+                        setCustomerNumber(String(r.accountNumber||''));
+                        if (r && String(r.salesRepresentative || '').trim()) {
+                          setSalesRepresentative(String(r.salesRepresentative));
+                        }
+                        setCompanyName(String(r.companyName||''));
+                        setShippingAddress(String(r.shippingAddress||''));
+                        setCustomerPickOpen(false);
+                      }}>Use</Button>
+                    ),
+                  },
+                  { field: 'email', headerName: 'Customer Email', flex: 1.4, minWidth: 200 },
+                  { field: 'name', headerName: 'Customer Name', flex: 1.2, minWidth: 160 },
+                  { field: 'phone', headerName: 'Phone Number', width: 150 },
+                  { field: 'accountNumber', headerName: 'Customer Number', width: 160 },
+                  { field: 'companyName', headerName: 'Company Name', width: 180 },
+                  { field: 'shippingAddress', headerName: 'Shipping Address', flex: 1.6, minWidth: 240 },
+                ]}
+                loading={customerLoading}
+                disableRowSelectionOnClick
+                initialState={{ pagination: { paginationModel: { pageSize: 5, page: 0 } } }}
+                pageSizeOptions={[5, 10, 20, 50]}
+                density="compact"
+              />
+            </Paper>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={()=> setCustomerPickOpen(false)}>Close</Button>
         </DialogActions>
       </Dialog>
 

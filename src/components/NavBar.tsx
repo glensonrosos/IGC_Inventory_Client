@@ -246,7 +246,10 @@ export default function NavBar() {
           <Menu anchorEl={userMenuEl} open={userMenuOpen} onClose={()=> setUserMenuEl(null)} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }} transformOrigin={{ vertical: 'top', horizontal: 'right' }}>
             <MenuItem onClick={()=> { setUserMenuEl(null); nav('/profile'); }}>Profile</MenuItem>
             {isAdmin && (
-              <MenuItem onClick={()=> { setUserMenuEl(null); nav('/users'); }}>Users Management</MenuItem>
+              <>
+                <MenuItem onClick={()=> { setUserMenuEl(null); nav('/users'); }}>Users Management</MenuItem>
+                <MenuItem onClick={()=> { setUserMenuEl(null); nav('/customers'); }}>Customer Management</MenuItem>
+              </>
             )}
             <MenuItem onClick={()=> { setUserMenuEl(null); logout(); }}>Logout</MenuItem>
           </Menu>

@@ -14,6 +14,7 @@ import Transfer from './pages/Transfer';
 import Profile from './pages/Profile';
 import OnProcess from './pages/OnProcess';
 import Users from './pages/Users';
+import Customers from './pages/Customers';
 
 const RequireAuth = ({ children }: { children: React.ReactElement }) => {
   const token = localStorage.getItem('token');
@@ -42,6 +43,7 @@ export default function App() {
       <Route path="/ship" element={<RequireAuth><Ship /></RequireAuth>} />
       <Route path="/transfer" element={<RequireAuth><Transfer /></RequireAuth>} />
       <Route path="/users" element={<RequireAuth><Users /></RequireAuth>} />
+      <Route path="/customers" element={<RequireAuth><Customers /></RequireAuth>} />
       <Route path="/profile" element={<RequireAuth><Profile /></RequireAuth>} />
       <Route path="*" element={<Navigate to="/pallets" />} />
     </Routes>

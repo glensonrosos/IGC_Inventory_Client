@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Container, Typography, Paper, Stack, TextField, Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions, LinearProgress, MenuItem, Box, Chip, Accordion, AccordionSummary, AccordionDetails, Tooltip } from '@mui/material';
+import { Container, Typography, Paper, Stack, TextField, Button, IconButton, Dialog, DialogTitle, DialogContent, DialogActions, LinearProgress, MenuItem, Box, Chip, Accordion, AccordionSummary, AccordionDetails, Tooltip, Backdrop, CircularProgress } from '@mui/material';
 import Autocomplete from '@mui/material/Autocomplete';
 import DeleteIcon from '@mui/icons-material/Delete';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
@@ -77,7 +77,24 @@ export default function Orders() {
   const manualEditRefreshInFlightRef = useRef(false);
   const manualEditRefreshLastAtRef = useRef(0);
   const toast = useToast();
+  const [exportPreparing, setExportPreparing] = useState(false);
   const [groupPriceByName, setGroupPriceByName] = useState<Record<string, number>>({});
+  const [manualCustomerId, setManualCustomerId] = useState<string>('');
+  const [customerPickOpen, setCustomerPickOpen] = useState(false);
+  const [customerPickQ, setCustomerPickQ] = useState('');
+  const customerPickDebounceRef = useRef<any>(null);
+  const [customerRows, setCustomerRows] = useState<any[]>([]);
+  const [customerLoading, setCustomerLoading] = useState(false);
+  // Debounce updates to search query without re-rendering on every keystroke
+  const loadCustomers = useCallback(async()=>{
+    setCustomerLoading(true);
+    try{
+      const { data } = await api.get('/customers');
+      const list = Array.isArray(data) ? data.filter((c:any)=> c?.enabled !== false) : [];
+      setCustomerRows(list);
+    } catch { setCustomerRows([]); }
+    finally { setCustomerLoading(false); }
+  },[]);
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [ordersRows, setOrdersRows] = useState<OrdersRow[]>([]);
   const ordersRowsRef = useRef<OrdersRow[]>([]);
@@ -104,6 +121,10 @@ export default function Orders() {
   const [manualCustomerEmail, setManualCustomerEmail] = useState('');
   const [manualCustomerName, setManualCustomerName] = useState('');
   const [manualCustomerPhone, setManualCustomerPhone] = useState('');
+  const [manualAccountNumber, setManualAccountNumber] = useState('');
+  const [manualSalesRepresentative, setManualSalesRepresentative] = useState('');
+  const [manualCompanyName, setManualCompanyName] = useState('');
+  const manualSalesRepInputRef = useRef<HTMLInputElement | null>(null);
   const [manualCreatedAt, setManualCreatedAt] = useState('');
   const [manualLastUpdatedAt, setManualLastUpdatedAt] = useState('');
   const [manualLastUpdatedBy, setManualLastUpdatedBy] = useState('');
@@ -750,9 +771,15 @@ export default function Orders() {
     setManualWarehouseId(String(row?.warehouseId || fixedWarehouseId));
     setManualStatus((normalizeStatus(row?.status || '') as any) || 'processing');
     setManualStatusTouched(false);
-    setManualCustomerEmail(String(row?.email || '').trim());
+    try { setManualCustomerId(String((row as any)?.customerId || '')); } catch {}
+    setManualCustomerEmail(String((row as any)?.customerEmail || row?.email || '').trim());
     setManualCustomerName(String(row?.customerName || '').trim());
     setManualCustomerPhone(String(row?.customerPhone || '').trim());
+    try {
+      setManualAccountNumber(String((row as any)?.accountNumber || '').trim());
+      setManualSalesRepresentative(String((row as any)?.salesRepresentative || '').trim());
+      setManualCompanyName(String((row as any)?.companyName || '').trim());
+    } catch {}
     setManualCreatedAt(toYmd(row?.createdAtOrder || row?.dateCreated || row?.createdAt));
     setManualLastUpdatedAt(toLocalDateTime((row as any)?.updatedAt || row?.createdAt || ''));
     setManualLastUpdatedBy(String((row as any)?.lastUpdatedBy || '').trim());
@@ -965,6 +992,11 @@ export default function Orders() {
           const data = await throttledApiGet<any>(`/orders/unfulfilled/${rawId}`, undefined, `unf:${rawId}`);
           setManualLastUpdatedAt(toLocalDateTime((data as any)?.updatedAt || (data as any)?.createdAt || ''));
           setManualLastUpdatedBy(String((data as any)?.lastUpdatedBy || '').trim());
+          try {
+            setManualAccountNumber(String((data as any)?.accountNumber || '').trim());
+            setManualSalesRepresentative(String((data as any)?.salesRepresentative || '').trim());
+            setManualCompanyName(String((data as any)?.companyName || '').trim());
+          } catch {}
           const nextStatus = (normalizeStatus((data as any)?.status || '') as any) || 'processing';
           if (!manualStatusTouched) setManualStatus(nextStatus);
           const fetched = toYmdLoose((data as any)?.estFulfillmentDate);
@@ -2237,6 +2269,25 @@ export default function Orders() {
     const safe = (v: any) => String(v ?? '').replace(/[\/\\:*?"<>|]/g, '-');
     const fname = `order-details-${safe(orderNumber || 'order')}-(${safe(sStatus || 'status')})-(${ts}).xlsx`;
 
+    // Pre-export validation: allow empty Company, Account, and Phone; require basic fields and valid lines
+    try {
+      const missing: string[] = [];
+      if (!String(manualCustomerName || '').trim()) missing.push('Customer Name');
+      if (!String(manualShippingAddress || '').trim()) missing.push('Shipping Address');
+      const rowsList = Array.isArray(manualOrderRows) ? manualOrderRows : [];
+      if (rowsList.length === 0) missing.push('Order Lines');
+      if (missing.length) { toast.error(`Missing required data: ${missing.join(', ')}`); return; }
+
+      const badLines = rowsList.filter((r: any) => {
+        const g = String(r?.groupName || '').trim();
+        const rowId = String(r?.id || '').trim();
+        const qtyText = (manualOrderQtyByGroup as any)?.[rowId] ?? (manualOrderQtyByGroup as any)?.[g] ?? (r as any)?.orderQty ?? (r as any)?.qty;
+        const q = Number(qtyText);
+        return !g || !Number.isFinite(q) || q <= 0;
+      });
+      if (badLines.length) { toast.error('Some line items are incomplete (group or quantity). Please review the order lines.'); return; }
+    } catch {}
+
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet('Order Details');
     ws.properties.defaultRowHeight = 18;
@@ -2374,19 +2425,25 @@ export default function Orders() {
     ws.getCell('D5').value = 'Email:'; ws.getCell('D5').font = bold; (ws.getCell('D5') as any).fill = lightBlue;
     ws.getCell('E5').value = String(manualCustomerEmail || '');
 
+    // Add Company Name and Customer Account row
+    ws.getCell('B6').value = 'Company Name:'; ws.getCell('B6').font = bold; (ws.getCell('B6') as any).fill = lightBlue;
+    ws.getCell('C6').value = String(manualCompanyName || '');
+    ws.getCell('D6').value = 'Customer Account:'; ws.getCell('D6').font = bold; (ws.getCell('D6') as any).fill = lightBlue;
+    ws.getCell('E6').value = String(manualAccountNumber || '');
+
     // Borders for C5, C6, E5, E6
     const thinBorder = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } } as const;
     ws.getCell('C4').border = thinBorder as any;
     ws.getCell('C5').border = thinBorder as any;
     ws.getCell('E4').border = thinBorder as any;
     ws.getCell('E5').border = thinBorder as any;
+    ws.getCell('C6').border = thinBorder as any;
+    ws.getCell('E6').border = thinBorder as any;
     // Additional borders per spec
     ;(['B1','C1','D1','E1','B2','C2','D2','E2','B4','B5','D4','D5'] as const).forEach((addr) => {
       (ws.getCell(addr) as any).border = thinBorder as any;
     });
-    ws.getCell('A7').value = 'Status:'; ws.getCell('A7').font = bold; (ws.getCell('A7') as any).fill = lightBlue; (ws.getCell('A7') as any).border = thinBorder as any; ws.getCell('B7').value = sStatus; ws.getCell('B7').font = bold; (ws.getCell('B7') as any).border = thinBorder as any;
-    ws.getCell('A8').value = 'Estimated Shipdate for Customer:'; ws.getCell('A8').font = bold; (ws.getCell('A8') as any).fill = lightBlue; (ws.getCell('A8') as any).border = thinBorder as any; ws.getCell('B8').value = String(manualEstFulfillment || ''); ws.getCell('B8').font = bold; (ws.getCell('B8') as any).border = thinBorder as any;
-    ws.getCell('A9').value = 'Estimated Arrival Date:'; ws.getCell('A9').font = bold; (ws.getCell('A9') as any).fill = lightBlue; (ws.getCell('A9') as any).border = thinBorder as any; ws.getCell('B9').value = String(manualEstDelivered || ''); ws.getCell('B9').font = bold; (ws.getCell('B9') as any).border = thinBorder as any;
+    // Removed Status and Estimated date rows per request
 
     // Dynamic Pallet Logic: group by pallet and print details once; add one summary per duplicate line
     let currentRow = 11;
@@ -2479,24 +2536,29 @@ export default function Orders() {
     ws.getCell(`A${currentRow}`).value = 'PAYMENT TERMS'; ws.getCell(`A${currentRow}`).font = bold; (ws.getCell(`A${currentRow}`) as any).fill = lightBlue; (ws.getCell(`A${currentRow}`) as any).border = thinBorder as any; ws.getCell(`B${currentRow}`).value = String(manualPaymentTerms || ''); ws.getCell(`B${currentRow}`).font = bold; (ws.getCell(`B${currentRow}`) as any).border = thinBorder as any;
     const totalsEndRow = currentRow;
 
-    // Confirmation text: 2 rows below totals, merged D:F and the row below it; wrap + centered
+    // Order Authorization block: title + text + signature lines, left-aligned, merged D:F
     currentRow += 2;
-    const confirmRow = currentRow;
-    const confirmMerge = `D${confirmRow}:F${confirmRow + 1}`;
-    ws.mergeCells(confirmMerge);
-    ws.getCell(`D${confirmRow}`).value = 'I hereby confirm the order and agree to the payment terms stated in this Proforma Invoice';
-    ws.getCell(`D${confirmRow}`).alignment = { wrapText: true, horizontal: 'center', vertical: 'middle' } as any;
-    // Give the confirmation block a little height
-    try { ws.getRow(confirmRow).height = 28; ws.getRow(confirmRow + 1).height = 22; } catch {}
+    const authStartRow = currentRow;
+    ws.mergeCells(`D${currentRow}:F${currentRow}`);
+    ws.getCell(`D${currentRow}`).value = 'Order Authorization';
+    ws.getCell(`D${currentRow}`).font = { bold: true } as any;
+    currentRow += 1;
+    ws.mergeCells(`D${currentRow}:F${currentRow}`);
+    ws.getCell(`D${currentRow}`).value = 'By signing below, I authorize this order and agree to the pricing, shipping charges, and payment terms outlined in this Proforma Invoice.';
+    ws.getCell(`D${currentRow}`).alignment = { wrapText: true } as any;
+    currentRow += 1;
+    ws.mergeCells(`D${currentRow}:F${currentRow}`);
+    ws.getCell(`D${currentRow}`).value = 'Authorized Signature: ______________________________________';
+    currentRow += 1;
+    ws.mergeCells(`D${currentRow}:F${currentRow}`);
+    ws.getCell(`D${currentRow}`).value = 'Printed Name: _____________________________________________';
+    currentRow += 1;
+    ws.mergeCells(`D${currentRow}:F${currentRow}`);
+    ws.getCell(`D${currentRow}`).value = 'Date: _____/_____/_______';
+    const authEndRow = currentRow;
 
-    // Signature: ~7 rows below totals, column E with top border
-    currentRow = totalsEndRow + 7;
-    const signatureRow = currentRow;
-    ws.getCell(`E${currentRow}`).value = "Customer's Signature";
-    ws.getCell(`E${currentRow}`).border = { top: { style: 'thin' } } as any;
-    ws.getCell(`E${currentRow}`).alignment = { horizontal: 'center' } as any;
-
-    // Social media section at the very bottom: place text exactly 7 rows below the signature
+    // Social media section at the very bottom: place text below the authorization block
+    const signatureRow = authEndRow; // use end of authorization as anchor
     currentRow = signatureRow + 7;
     ws.getCell(`E${currentRow}`).value = 'Follow us on social media !';
     (ws.getCell(`E${currentRow}`) as any).alignment = { horizontal: 'left' } as any;
@@ -2526,6 +2588,15 @@ export default function Orders() {
       });
     } catch {}
 
+    // Override alignment for authorization block to be left
+    try {
+      for (let r = authStartRow; r <= authEndRow; r++) {
+        (ws.getCell(`D${r}`) as any).alignment = { horizontal: 'left', vertical: 'middle', wrapText: true } as any;
+        (ws.getCell(`E${r}`) as any).alignment = { horizontal: 'left', vertical: 'middle', wrapText: true } as any;
+        (ws.getCell(`F${r}`) as any).alignment = { horizontal: 'left', vertical: 'middle', wrapText: true } as any;
+      }
+    } catch {}
+
     const buffer = await wb.xlsx.writeBuffer();
     const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
     const url = URL.createObjectURL(blob);
@@ -2542,6 +2613,8 @@ export default function Orders() {
     manualShippingAddress,
     manualEstFulfillment,
     manualEstDelivered,
+    manualCompanyName,
+    manualAccountNumber,
     manualOrderSubTotal,
     manualShippingPercent,
     manualOrderRows,
@@ -2573,6 +2646,19 @@ export default function Orders() {
     if (manualMode !== 'edit' || !manualEditRow) return;
     const orderNumber = String(manualEditRow?.orderNumber || manualEditRow?.rawId || manualEditRow?.id || '').trim();
     const sStatus = String(normalizeStatus(manualStatus || '') || '').toUpperCase();
+
+    setExportPreparing(true);
+    // Ensure pallet picker data is loaded to avoid blanks in Pallet ID/Name and derived pricing
+    try {
+      const wid = String(manualWarehouseId || '').trim();
+      const hasPicker = Array.isArray(manualPickerRows) && manualPickerRows.length > 0;
+      if (wid && !hasPicker) {
+        await refreshManualPicker(wid);
+      }
+    } catch {}
+
+    // Show a brief toast while we hydrate details needed for the export
+    try { toast.info('Preparing export…'); } catch {}
 
     const sub = Number(manualOrderSubTotal);
     const sp = Number(manualShippingPercent);
@@ -2692,6 +2778,13 @@ export default function Orders() {
               { text: 'Email:', fillColor: blue, bold: true, border: [true, true, true, true] },
               { text: manualCustomerEmail || '', border: [true, true, true, true] },
             ],
+            [
+              {},
+              { text: 'Company Name:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: manualCompanyName || '', border: [true, true, true, true] },
+              { text: 'Customer Account:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: manualAccountNumber || '', border: [true, true, true, true] },
+            ],
             
           ],
         },
@@ -2717,6 +2810,13 @@ export default function Orders() {
               { text: 'Email:', fillColor: blue, bold: true, border: [true, true, true, true] },
               { text: manualCustomerEmail || '', border: [true, true, true, true] },
             ],
+            [
+              { text: '', border: [true, false, true, true] },
+              { text: 'Company Name:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: manualCompanyName || '', border: [true, true, true, true] },
+              { text: 'Customer Account:', fillColor: blue, bold: true, border: [true, true, true, true] },
+              { text: manualAccountNumber || '', border: [true, true, true, true] },
+            ],
           ],
         },
         layout: 'noHorizontalLines',
@@ -2724,19 +2824,44 @@ export default function Orders() {
       });
     }
 
-    content.push({
-      table: {
-        // Third filler column prevents the value cell from spanning full width
-        widths: [240, 200, '*'],
-        body: [
-          [ { text: 'Status:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: sStatus, bold: true, border: [true, true, true, true] }, { text: '', border: [false, false, false, false] } ],
-          [ { text: 'Estimated Shipdate for Customer:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: manualEstFulfillment || '', bold: true, border: [true, true, true, true] }, { text: '', border: [false, false, false, false] } ],
-          [ { text: 'Estimated Arrival Date:', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: manualEstDelivered || '', bold: true, border: [true, true, true, true] }, { text: '', border: [false, false, false, false] } ],
-        ],
-      },
-      layout: 'noHorizontalLines',
-      margin: [0, 0, 0, 8],
-    });
+    // Removed Status and Estimated date rows per request
+
+    // Proactively hydrate all groups' items so downstream tables have data
+    try {
+      const rowsListPre = Array.isArray(manualOrderRows) ? manualOrderRows : [];
+      const groupsPre = new Set<string>();
+      for (const r of rowsListPre as any[]) {
+        const g = String(r?.groupName || '').trim();
+        if (g) groupsPre.add(g);
+      }
+      if (groupsPre.size) {
+        const fetchWithRetry = async (g: string) => {
+          for (let i = 0; i < 2; i++) {
+            try { await getGroupItems(g); } catch {}
+            // brief pause between attempts
+            if (i === 0) { try { await new Promise((r)=>setTimeout(r,150)); } catch {} }
+          }
+        };
+        await Promise.all(Array.from(groupsPre).map(async (g) => { await fetchWithRetry(g); }));
+        // Quick validation: ensure we have at least pallet meta or quantities for each group
+        let invalid = false;
+        const pickerRowsNow = Array.isArray(manualPickerRows) ? manualPickerRows : [];
+        const byMapNow = (manualPickerRowByGroup as any)?.get ? (manualPickerRowByGroup as any) : null;
+        for (const g of Array.from(groupsPre)) {
+          const key = g.toLowerCase();
+          const hit = pickerRowsNow.find((p: any) => String(p?.groupName || '').trim().toLowerCase() === key);
+          const palletId = String((byMapNow?.get && byMapNow.get(g)?.lineItem) || hit?.lineItem || '').trim();
+          const grpRows = (Array.isArray(manualOrderRows) ? manualOrderRows : []).filter((row: any) => String(row?.groupName || '').trim().toLowerCase() === key);
+          const hasQty = grpRows.some((row: any) => Number.isFinite(Number(row?.orderQty ?? row?.qty)) && Number(row?.orderQty ?? row?.qty) > 0);
+          if (!palletId && !hasQty) { invalid = true; break; }
+        }
+        if (invalid) {
+          try { toast.error('Some pallet details are still loading. Please try export again in a moment.'); } catch {}
+          setExportPreparing(false);
+          return;
+        }
+      }
+    } catch {}
 
     const rowsList = Array.isArray(manualOrderRows) ? manualOrderRows : [];
     const groups = new Map<string, any[]>();
@@ -2810,45 +2935,39 @@ export default function Orders() {
       content.push({ text: ' ', margin: [0, 2, 0, 2] });
     }
 
+    // Totals + Authorization (two-column section)
     content.push({
       table: {
-        widths: [120, 120],
-        body: [
-          [ { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(subRounded) ? `$${subRounded.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
-          [ { text: shipLabel, fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(shipAmt) ? `$${shipAmt.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
-          [ { text: 'GRAND TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(grand) ? `$${grand.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
-          [ { text: 'PAYMENT TERMS', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: String(manualPaymentTerms || ''), alignment: 'center', bold: true, border: [true, true, true, true] } ],
-        ],
+        widths: ['*', '*'],
+        body: [[
+          {
+            table: {
+              widths: [120, 140],
+              body: [
+                [ { text: 'SUB TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(subRounded) ? `$${subRounded.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
+                [ { text: shipLabel, fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(shipAmt) ? `$${shipAmt.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
+                [ { text: 'GRAND TOTAL', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: Number.isFinite(grand) ? `$${grand.toFixed(2)}` : '', alignment: 'center', bold: true, border: [true, true, true, true] } ],
+                [ { text: 'PAYMENT TERMS', fillColor: blue, bold: true, border: [true, true, true, true] }, { text: String(manualPaymentTerms || ''), alignment: 'center', bold: true, border: [true, true, true, true] } ],
+              ],
+            },
+            layout: 'noHorizontalLines',
+            border: [false, false, false, false],
+            margin: [0, 6, 12, 0],
+          },
+          {
+            stack: [
+              { text: 'Order Authorization', bold: true, fontSize: 14, alignment: 'left', margin: [0, 0, 0, 8] },
+              { text: 'By signing below, I authorize this order and agree to the pricing, shipping charges, and payment terms outlined in this Proforma Invoice.', bold: true, fontSize: 11, alignment: 'left', margin: [0, 0, 0, 12] },
+              { text: 'Authorized Signature: ______________________________________', bold: true, fontSize: 11, alignment: 'left', margin: [0, 0, 0, 10] },
+              { text: 'Printed Name: _____________________________________________', bold: true, fontSize: 11, alignment: 'left', margin: [0, 0, 0, 10] },
+              { text: 'Date: _____/_____/_______', bold: true, fontSize: 11, alignment: 'left' },
+            ],
+            border: [false, false, false, false],
+          }
+        ]],
       },
-      layout: 'noHorizontalLines',
+      layout: 'noBorders',
       margin: [0, 6, 0, 0],
-    });
-
-    // Confirmation block merged across right side (no borders)
-    content.push({
-      table: {
-        widths: ['*','*','*','*','*','*'],
-        body: [
-          [ { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: 'I hereby confirm the order and agree to the payment terms stated in this Proforma Invoice', colSpan: 3, alignment: 'center', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] } ],
-        ],
-      },
-      layout: 'noHorizontalLines',
-      margin: [0, 12, 0, 0],
-    });
-
-    // Spacer: 4 rows between confirmation and signature (approximate)
-    content.push({ text: ' ', margin: [0, 40, 0, 0] });
-
-    // Signature line (column E): only top border
-    content.push({
-      table: {
-        widths: ['*','*','*','*','*','*'],
-        body: [
-          [ { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: '', border: [false,false,false,false] }, { text: "Customer's Signature", alignment: 'center', border: [false, true, false, false] }, { text: '', border: [false,false,false,false] } ],
-        ],
-      },
-      layout: 'noHorizontalLines',
-      margin: [0, 0, 0, 0],
     });
 
     // Spacer: 7 rows between signature and social media (approximate)
@@ -2906,8 +3025,9 @@ export default function Orders() {
     } as any;
 
     const safe = (v: any) => String(v ?? '').replace(/[\/\\:*?"<>|]/g, '-');
-    const fname = `order-details-${safe(orderNumber || 'order')}-(${safe(sStatus || 'status')}).pdf`;
+    const fname = `order-details-${safe(orderNumber || 'order')}.pdf`;
     (pdfMake as any).createPdf(docDefinition).download(fname);
+    setExportPreparing(false);
   }, [
     manualMode,
     manualEditRow,
@@ -3737,6 +3857,7 @@ export default function Orders() {
           lines: Array.isArray(o?.lines) ? o.lines : [],
           allocations: Array.isArray(o?.allocations) ? o.allocations : [],
           customerName: String(o?.customerName || ''),
+          companyName: String(o?.companyName || ''),
           customerPhone: String(o?.customerPhone || ''),
           shippingAddress: String(o?.shippingAddress || ''),
           paymentTerms: String(o?.paymentTerms || ''),
@@ -3771,6 +3892,7 @@ export default function Orders() {
         email: String(o?.email || ''),
         lines: Array.isArray(o?.lines) ? o.lines : [],
         customerName: String(o?.billingName || o?.shippingName || ''),
+        companyName: String(o?.company || o?.billingCompany || o?.shippingCompany || ''),
         customerPhone: String(o?.billingPhone || o?.shippingPhone || ''),
         shippingAddress: String(o?.shippingStreet || o?.shippingAddress1 || ''),
         createdAtOrder: normalizeDateValue(o?.createdAtOrder),
@@ -4203,6 +4325,7 @@ export default function Orders() {
     },
     { field: 'email', headerName: 'Email', flex: 1, minWidth: 190 },
     { field: 'customerName', headerName: 'Customer Name', flex: 1, minWidth: 190, renderCell: (p: any) => String((p?.row as any)?.customerName || '-') },
+    { field: 'companyName', headerName: 'Company Name', flex: 1, minWidth: 190, renderCell: (p: any) => String((p?.row as any)?.companyName || '-') },
     { field: 'lineCount', headerName: 'Lines', width: 80, type: 'number' },
     { field: 'totalQty', headerName: 'Qty', width: 80, type: 'number' },
   ], [warehouses]);
@@ -4253,6 +4376,7 @@ export default function Orders() {
         r.status,
         r.email,
         (r as any).customerName || '',
+        (r as any).companyName || '',
         r.warehouseName || '',
       ].join(' ').toLowerCase();
       return hay.includes(t);
@@ -4274,9 +4398,14 @@ export default function Orders() {
     setManualWarehouseId(fixedWarehouseId);
     setManualStatus('processing');
     setManualStatusTouched(false);
+    setManualCustomerId('');
     setManualCustomerEmail('');
     setManualCustomerName('');
     setManualCustomerPhone('');
+    setManualAccountNumber('');
+    setManualSalesRepresentative('');
+    try { if (manualSalesRepInputRef.current) manualSalesRepInputRef.current.value = ''; } catch {}
+    setManualCompanyName('');
     setManualCreatedAt(new Date().toISOString().slice(0, 10));
     setManualEstFulfillment('');
     setManualEstDelivered('');
@@ -4658,9 +4787,13 @@ export default function Orders() {
         if (manualStatus === 'processing' || manualStatus === 'ready_to_ship') {
           // Let the details endpoint recompute status based on reservations after edits.
           await api.put(`/orders/unfulfilled/${manualEditRow.rawId}`, {
+            customerId: manualCustomerId || undefined,
             customerEmail: manualCustomerEmail.trim(),
             customerName: manualCustomerName.trim(),
             customerPhone: manualCustomerPhone.trim(),
+            accountNumber: manualAccountNumber.trim(),
+            salesRepresentative: manualSalesRepresentative.trim(),
+            companyName: manualCompanyName.trim(),
             originalPrice: originalPriceRounded,
             shippingPercent: manualShippingPercent ? Number(manualShippingPercent) : undefined,
             // order-level discount removed; per-line discounts are used
@@ -4713,9 +4846,13 @@ export default function Orders() {
           // Only persist line edits first if shipping from READY TO SHIP so allocations/inventory deduction use latest quantities.
           if (manualPrevStatus === 'ready_to_ship' && manualStatus === 'shipped') {
             const { data: updated } = await api.put(`/orders/unfulfilled/${manualEditRow.rawId}`, {
+              customerId: manualCustomerId || undefined,
               customerEmail: manualCustomerEmail.trim(),
               customerName: manualCustomerName.trim(),
               customerPhone: manualCustomerPhone.trim(),
+              accountNumber: manualAccountNumber.trim(),
+              salesRepresentative: manualSalesRepresentative.trim(),
+              companyName: manualCompanyName.trim(),
               originalPrice: originalPriceRounded,
               shippingPercent: manualShippingPercent ? Number(manualShippingPercent) : undefined,
               // order-level discount removed; per-line discounts are used
@@ -4889,12 +5026,17 @@ export default function Orders() {
         }
       } catch {}
 
+      const salesRepToSend = String((manualSalesRepInputRef.current?.value ?? manualSalesRepresentative) || '').trim();
       const { data: created } = await api.post('/orders/unfulfilled', {
         warehouseId: manualWarehouseId,
         status: 'processing',
+        customerId: manualCustomerId || undefined,
         customerEmail: manualCustomerEmail.trim(),
         customerName: manualCustomerName.trim(),
         customerPhone: manualCustomerPhone.trim(),
+        accountNumber: manualAccountNumber.trim(),
+        salesRepresentative: salesRepToSend,
+        companyName: manualCompanyName.trim(),
         createdAtOrder: manualCreatedAt || undefined,
         originalPrice: originalPriceRounded,
         shippingPercent: manualShippingPercent ? Number(manualShippingPercent) : undefined,
@@ -5078,6 +5220,74 @@ export default function Orders() {
         </DialogActions>
       </Dialog>
 
+      {/* Customer Picker Dialog */}
+      <Dialog open={customerPickOpen} onClose={()=> setCustomerPickOpen(false)} fullWidth maxWidth="md">
+        <DialogTitle>Browse Customer</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <TextField
+              size="small"
+              label="Search"
+              placeholder="Email, name, phone, number, company, address"
+              defaultValue={customerPickQ}
+              onChange={(e)=>{
+                if (customerPickDebounceRef.current) try { clearTimeout(customerPickDebounceRef.current); } catch {}
+                const val = e.target.value;
+                customerPickDebounceRef.current = setTimeout(()=> setCustomerPickQ(val), 300);
+              }}
+            />
+            <Paper sx={{ height: 420, width: '100%', p: 1 }}>
+              <DataGrid
+                rows={customerRows
+                  .filter((r:any)=>{
+                    const s = customerPickQ.trim().toLowerCase();
+                    if (!s) return true;
+                    const hay = [r.email||'', r.name||'', r.phone||'', r.accountNumber||'', r.companyName||'', r.shippingAddress||''].join(' ').toLowerCase();
+                    return hay.includes(s);
+                  })
+                  .map((r:any)=> ({ ...r, id: r._id }))}
+                columns={[
+                  {
+                    field: 'actions',
+                    headerName: 'Actions',
+                    width: 120,
+                    sortable: false,
+                    filterable: false,
+                    renderCell: (params: any) => (
+                      <Button size="small" variant="outlined" onClick={()=>{
+                        const r = params.row;
+                        setManualCustomerId(String(r._id || r.id));
+                        setManualCustomerEmail(String(r.email||''));
+                        setManualCustomerName(String(r.name||''));
+                        setManualCustomerPhone(String(r.phone||''));
+                        setManualAccountNumber(String(r.accountNumber||''));
+                        setManualCompanyName(String(r.companyName||''));
+                        setManualShippingAddress(String(r.shippingAddress||''));
+                        setCustomerPickOpen(false);
+                      }}>Use</Button>
+                    ),
+                  },
+                  { field: 'email', headerName: 'Customer Email', flex: 1.4, minWidth: 200 },
+                  { field: 'name', headerName: 'Customer Name', flex: 1.2, minWidth: 160 },
+                  { field: 'phone', headerName: 'Phone Number', width: 150 },
+                  { field: 'accountNumber', headerName: 'Customer Number', width: 160 },
+                  { field: 'companyName', headerName: 'Company Name', width: 180 },
+                  { field: 'shippingAddress', headerName: 'Shipping Address', flex: 1.6, minWidth: 240 },
+                ]}
+                loading={customerLoading}
+                disableRowSelectionOnClick
+                initialState={{ pagination: { paginationModel: { pageSize: 5, page: 0 } } }}
+                pageSizeOptions={[5, 10, 20, 50]}
+                density="compact"
+              />
+            </Paper>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={()=> setCustomerPickOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={reportOpen} onClose={() => setReportOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Pallet Sales Report</DialogTitle>
         <DialogContent>
@@ -5114,10 +5324,11 @@ export default function Orders() {
         <DialogTitle>{manualMode === 'edit' ? `Edit Order${manualEditRow?.orderNumber ? ` - ${manualEditRow.orderNumber}` : ''}` : 'Add Order'}</DialogTitle>
         <DialogContent>
           <Typography variant="subtitle2" sx={{ mt: 1, mb: 1 }}>Customer</Typography>
+          {/* Row 1: Warehouse, Status, Sales Rep remain above the customer grids */}
           <Box
             sx={{
               display: 'grid',
-              gridTemplateColumns: { xs: '1fr', md: 'repeat(4, minmax(0, 1fr))' },
+              gridTemplateColumns: { xs: '1fr', md: 'repeat(3, minmax(0, 1fr))' },
               gap: 2,
               mb: 2,
             }}
@@ -5136,7 +5347,7 @@ export default function Orders() {
                   value={manualStatus}
                   onChange={(e)=> { setManualStatusTouched(true); setManualStatus(e.target.value as any); }}
                   disabled={manualIsLocked}
-                  sx={{ flex: 1, minWidth: 200 }}
+                  sx={{ flex: 1, minWidth: 400 }}
                   SelectProps={{
                     renderValue: (value: any) => {
                       const v = String(value || '').toLowerCase();
@@ -5196,23 +5407,68 @@ export default function Orders() {
                     <HelpOutlineIcon fontSize="inherit" />
                   </IconButton>
                 </Tooltip>
+                <TextField
+                  label="Sales Representative"
+                  size="small"
+                  value={manualSalesRepresentative}
+                  onChange={(e)=> setManualSalesRepresentative(e.target.value)}
+                  disabled={manualIsLocked}
+                  sx={{ flex: 1, minWidth: 450,ml:8 }}
+                />
               </Box>
-            ) : null}
-            <TextField disabled={manualFieldsLocked} label="Customer Email" size="small" defaultValue={manualCustomerEmail} onBlur={(e)=>setManualCustomerEmail(e.target.value)} error={!isValidEmail(manualCustomerEmail)} helperText={!isValidEmail(manualCustomerEmail) ? 'Required (valid email)' : ''} />
-            <TextField disabled={manualFieldsLocked} label="Customer Name" size="small" defaultValue={manualCustomerName} onBlur={(e)=>setManualCustomerName(e.target.value)} error={!String(manualCustomerName||'').trim()} helperText={!String(manualCustomerName||'').trim() ? 'Required' : ''} />
-            <TextField disabled={manualFieldsLocked} label="Phone Number" size="small" defaultValue={manualCustomerPhone} onBlur={(e)=>setManualCustomerPhone(e.target.value)} error={!String(manualCustomerPhone||'').trim()} helperText={!String(manualCustomerPhone||'').trim() ? 'Required' : ''} />
-            <TextField
-              fullWidth
-              label="Shipping Address"
-              size="small"
-              defaultValue={manualShippingAddress}
-              onBlur={(e)=>setManualShippingAddress(e.target.value)}
-              error={!String(manualShippingAddress||'').trim()}
-              helperText={!String(manualShippingAddress||'').trim() ? 'Required' : ''}
-              disabled={manualFieldsLocked}
-              sx={{ gridColumn: { xs: '1 / -1', md: '1 / span 4' } }}
-            />
+            ) : (
+              <TextField
+                label="Sales Representative"
+                size="small"
+                defaultValue={manualSalesRepresentative}
+                inputRef={manualSalesRepInputRef}
+                disabled={manualIsLocked}
+                sx={{ minWidth: 200 }}
+              />
+            )}
           </Box>
+
+          {/* Row 2: Browse + Customer Email + Customer Name (3 columns) */}
+          <Box
+            sx={{
+              display: 'grid',
+              gridTemplateColumns: { xs: '1fr', md: 'repeat(3, minmax(0, 1fr))' },
+              gap: 2,
+              mb: 2,
+            }}
+          >
+            <Button variant="contained" size="small" onClick={()=>{ setCustomerPickOpen(true); loadCustomers(); }} sx={{ height: 40 }}>Browse Customer</Button>
+            <TextField disabled label="Customer Email" size="small" value={manualCustomerEmail} />
+            <TextField disabled label="Customer Name" size="small" value={manualCustomerName} />
+          </Box>
+
+          {/* Row 3: Phone Number + Customer Number + Company Name (3 columns) */}
+          <Box
+            sx={{
+              display: 'grid',
+              gridTemplateColumns: { xs: '1fr', md: 'repeat(3, minmax(0, 1fr))' },
+              gap: 2,
+              mb: 2,
+            }}
+          >
+            <TextField disabled label="Phone Number" size="small" value={manualCustomerPhone} />
+            <TextField disabled label="Customer Number" size="small" value={manualAccountNumber} />
+            <TextField disabled label="Company Name" size="small" value={manualCompanyName} />
+          </Box>
+
+          {/* Row 4: Shipping Address full width */}
+          <TextField
+            fullWidth
+            label="Shipping Address"
+            size="small"
+            multiline
+            minRows={2}
+            value={manualShippingAddress}
+            error={!String(manualShippingAddress||'').trim()}
+            helperText={!String(manualShippingAddress||'').trim() ? 'Required' : ''}
+            disabled
+            sx={{ mb: 2 }}
+          />
 
           <Typography variant="subtitle2" sx={{ mb: 1 }}>Dates</Typography>
           <Box
@@ -5543,8 +5799,11 @@ export default function Orders() {
             <DataGrid
               rows={manualOrderRows}
               columns={manualOrderColumns as any}
-              onRowDoubleClick={(p: any) => {
-                const g = String(p?.row?.groupName || '').trim();
+              onCellDoubleClick={(params: any) => {
+                const field = String(params?.field || '');
+                // Do NOT open the Pallet Items modal when double-clicking these editable/action columns
+                if (field === 'discountPercent' || field === 'orderQty' || field === 'remove') return;
+                const g = String(params?.row?.groupName || '').trim();
                 if (g) openOrderableGroupItems({ groupName: g });
               }}
               getRowClassName={(params: any) => {
@@ -5565,8 +5824,8 @@ export default function Orders() {
               slots={{ toolbar: GridToolbar }}
               slotProps={{ toolbar: { showQuickFilter: true, quickFilterProps: { debounceMs: 250 } } as any }}
               pagination
-              pageSizeOptions={[5, 10, 20, 50]}
-              initialState={{ pagination: { paginationModel: { page: 0, pageSize: 50 } } }}
+              pageSizeOptions={[5, 10, 20, 50, 100]}
+              initialState={{ pagination: { paginationModel: { page: 0, pageSize: 100 } } }}
             />
           </div>
 
